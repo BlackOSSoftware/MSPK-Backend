@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "928441080852",
+    "project_id": "mspk-trade-solutions",
+    "storage_bucket": "mspk-trade-solutions.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:928441080852:android:2fbc708a8feeb28876db01",
+        "android_client_info": {
+          "package_name": "com.mspktrade.solution"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDaX8cE0jU9m1CoQUwEin7D-AAoUuD7ka0"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

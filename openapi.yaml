@@ -1,0 +1,334 @@
+openapi: 3.0.0
+info:
+  title: MSPK Trading Backend API
+  description: API documentation for the MSPK Trading platform backend.
+  version: 1.0.0
+servers:
+  - url: http://localhost:5000/v1
+    description: Local Development Server
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+security:
+  - bearerAuth: []
+
+paths:
+  # ============================================================
+  # AUTHENTICATION
+  # ============================================================
+  /auth/register:
+    post:
+      summary: Register a new user
+      tags: [Auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, email, password, mobile]
+              properties:
+                name: { type: string }
+                email: { type: string, format: email }
+                password: { type: string, minLength: 8 }
+                mobile: { type: string }
+      responses:
+        201:
+          description: User registered successfully
+        400:
+          description: Validation error
+
+  /auth/login:
+    post:
+      summary: Login user
+      tags: [Auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string }
+      responses:
+        200:
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user: { type: object }
+                  tokens: { type: object }
+
+  /auth/send-otp:
+    post:
+      summary: Send OTP for verification
+      tags: [Auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [mobile]
+              properties:
+                mobile: { type: string }
+      responses:
+        200:
+          description: OTP sent successfully
+
+  /auth/verify-otp:
+    post:
+      summary: Verify OTP
+      tags: [Auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [mobile, otp]
+              properties:
+                mobile: { type: string }
+                otp: { type: string }
+      responses:
+        200:
+          description: OTP verified
+
+  /auth/me:
+    get:
+      summary: Get current user profile
+      tags: [Auth]
+      responses:
+        200:
+          description: User profile data
+    patch:
+      summary: Update user profile
+      tags: [Auth]
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                avatar: { type: string, format: binary }
+      responses:
+        200:
+          description: Profile updated
+
+  # ============================================================
+  # MARKET DATA
+  # ============================================================
+  /market/segments:
+    get:
+      summary: Get available market segments
+      tags: [Market]
+      security: []
+      responses:
+        200:
+          description: List of segments
+
+  /market/tickers:
+    get:
+      summary: Get subscription-based tickers (Watchlist)
+      tags: [Market]
+      responses:
+        200:
+          description: List of allowed tokens/tickers
+
+  /market/history:
+    get:
+      summary: Get historical candle data
+      tags: [Market]
+      parameters:
+        - in: query
+          name: symbol
+          schema: { type: string }
+          required: true
+        - in: query
+          name: resolution
+          schema: { type: string, enum: ["1", "5", "15", "30", "60", "D", "W"] }
+          required: true
+        - in: query
+          name: from
+          schema: { type: integer } # Unix timestamp
+        - in: query
+          name: to
+          schema: { type: integer } # Unix timestamp
+      responses:
+        200:
+          description: Historical candle data
+
+  /market/search:
+    get:
+      summary: Search for instruments
+      tags: [Market]
+      parameters:
+        - in: query
+          name: q
+          schema: { type: string }
+          required: true
+      responses:
+        200:
+          description: Search results
+
+  # ============================================================
+  # SIGNALS
+  # ============================================================
+  /signals:
+    get:
+      summary: Get trading signals
+      tags: [Signals]
+      parameters:
+        - in: query
+          name: status
+          schema: { type: string, enum: ["Open", "Closed", "Active"] }
+      responses:
+        200:
+          description: List of signals
+    post:
+      summary: Create a new signal (Admin only)
+      tags: [Signals]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [symbol, type, entryPrice, stopLoss, target1]
+              properties:
+                symbol: { type: string }
+                type: { type: string, enum: ["BUY", "SELL"] }
+                entryPrice: { type: number }
+                stopLoss: { type: number }
+                target1: { type: number }
+      responses:
+        201:
+          description: Signal created
+
+  /signals/{signalId}:
+    get:
+      summary: Get specific signal details
+      tags: [Signals]
+      parameters:
+        - in: path
+          name: signalId
+          required: true
+          schema: { type: string }
+      responses:
+        200:
+          description: Signal details
+
+  # ============================================================
+  # SUBSCRIPTIONS & PLANS
+  # ============================================================
+  /plans:
+    get:
+      summary: Get available subscription plans
+      tags: [Plans]
+      security: []
+      responses:
+        200:
+          description: List of plans
+
+  /subscribe/purchase:
+    post:
+      summary: Purchase a subscription plan
+      tags: [Subscription]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [planId]
+              properties:
+                planId: { type: string }
+                paymentMethod: { type: string }
+      responses:
+        200:
+          description: Subscription initiated
+
+  /subscribe/status:
+    get:
+      summary: Get current user subscription status
+      tags: [Subscription]
+      responses:
+        200:
+          description: Subscription status
+
+  /subscriptions/admin/all:
+    get:
+      summary: Get all user subscriptions (Admin)
+      tags: [Subscription]
+      responses:
+        200:
+          description: List of all subscriptions
+
+  # ============================================================
+  # DASHBOARD & TICKETS
+  # ============================================================
+  /dashboard/tickets:
+    get:
+      summary: Get user support tickets
+      tags: [Dashboard]
+      responses:
+        200:
+          description: List of tickets
+    post:
+      summary: Create a new support ticket
+      tags: [Dashboard]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [subject, message]
+              properties:
+                subject: { type: string }
+                message: { type: string }
+                priority: { type: string, enum: ["Low", "Medium", "High"] }
+      responses:
+        201:
+          description: Ticket created
+
+  /dashboard/stats:
+    get:
+      summary: Get admin dashboard statistics
+      tags: [Dashboard]
+      responses:
+        200:
+          description: Admin usage stats
+
+  # ============================================================
+  # ADMIN
+  # ============================================================
+  /admin/users:
+    get:
+      summary: Get all users
+      tags: [Admin]
+      responses:
+        200:
+          description: List of users
+
+  /admin/system/health:
+    get:
+      summary: Get system health status
+      tags: [Admin]
+      responses:
+        200:
+          description: System health metrics

@@ -1,0 +1,1 @@
+info: [KITE_RAW_DEBUG] Candle 0: {"date":"2026-02-03T03:45:00.000Z","open":1473.9,"high":1489.5,"low":1435,"close":1443.9,"volume":11147506}

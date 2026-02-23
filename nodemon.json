@@ -1,0 +1,14 @@
+{
+    "watch": [
+        "src",
+        "server.js"
+    ],
+    "ext": "js,json",
+    "ignore": [
+        "logs/*",
+        "debug_alltick_log.txt",
+        "temp/*",
+        "*.log"
+    ],
+    "delay": "1000"
+}
