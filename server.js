@@ -31,11 +31,29 @@ process.exit = (code) => {
 
 const startServer = async () => {
   try {
+    let dbConnected = false;
+    let redisConnected = false;
+
     // 1. Connect to Database
-    await connectDB();
+    try {
+      await connectDB();
+      dbConnected = true;
+    } catch (error) {
+      logger.error('MongoDB connection failed:', error.message);
+      if (config.env === 'production') {
+        throw error;
+      }
+      logger.warn('Running in degraded mode without MongoDB (development only).');
+    }
     
     // 2. Connect to Redis
-    await connectRedis();
+    redisConnected = await connectRedis();
+    if (!redisConnected) {
+      if (config.env === 'production') {
+        throw new Error('Redis connection failed');
+      }
+      logger.warn('Running in degraded mode without Redis (development only).');
+    }
 
     // 2.5 Initialize Firebase
     initializeFirebase();
@@ -48,18 +66,24 @@ const startServer = async () => {
     // 4. Initialize Background Services
     marketDataService.init(); 
     initWebSocket(server);
-    await strategyService.seedStrategies(); 
-    strategyService.startEngine();
-    hybridStrategyService.start();
-    signalMonitor.start(); 
+    if (dbConnected) {
+      await strategyService.seedStrategies();
+      strategyService.startEngine();
+      hybridStrategyService.start();
+      signalMonitor.start();
+      schedulerService.initScheduler();
+      subscriptionCron.start(); // Start subscription expiry checker
+    } else {
+      logger.warn('Skipped DB-dependent background services because MongoDB is unavailable.');
+    }
     
     // Initialize Economic Service with API key
     economicService.initialize(config.fmpApiKey);
     logger.info('Economic Service initialized with FMP API key');
-    
-    schedulerService.initScheduler();
-    schedulerService.initScheduler();
-    subscriptionCron.start(); // Start subscription expiry checker
+
+    if (!redisConnected) {
+      logger.warn('Redis unavailable: pub/sub, queue workers, and cache-backed features may not work.');
+    }
 
     
     // Handle signals for graceful shutdown

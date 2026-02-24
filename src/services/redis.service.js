@@ -19,10 +19,14 @@ redisClient.on('connect', () => logger.info('Redis Client Connected'));
 redisSubscriber.on('error', (err) => logger.error('Redis Subscriber Error', err));
 
 const connectRedis = async () => {
-    // No await here, let it connect in background
-    redisClient.connect().catch(err => logger.error('Redis Client Initial Connection Error', err));
-    redisSubscriber.connect().catch(err => logger.error('Redis Subscriber Initial Connection Error', err));
-}
+  try {
+    await Promise.all([redisClient.connect(), redisSubscriber.connect()]);
+    return true;
+  } catch (err) {
+    logger.error('Redis Initial Connection Error', err);
+    return false;
+  }
+};
 
 export {
   redisClient,
