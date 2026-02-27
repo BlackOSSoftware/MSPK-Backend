@@ -17,8 +17,6 @@ const verifyToken = async (token, type) => {
 };
 
 const generateAuthTokens = async (user) => {
-  const accessTokenExpires = Math.floor(Date.now() / 1000) + config.jwt.expiresIn * 60; // if expiresIn is minutes
-  
   // Include did (Device ID) and v (Token Version) for single session check
   const accessToken = jwt.sign({ 
       sub: user.id, 

@@ -21,17 +21,6 @@ const updateUserById = async (userId, updateBody) => {
   return user;
 };
 
-const updateKyc = async (userId, kycData) => {
-    const user = await getUserById(userId);
-    if (!user) {
-        throw new ApiError(httpStatus.NOT_FOUND, 'User not found');
-    }
-
-    user.kyc = { ...user.kyc, ...kycData, status: 'pending' }; // Reset to pending on update
-    await user.save();
-    return user;
-};
-
 const queryUsers = async (filter, options) => {
     const users = await User.paginate(filter, options);
     return users;
@@ -78,7 +67,6 @@ const liquidateUserById = async (userId) => {
 export default {
   getUserById,
   updateUserById,
-  updateKyc,
   queryUsers,
   deleteUserById,
   blockUserById,

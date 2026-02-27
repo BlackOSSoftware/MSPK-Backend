@@ -161,6 +161,9 @@ const updateMe = catchAsync(async (req, res) => {
     console.log('UpdateMe Hit. Body:', req.body);
     console.log('UpdateMe File:', req.file);
     const updateBody = req.body;
+    delete updateBody.isWhatsAppEnabled;
+    delete updateBody.isNotificationEnabled;
+
     if (req.file) {
         updateBody.profile = updateBody.profile || {};
         updateBody.profile.avatar = req.file.path.replace(/\\/g, "/"); // Normalize path
@@ -169,15 +172,29 @@ const updateMe = catchAsync(async (req, res) => {
     res.send(user);
 });
 
-const updateKyc = catchAsync(async (req, res) => {
-    const user = await userService.updateKyc(req.user.id, req.body);
-    res.send(user);
+const logout = catchAsync(async (req, res) => {
+    // Invalidate current access token by bumping token version.
+    req.user.tokenVersion = (req.user.tokenVersion || 0) + 1;
+    req.user.currentDeviceId = null;
+    await req.user.save();
+
+    res.status(httpStatus.OK).send({ message: 'Logged out successfully.' });
 });
 
-const logout = catchAsync(async (req, res) => {
-    // Current implementation is stateless, but we can add token blacklisting here later
-    // For now, we just return success to indicate session closure
-    res.status(httpStatus.NO_CONTENT).send();
+const changePassword = catchAsync(async (req, res) => {
+    const { oldPassword, newPassword } = req.body;
+
+    const isOldPasswordValid = await req.user.matchPassword(oldPassword);
+    if (!isOldPasswordValid) {
+        return res.status(httpStatus.BAD_REQUEST).send({ message: 'Old password is incorrect.' });
+    }
+
+    req.user.password = newPassword;
+    req.user.tokenVersion = (req.user.tokenVersion || 0) + 1;
+    req.user.currentDeviceId = null;
+    await req.user.save();
+
+    res.status(httpStatus.OK).send({ message: 'Password changed successfully. Please log in again.' });
 });
 
 export default {
@@ -185,7 +202,7 @@ export default {
   login,
   getMe,
   updateMe,
-  updateKyc,
+  changePassword,
   logout,
   sendOtp,
   verifyOtp,

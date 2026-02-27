@@ -32,11 +32,6 @@ const userSchema = new mongoose.Schema(
       unique: true,
       sparse: true,
     },
-    kyc: {
-        status: { type: String, enum: ['Pending', 'Verified', 'Rejected'], default: 'Pending' }, // Cap matched
-        panCard: { type: String },
-        aadhaarCard: { type: String }
-    },
     profile: {
         avatar: { type: String },
         address: { type: String },
@@ -121,6 +116,10 @@ const userSchema = new mongoose.Schema(
 
 // Encrypt password using bcrypt
 userSchema.pre('save', async function () {
+  // Keep these feature flags always enabled and non-editable.
+  this.isWhatsAppEnabled = true;
+  this.isNotificationEnabled = true;
+
   if (!this.isModified('password')) {
     return;
   }

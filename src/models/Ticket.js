@@ -16,29 +16,30 @@ const ticketSchema = new mongoose.Schema(
       type: String,
       required: true,
     },
-    category: {
+    ticketType: {
       type: String,
-      enum: ['General', 'Technical', 'Billing', 'Feature Request', 'Other', 'PAYMENT', 'ACCOUNT', 'TECHNICAL', 'OTHER'], 
-      default: 'General',
+      required: true,
     },
-    priority: {
+    description: {
       type: String,
-      enum: ['low', 'medium', 'high', 'urgent', 'LOW', 'MEDIUM', 'HIGH'],
-      default: 'medium',
+      required: true,
+    },
+    contactEmail: {
+      type: String,
+      required: true,
+      trim: true,
+      lowercase: true,
+    },
+    contactNumber: {
+      type: String,
+      required: true,
+      trim: true,
     },
     status: {
       type: String,
-      enum: ['OPEN', 'IN_PROGRESS', 'RESOLVED', 'CLOSED'],
-      default: 'OPEN',
-    },
-    messages: [
-      {
-        sender: { type: String, enum: ['USER', 'ADMIN'], required: true },
-        message: { type: String, required: true },
-        attachments: [String],
-        timestamp: { type: Date, default: Date.now },
-      },
-    ],
+      enum: ['pending', 'resolved', 'rejected'],
+      default: 'pending',
+    }
   },
   {
     timestamps: true,

@@ -9,7 +9,6 @@ router.use(auth());
 // User Routes
 router.post('/tickets', dashboardController.createTicket);
 router.get('/tickets', dashboardController.getMyTickets);
-router.post('/tickets/:ticketId/reply', dashboardController.replyTicket);
 
 // Admin Routes (Would normally be under /admin/...)
 // But since we are creating a unified module, let's keep it here or separate?

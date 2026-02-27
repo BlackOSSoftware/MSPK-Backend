@@ -131,7 +131,6 @@ const getUsers = catchAsync(async (req, res) => {
           pnl: u.pnl || 0,
           
           joinDate: u.createdAt,
-          kycStatus: u.kyc?.status || 'Pending',
       };
   }));
   res.send(enrichedUsers);
@@ -194,7 +193,6 @@ const getUser = catchAsync(async (req, res) => {
       pnl: user.pnl || 0,
       
       joinDate: user.createdAt,
-      kycStatus: user.kyc?.status || 'Pending',
       
       // History
       subscriptionHistory: history.map(h => ({

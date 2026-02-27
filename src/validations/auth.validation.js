@@ -20,25 +20,24 @@ const login = {
   }),
 };
 
+const changePassword = {
+  body: Joi.object().keys({
+    oldPassword: Joi.string().required(),
+    newPassword: Joi.string().required().min(6),
+    confirmNewPassword: Joi.string().required().valid(Joi.ref('newPassword')),
+  }),
+};
+
 const updateProfile = {
     body: Joi.object().keys({
         name: Joi.string(),
         phone: Joi.string(),
-        isWhatsAppEnabled: Joi.boolean(),
-        isNotificationEnabled: Joi.boolean(),
         profile: Joi.object().keys({
             avatar: Joi.string().uri(),
             address: Joi.string(),
             city: Joi.string(),
             state: Joi.string()
         })
-    }).min(1)
-};
-
-const updateKyc = {
-    body: Joi.object().keys({
-        panCard: Joi.string().uri(),
-        aadhaarCard: Joi.string().uri()
     }).min(1)
 };
 
@@ -60,8 +59,8 @@ const verifyOtp = {
 export default {
   register,
   login,
+  changePassword,
   updateProfile,
-  updateKyc,
   sendOtp,
   verifyOtp
 };

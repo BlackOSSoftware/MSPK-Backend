@@ -20,7 +20,7 @@ router.route('/me')
     .get(authController.getMe)
     .patch(upload.single('avatar'), validate(authValidation.updateProfile), authController.updateMe);
 
-router.post('/me/kyc', validate(authValidation.updateKyc), authController.updateKyc);
+router.post('/change-password', validate(authValidation.changePassword), authController.changePassword);
 router.post('/logout', authController.logout);
 
 export default router;

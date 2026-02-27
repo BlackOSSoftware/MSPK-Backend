@@ -8,17 +8,12 @@ const getStats = catchAsync(async (req, res) => {
 });
 
 const createTicket = catchAsync(async (req, res) => {
-    // Initial message construction
-    const initialMessage = {
-        sender: 'USER',
-        message: req.body.message,
-        attachments: req.body.attachments
-    };
     const ticketBody = {
         subject: req.body.subject,
-        category: req.body.category,
-        priority: req.body.priority || 'MEDIUM',
-        initialMessage
+        ticketType: req.body.ticketType,
+        description: req.body.description,
+        contactEmail: req.body.contactEmail,
+        contactNumber: req.body.contactNumber
     };
     const ticket = await dashboardService.createTicket(ticketBody, req.user);
     res.status(httpStatus.CREATED).send(ticket);
@@ -35,21 +30,9 @@ const getAllTickets = catchAsync(async (req, res) => {
     res.send(tickets);
 });
 
-const replyTicket = catchAsync(async (req, res) => {
-    const sender = req.user.role === 'admin' ? 'ADMIN' : 'USER';
-    const messageData = {
-        sender,
-        message: req.body.message,
-        attachments: req.body.attachments
-    };
-    const ticket = await dashboardService.replyToTicket(req.params.ticketId, messageData);
-    res.send(ticket);
-});
-
 export default {
   getStats,
   createTicket,
   getMyTickets,
-  getAllTickets,
-  replyTicket
+  getAllTickets
 };
