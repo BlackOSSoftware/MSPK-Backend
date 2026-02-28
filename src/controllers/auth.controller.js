@@ -2,6 +2,7 @@ import httpStatus from 'http-status';
 import catchAsync from '../utils/catchAsync.js';
 import { authService, tokenService, userService, msg91Service, emailService } from '../services/index.js';
 import { redisClient } from '../services/redis.service.js'; // Direct client access for Email OTP
+import User from '../models/User.js';
 
 const register = catchAsync(async (req, res) => {
   // Check if phone/email is verified before creating account
@@ -23,8 +24,9 @@ const register = catchAsync(async (req, res) => {
 
 const sendOtp = catchAsync(async (req, res) => {
     const { type, identifier } = req.body; // type: 'phone' | 'email', identifier: '9198...' | 'abc@example.com'
+    const normalizedIdentifier = type === 'email' ? String(identifier || '').toLowerCase().trim() : identifier;
 
-    if (!identifier) {
+    if (!normalizedIdentifier) {
         return res.status(httpStatus.BAD_REQUEST).send({ message: 'Identifier is required' });
     }
 
@@ -34,15 +36,15 @@ const sendOtp = catchAsync(async (req, res) => {
         const templateId = process.env.MSG91_OTP_TEMPLATE_ID; 
         if (!templateId) return res.status(httpStatus.INTERNAL_SERVER_ERROR).send({ message: 'Server config missing OTP Template' });
         
-        const success = await msg91Service.sendOtp(identifier, templateId);
+        const success = await msg91Service.sendOtp(normalizedIdentifier, templateId);
         if (success) {
             res.send({ message: 'OTP sent successfully to phone' });
         } else {
             res.status(httpStatus.INTERNAL_SERVER_ERROR).send({ message: 'Failed to send OTP' });
         }
     } else if (type === 'email') {
-        const key = `email_otp:${identifier}`;
-        const dailyKey = `email_daily_count:${identifier}`;
+        const key = `email_otp:${normalizedIdentifier}`;
+        const dailyKey = `email_daily_count:${normalizedIdentifier}`;
 
         // 1. Check Daily Limit (Max 5)
         let dailyCount = await redisClient.get(dailyKey);
@@ -71,7 +73,7 @@ const sendOtp = catchAsync(async (req, res) => {
         await redisClient.set(key, otp, 'EX', 600);
         
         // Send Email
-        const sent = await emailService.sendEmailOtp(identifier, otp);
+        const sent = await emailService.sendEmailOtp(normalizedIdentifier, otp);
         
         if (sent) {
             // Increment Daily Count
@@ -92,26 +94,34 @@ const sendOtp = catchAsync(async (req, res) => {
 
 const verifyOtp = catchAsync(async (req, res) => {
     const { type, identifier, otp } = req.body;
+    const normalizedIdentifier = type === 'email' ? String(identifier || '').toLowerCase().trim() : identifier;
 
-    if (!identifier || !otp) {
+    if (!normalizedIdentifier || !otp) {
         return res.status(httpStatus.BAD_REQUEST).send({ message: 'Identifier and OTP are required' });
     }
 
     if (type === 'phone') {
-        const isValid = await msg91Service.verifyOtp(identifier, otp);
+        const isValid = await msg91Service.verifyOtp(normalizedIdentifier, otp);
         if (isValid) {
+            await User.updateOne({ phone: normalizedIdentifier }, { $set: { isPhoneVerified: true } });
             res.send({ message: 'Phone verified successfully', verified: true });
         } else {
             res.status(httpStatus.BAD_REQUEST).send({ message: 'Invalid OTP', verified: false });
         }
     } else if (type === 'email') {
-        const storedOtp = await redisClient.get(`email_otp:${identifier}`);
+        const storedOtp = await redisClient.get(`email_otp:${normalizedIdentifier}`);
         if (storedOtp === otp) {
-            await redisClient.del(`email_otp:${identifier}`); // Clear OTP
+            await redisClient.del(`email_otp:${normalizedIdentifier}`); // Clear OTP
+
+            // If user already exists, mark it verified so login works immediately.
+            await User.updateOne(
+                { email: normalizedIdentifier },
+                { $set: { isEmailVerified: true } }
+            );
             
             // Generate Verification Token for Lead Creation
             // Uses identifier (email) as subject
-            const verificationToken = tokenService.generateToken(identifier, Math.floor(Date.now() / 1000) + 900, 'EMAIL_VERIFICATION');
+            const verificationToken = tokenService.generateToken(normalizedIdentifier, Math.floor(Date.now() / 1000) + 900, 'EMAIL_VERIFICATION');
             
             res.send({ 
                 message: 'Email verified successfully', 
