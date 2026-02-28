@@ -121,7 +121,7 @@ const createTicket = async (ticketBody, user) => {
 
   const ticket = await Ticket.create({
     ticketId: `TK-${nextId}`,
-    user: user.id,
+    user: user?.id,
     subject: ticketBody.subject,
     ticketType: ticketBody.ticketType,
     description: ticketBody.description,

@@ -4,10 +4,11 @@ import dashboardController from '../controllers/dashboard.controller.js';
 
 const router = express.Router();
 
-router.use(auth());
-
 // User Routes
 router.post('/tickets', dashboardController.createTicket);
+
+router.use(auth());
+
 router.get('/tickets', dashboardController.getMyTickets);
 
 // Admin Routes (Would normally be under /admin/...)

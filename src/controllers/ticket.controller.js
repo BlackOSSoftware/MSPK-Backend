@@ -12,7 +12,7 @@ const createTicket = catchAsync(async (req, res) => {
 
   const ticket = await Ticket.create({
     ticketId: `TK-${nextId}`,
-    user: req.user.id,
+    user: req.user?.id,
     subject: req.body.subject,
     ticketType: req.body.ticketType,
     description: req.body.description,
