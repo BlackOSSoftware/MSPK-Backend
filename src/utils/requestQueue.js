@@ -1,5 +1,8 @@
 import EventEmitter from 'events';
-import logger from '../config/logger.js';
+import logger from '../config/log.js';
+
+const DEBUG_QUEUE = process.env.DEBUG_QUEUE === 'true';
+const ENABLE_QUEUE_MONITOR = process.env.ENABLE_QUEUE_MONITOR === 'true';
 
 class RequestQueue extends EventEmitter {
     constructor(requestsPerMinute = 50) {
@@ -20,18 +23,16 @@ class RequestQueue extends EventEmitter {
         this.currentJobKey = null; // Track current job
         
         // Stuck Job Detector
-        setInterval(() => {
-            if (this.isProcessing && this.currentJobKey) {
-                const now = Date.now();
-                if (now - this.lastRequestTime > 15000) { // 15s Threshold
-                    logger.error(`[RequestQueue-Monitor] QUEUE STUCK on Job: ${this.currentJobKey} for ${(now - this.lastRequestTime)/1000}s`);
-                    
-                    // Optional: Force release? No, unsafe. Just log.
-                    // But we can try to inspect memory or just know WHO it is.
-                    // If it is 'alltick...', we know the culprit.
+        if (ENABLE_QUEUE_MONITOR) {
+            setInterval(() => {
+                if (this.isProcessing && this.currentJobKey) {
+                    const now = Date.now();
+                    if (now - this.lastRequestTime > 15000) { // 15s Threshold
+                        logger.warn(`[RequestQueue-Monitor] QUEUE STUCK on Job: ${this.currentJobKey} for ${(now - this.lastRequestTime)/1000}s`);
+                    }
                 }
-            }
-        }, 5000);
+            }, 5000);
+        }
         
         // Metrics
         this.metrics = {
@@ -69,7 +70,7 @@ class RequestQueue extends EventEmitter {
                 addedAt: Date.now()
             };
             
-            console.log(`[RequestQueue-Trace] Added: ${key} (Priority ${priority})`);
+            if (DEBUG_QUEUE) logger.debug(`[RequestQueue] Added: ${key} (Priority ${priority})`);
 
             // Add to appropriate queue
             if (!this.queues[priority]) priority = 2;
@@ -94,7 +95,7 @@ class RequestQueue extends EventEmitter {
     async process() {
         if (this.isProcessing) return;
         this.isProcessing = true;
-        console.log(`[RequestQueue-Trace] Starting Process Loop`);
+        if (DEBUG_QUEUE) logger.debug(`[RequestQueue] Starting Process Loop`);
 
         while (this.hasRequests()) {
             const now = Date.now();
@@ -121,7 +122,7 @@ class RequestQueue extends EventEmitter {
 
             try {
                 this.currentJobKey = job.key;
-                logger.info(`[RequestQueue-Trace] Executing Job: ${job.key}`);
+                if (DEBUG_QUEUE) logger.debug(`[RequestQueue] Executing Job: ${job.key}`);
                 const result = await job.task();
                 this.metrics.processed++;
                 job.resolve(result);
@@ -141,7 +142,7 @@ class RequestQueue extends EventEmitter {
                         // Re-add to front of high priority queue to retry ASAP
                         this.queues[1].unshift(job); 
                     } else {
-                        console.error(`[RequestQueue] Max retries reached for ${job.key}`);
+                        logger.error(`[RequestQueue] Max retries reached for ${job.key}`);
                         this.metrics.errors++;
                         job.reject(error);
                     }
@@ -151,13 +152,13 @@ class RequestQueue extends EventEmitter {
                     job.reject(error);
                 }
             } finally {
-                 logger.info(`[RequestQueue-Trace] Job Finished: ${job.key}`);
+                 if (DEBUG_QUEUE) logger.debug(`[RequestQueue] Job Finished: ${job.key}`);
                  this.currentJobKey = null;
             }
         }
 
         this.isProcessing = false;
-        logger.info(`[RequestQueue-Trace] Loop Ended. Pending: ${this.pendingRequests.size}`);
+        if (DEBUG_QUEUE) logger.debug(`[RequestQueue] Loop Ended. Pending: ${this.pendingRequests.size}`);
     }
 
     hasRequests() {

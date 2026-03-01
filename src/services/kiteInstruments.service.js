@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { kiteService } from './kite.service.js';
-import logger from '../config/logger.js';
+import logger from '../config/log.js';
 import MasterSymbol from '../models/MasterSymbol.js';
 
 const INSTRUMENTS_FILE = path.join(process.cwd(), 'data', 'kite_instruments.json');

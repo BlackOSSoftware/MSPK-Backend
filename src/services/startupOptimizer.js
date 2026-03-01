@@ -1,6 +1,6 @@
 import requestQueue from '../utils/requestQueue.js';
 import allTickService from './alltick.service.js';
-import logger from '../config/logger.js';
+import logger from '../config/log.js';
 
 class StartupOptimizer {
     constructor() {

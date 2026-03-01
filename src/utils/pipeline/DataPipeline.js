@@ -13,6 +13,8 @@ class DataPipeline {
         
         this.wasmFilter = null; // Placeholder for WASM instance
         this.isRunning = false;
+        this._draining = false;
+        this._drainScheduled = false;
         
         // Stats
         this.metrics = {
@@ -26,7 +28,7 @@ class DataPipeline {
     start(broadcaster) {
         this.broadcaster = broadcaster; // Logic to actually send data (ws service)
         this.isRunning = true;
-        this.process();
+        this._scheduleDrain();
     }
     
     stop() {
@@ -79,44 +81,73 @@ class DataPipeline {
         } else {
             this.buffers.normal.push(tick);
         }
+
+        this._scheduleDrain();
     }
 
-    async process() {
-        while (this.isRunning) {
-            let processed = 0;
-            const BATCH_SIZE = 100; // Process in chunks to yield event loop
+    _scheduleDrain() {
+        if (!this.isRunning) return;
+        if (this._drainScheduled) return;
+        this._drainScheduled = true;
 
-            // High Priority First
-            while (!this.buffers.high.isEmpty() && processed < BATCH_SIZE) {
-                const tick = this.buffers.high.pop();
-                if (tick) {
-                    this.broadcaster(tick);
-                    this.metrics.out++;
-                    processed++;
+        const schedule = global.setImmediate
+            ? global.setImmediate
+            : (fn) => setTimeout(fn, 0);
+
+        schedule(() => {
+            this._drainScheduled = false;
+            // Fire-and-forget; errors should not crash the process.
+            this._drain().catch(() => {});
+        });
+    }
+
+    async _drain() {
+        if (!this.isRunning) return;
+        if (this._draining) return;
+        this._draining = true;
+
+        try {
+            while (this.isRunning) {
+                let processed = 0;
+                const BATCH_SIZE = 100; // Process in chunks to yield event loop
+
+                // High Priority First
+                while (!this.buffers.high.isEmpty() && processed < BATCH_SIZE) {
+                    const tick = this.buffers.high.pop();
+                    if (tick) {
+                        this.broadcaster(tick);
+                        this.metrics.out++;
+                        processed++;
+                    }
                 }
-            }
 
-            // Normal Priority (only if we have bandwidth/time)
-            // Fair scheduling: process some normal even if high exists?
-            // For now, strict priority.
-            if (processed < BATCH_SIZE) {
-                while (!this.buffers.normal.isEmpty() && processed < BATCH_SIZE) {
-                     const tick = this.buffers.normal.pop();
-                     if (tick) {
-                         this.broadcaster(tick);
-                         this.metrics.out++;
-                         processed++;
-                     }
+                // Normal Priority (only if we have bandwidth/time)
+                if (processed < BATCH_SIZE) {
+                    while (!this.buffers.normal.isEmpty() && processed < BATCH_SIZE) {
+                        const tick = this.buffers.normal.pop();
+                        if (tick) {
+                            this.broadcaster(tick);
+                            this.metrics.out++;
+                            processed++;
+                        }
+                    }
                 }
-            }
 
-            // Yield if we did work, else small sleep
-            if (processed > 0) {
-                if (global.setImmediate) await new Promise(r => setImmediate(r));
-                else await new Promise(r => setTimeout(r, 0));
-            } else {
-                await new Promise(r => setTimeout(r, 5)); // Sleep 5ms if idle
+                if (processed > 0) {
+                    if (global.setImmediate) await new Promise((r) => setImmediate(r));
+                    else await new Promise((r) => setTimeout(r, 0));
+                    continue;
+                }
+
+                break; // Nothing to do; go idle until next push()
             }
+        } finally {
+            this._draining = false;
+        }
+
+        if (!this.isRunning) return;
+        if (!this.buffers.high.isEmpty() || !this.buffers.normal.isEmpty()) {
+            this._scheduleDrain();
         }
     }
 

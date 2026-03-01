@@ -9,7 +9,6 @@ import signalService from './signal.service.js';
 import dashboardService from './dashboard.service.js';
 import subBrokerService from './subBroker.service.js';
 import settingService from './setting.service.js';
-import strategyService from './strategy.service.js';
 import marketDataService from './marketData.service.js';
 import announcementService from './announcement.service.js';
 import { economicService } from './economic.service.js';
@@ -29,7 +28,6 @@ export {
     dashboardService, 
     subBrokerService, 
     settingService, 
-    strategyService, 
     marketDataService,
     announcementService,
     economicService,

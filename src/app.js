@@ -16,7 +16,6 @@ app.use(cors({
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use('/uploads', express.static('uploads')); // Serve uploaded files
-app.use(express.static('public')); // Serve Monitoring Dashboard
 // app.use(helmet()); // Temporarily disabled to debug 308 Redirects
 // app.use(cors()); // Moved to top
 

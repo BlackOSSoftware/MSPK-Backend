@@ -1,5 +1,5 @@
 import { admin } from '../../config/firebase.js';
-import logger from '../../config/logger.js';
+import logger from '../../config/log.js';
 
 const sendPushNotification = async (tokens, title, body, data = {}) => {
     try {

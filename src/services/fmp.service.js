@@ -1,6 +1,6 @@
 import axios from 'axios';
 import marketDataService from './marketData.service.js';
-import logger from '../config/logger.js';
+import logger from '../config/log.js';
 
 class FmpService {
     constructor() {

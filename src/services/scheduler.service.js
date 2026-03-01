@@ -1,7 +1,7 @@
 import cron from 'node-cron';
 import { economicService } from './economic.service.js';
 import notificationService from './notification.service.js';
-import logger from '../config/logger.js';
+import logger from '../config/log.js';
 import User from '../models/User.js';
 import Setting from '../models/Setting.js';
 import Announcement from '../models/Announcement.js';

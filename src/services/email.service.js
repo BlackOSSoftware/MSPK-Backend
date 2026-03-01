@@ -1,6 +1,6 @@
 import nodemailer from 'nodemailer';
 import { msg91Service } from './index.js';
-import logger from '../config/logger.js';
+import logger from '../config/log.js';
 
 let transporter = null;
 

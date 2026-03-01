@@ -8,13 +8,11 @@ import { allTickService } from './alltick.service.js';
 import { economicService } from './economic.service.js';
 import pipeline from '../utils/pipeline/DataPipeline.js'; // Pipeline Optimization
 import { redisClient } from './redis.service.js';
-import logger from '../config/logger.js';
+import logger from '../config/log.js';
 import { decrypt, encrypt } from '../utils/encryption.js';
 import websocketManager from './websocketManager.js';
 import startupOptimizer from './startupOptimizer.js';
 import cacheManager from './cacheManager.js';
-
-console.log('DEBUG: MarketDataService loaded. RequestQueue:', requestQueue);
 
 class MarketDataService extends EventEmitter {
     constructor() {
@@ -29,6 +27,10 @@ class MarketDataService extends EventEmitter {
         this.allTickTickCount = 0;
         this.startTime = new Date();
         this.config = {}; // Prevent startup crash
+
+        // Throttle noisy stats logs (avoid slowing down dev terminals / log pipelines)
+        this._lastKiteStatsLogAtMs = 0;
+        this._lastAllTickStatsLogAtMs = 0;
     }
 
 // ... (skipping for brevity)
@@ -57,12 +59,14 @@ class MarketDataService extends EventEmitter {
 
     startStatsBroadcast() {
         if (this.statsInterval) clearInterval(this.statsInterval);
+        let intervalMs = Number.parseInt(process.env.MARKETDATA_STATS_INTERVAL_MS || '5000', 10);
+        if (!Number.isFinite(intervalMs) || intervalMs < 250) intervalMs = 5000;
         
         this.statsInterval = setInterval(() => {
             const stats = this.getStats();
             // Emit to local event bus (e.g. for socket service to pick up)
             this.emit('stats_update', stats);
-        }, 1000);
+        }, intervalMs);
     }
 
     async loadMasterSymbols() {
@@ -129,16 +133,16 @@ class MarketDataService extends EventEmitter {
                 .map(s => this.symbols[s].instrumentToken)
                 .filter(t => t); // Filter only those with tokens
             
-            logger.info(`[DEBUG_SUB] Found ${allSymbols.length} total symbols. ${tokens.length} have Kite tokens.`);
+            logger.debug(`[DEBUG_SUB] Found ${allSymbols.length} total symbols. ${tokens.length} have Kite tokens.`);
 
             if (tokens.length > 0) {
                  this.adapter.subscribe(tokens);
-                 logger.info(`[DEBUG_SUB] Subscribing to Kite Tokens: ${tokens.join(',')}`);
+                 logger.debug(`[DEBUG_SUB] Subscribed to ${tokens.length} Kite tokens.`);
                  
                  // Fetch initial static Data (for closed markets like NSE Equity at night)
                  this.fetchInitialQuote(tokens);
             } else {
-                logger.warn('[DEBUG_SUB] No user symbols found, but Indices should be auto-subscribed?');
+                logger.debug('[DEBUG_SUB] No user symbols found, but Indices should be auto-subscribed?');
             }
             
             // Force Subscribe to Critical Indices (If not in master list already)
@@ -152,11 +156,11 @@ class MarketDataService extends EventEmitter {
                     const token = parseInt(instrument.instrument_token);
                     this.adapter.subscribe([token]);
                     this.tokenMap[token] = sym;
-                    logger.info(`[DEBUG_SUB] Force subscribed to Index: ${sym} (Token: ${token})`);
+                    logger.debug(`[DEBUG_SUB] Force subscribed to Index: ${sym} (Token: ${token})`);
                 }
             });
         } else {
-            logger.warn('[DEBUG_SUB] Adapter not connected or missing');
+            logger.debug('[DEBUG_SUB] Adapter not connected or missing');
         }
 
         // 2. AllTick Subscription (via WebSocket Manager)
@@ -168,24 +172,29 @@ class MarketDataService extends EventEmitter {
                  return !indianExchanges.includes(sym.exchange) && !sym.instrumentToken;
              });
 
-             const sentimentSymbols = ['BTCUSD', 'ETHUSD', 'XAUUSD', 'EURUSD'];
-             const combinedSubs = [...new Set([...symbolsToSubscribe, ...sentimentSymbols])];
+              const sentimentSymbols = ['BTCUSD', 'ETHUSD', 'XAUUSD', 'EURUSD'];
+              const combinedSubs = [...new Set([...symbolsToSubscribe, ...sentimentSymbols])];
 
              if (combinedSubs.length > 0) {
                  logger.info(`[MarketData] Delegating ${combinedSubs.length} symbols to WebSocketManager`);
                  
-                 // Dynamic Viewport Update
-                 websocketManager.updateViewport(combinedSubs);
-                 
-                 // Initial Quote Fetch (Still useful for 0-latency start)
-                 allTickService.getQuote(combinedSubs).then(quotes => {
-                     this._processQuotes(quotes);
-                 });
-             }
-        }
-        
-        // --- PHASE 4: Smart Startup Sequence (History) ---
-        startupOptimizer.start(this);
+                  // Dynamic Viewport Update
+                  websocketManager.updateViewport(combinedSubs);
+
+                  // Avoid heavy "history-based quotes" at startup (can spam API / slow server).
+                  // Enable only if you really need a snapshot before ticks start flowing.
+                  if (process.env.ENABLE_ALLTICK_INITIAL_QUOTES === 'true') {
+                      allTickService.getQuote(sentimentSymbols).then(quotes => {
+                          this._processQuotes(quotes);
+                      });
+                  }
+              }
+         }
+         
+         // --- PHASE 4: Smart Startup Sequence (History) ---
+         if (process.env.ENABLE_STARTUP_OPTIMIZER === 'true') {
+             startupOptimizer.start(this);
+         }
     }
 
     
@@ -307,13 +316,21 @@ class MarketDataService extends EventEmitter {
     processLiveTicks(ticks, provider) {
         if (!Array.isArray(ticks)) return;
 
+        const nowMs = Date.now();
+
         if (provider === 'kite') {
             this.kiteTickCount += ticks.length;
-            if (this.kiteTickCount % 100 === 0) logger.info(`[KITE_STATS] Total Ticks: ${this.kiteTickCount}`);
+            if (nowMs - this._lastKiteStatsLogAtMs >= 10000) {
+                logger.debug(`[KITE_STATS] Total ticks: ${this.kiteTickCount}`);
+                this._lastKiteStatsLogAtMs = nowMs;
+            }
             // ... keys
         } else if (provider === 'alltick') {
             this.allTickTickCount += ticks.length;
-            if (this.allTickTickCount % 10 === 0) logger.info(`[ALLTICK_STATS] Incoming batch of ${ticks.length} ticks. Total: ${this.allTickTickCount}`);
+            if (nowMs - this._lastAllTickStatsLogAtMs >= 10000) {
+                logger.debug(`[ALLTICK_STATS] Batch: ${ticks.length}, total ticks: ${this.allTickTickCount}`);
+                this._lastAllTickStatsLogAtMs = nowMs;
+            }
         }
 
         ticks.forEach(tick => {
@@ -446,6 +463,10 @@ class MarketDataService extends EventEmitter {
         }
 
         // Restart Feeds
+        if (String(process.env.DISABLE_LIVE_FEED || '').toLowerCase() === 'true') {
+            logger.warn('MARKET_DATA: Live feed disabled via DISABLE_LIVE_FEED=true');
+            return;
+        }
         if (this.canGoLive()) {
             await this.startLiveFeed();
         }

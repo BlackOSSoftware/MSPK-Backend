@@ -1,7 +1,7 @@
 import cron from 'node-cron';
 import subscriptionService from '../services/subscription.service.js';
 import notificationService from '../services/notification.service.js';
-import logger from '../config/logger.js';
+import logger from '../config/log.js';
 
 /**
  * Subscription Cron Job

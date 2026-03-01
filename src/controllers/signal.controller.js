@@ -122,12 +122,7 @@ const getSignals = catchAsync(async (req, res) => {
           end.setHours(23, 59, 59, 999);
       }
       
-      conditions.push({
-          $or: [
-              { createdAt: { $gte: start, $lte: end } },
-              { 'report.closedAt': { $gte: start, $lte: end } }
-          ]
-      });
+      conditions.push({ createdAt: { $gte: start, $lte: end } });
   }
 
   if (status && status !== 'All') {

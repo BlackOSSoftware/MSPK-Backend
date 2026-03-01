@@ -1,5 +1,5 @@
 import axios from 'axios';
-import logger from '../config/logger.js';
+import logger from '../config/log.js';
 
 class Msg91Service {
     constructor() {

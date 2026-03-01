@@ -1,12 +1,20 @@
 import fs from 'fs';
 import path from 'path';
 import { redisClient } from './redis.service.js';
-import logger from '../config/logger.js';
+import logger from '../config/log.js';
 
 const CACHE_DIR = path.join(process.cwd(), 'temp', 'cache');
+const DISK_CACHE_ENABLED = process.env.DISK_CACHE_ENABLED === 'true';
+const DISK_CACHE_HISTORY_ENABLED = process.env.DISK_CACHE_HISTORY === 'true';
+
+const shouldUseDiskCache = (key) => {
+    if (!DISK_CACHE_ENABLED) return false;
+    if (key.startsWith('history_')) return DISK_CACHE_HISTORY_ENABLED;
+    return true;
+};
 
 // Ensure Cache Dir Exists
-if (!fs.existsSync(CACHE_DIR)) {
+if (DISK_CACHE_ENABLED && !fs.existsSync(CACHE_DIR)) {
     try {
         fs.mkdirSync(CACHE_DIR, { recursive: true });
     } catch (e) {
@@ -83,35 +91,37 @@ class CacheManager {
             }
         } catch (e) { /* Ignore Redis Errors */ }
 
-        // 3. L3 Disk (Only for History keys usually)
+        // 3. L3 Disk (Only for specific keys when enabled)
         // We generally assume keys starting with 'history_' or similar are disk-worthy
         // But here we check everything or selective?
         // Let's check everything for simplicity, FS check is fast enough compared to API
-        this.stats.l3Calls++;
-        const filePath = path.join(CACHE_DIR, `${key}.json`);
-        if (fs.existsSync(filePath)) {
-            try {
-                // Check stats for TTL? FS doesn't natively expire. 
-                // We rely on file mtime.
-                const stat = fs.statSync(filePath);
-                const age = Date.now() - stat.mtimeMs;
-                
-                // 24 Hours default for Disk
-                if (age < 24 * 60 * 60 * 1000) {
-                    const content = fs.readFileSync(filePath, 'utf-8');
-                    const parsed = JSON.parse(content);
-                    this.stats.l3Hits++;
-                    // Populate L1 & L2
-                    this.setMemory(key, parsed, 5 * 60 * 1000);
-                    // We skip back-filling Redis to save bandwidth? Or fill it?
-                    // Fill Redis for faster access next time
-                    this.setRedis(key, parsed, 3600);
-                    return parsed;
-                } else {
-                    // Expired
-                    fs.unlinkSync(filePath);
-                }
-            } catch (e) { /* Ignore FS Errors */ }
+        if (shouldUseDiskCache(key)) {
+            this.stats.l3Calls++;
+            const filePath = path.join(CACHE_DIR, `${key}.json`);
+            if (fs.existsSync(filePath)) {
+                try {
+                    // Check stats for TTL? FS doesn't natively expire. 
+                    // We rely on file mtime.
+                    const stat = fs.statSync(filePath);
+                    const age = Date.now() - stat.mtimeMs;
+                    
+                    // 24 Hours default for Disk
+                    if (age < 24 * 60 * 60 * 1000) {
+                        const content = fs.readFileSync(filePath, 'utf-8');
+                        const parsed = JSON.parse(content);
+                        this.stats.l3Hits++;
+                        // Populate L1 & L2
+                        this.setMemory(key, parsed, 5 * 60 * 1000);
+                        // We skip back-filling Redis to save bandwidth? Or fill it?
+                        // Fill Redis for faster access next time
+                        this.setRedis(key, parsed, 3600);
+                        return parsed;
+                    } else {
+                        // Expired
+                        fs.unlinkSync(filePath);
+                    }
+                } catch (e) { /* Ignore FS Errors */ }
+            }
         }
 
         this.stats.misses++;
@@ -132,8 +142,8 @@ class CacheManager {
         // 2. L2
         this.setRedis(key, value, ttlSeconds);
 
-        // 3. L3 (Disk) - Only if long TTL (Historical)
-        if (ttlSeconds >= 3600) { // 1h+ worthy of disk
+        // 3. L3 (Disk) - Only if long TTL (Historical) and disk cache enabled
+        if (ttlSeconds >= 3600 && shouldUseDiskCache(key)) { // 1h+ worthy of disk
             try {
                 const filePath = path.join(CACHE_DIR, `${key}.json`);
                 fs.writeFileSync(filePath, JSON.stringify(value));

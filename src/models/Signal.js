@@ -52,11 +52,6 @@ const signalSchema = new mongoose.Schema(
       enum: ['Active', 'Target Hit', 'Stoploss Hit', 'Closed'], // Matched Frontend Mock
       default: 'Active',
     },
-    report: {
-        result: { type: Number }, // P/L Points
-        closedAt: { type: Date },
-        closedPrice: { type: Number }
-    },
     isFree: {
       type: Boolean,
       default: false,

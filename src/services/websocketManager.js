@@ -1,5 +1,5 @@
 import { connectionPool } from '../utils/connection-pool.js';
-import logger from '../config/logger.js';
+import logger from '../config/log.js';
 import allTickService from './alltick.service.js';
 import metricsCollector from '../monitoring/metricsCollector.js';
 
@@ -28,7 +28,7 @@ class PartitionWorker {
 
     sendHeartbeat() {
         if (this.ws && this.ws.readyState === 1) {
-            logger.info(`[WS-Worker ${this.id}] Sending Heartbeat (22000)`);
+            logger.debug(`[WS-Worker ${this.id}] Sending Heartbeat (22000)`);
             this.lastHeartbeatTime = Date.now();
             this.ws.send(JSON.stringify({
                 cmd_id: 22000,
@@ -36,7 +36,7 @@ class PartitionWorker {
                 trace: 'hb' + Date.now()
             }));
         } else {
-            logger.warn(`[WS-Worker ${this.id}] Cannot send Heartbeat - Socket not OPEN`);
+            logger.debug(`[WS-Worker ${this.id}] Cannot send Heartbeat - Socket not OPEN`);
         }
     }
 
@@ -83,9 +83,7 @@ class PartitionWorker {
             logger.warn(`[WS-Worker ${this.id}] Skipping Reconcile - No Token Available`);
             return;
         }
-        const tokenPreview = allTickService.token.substring(0, 5) + '...';
-        logger.info(`[WS-Worker ${this.id}] Reconcile: ${symbolList.length} symbols. Token: ${tokenPreview}`);
-        logger.info(`[WS-Worker ${this.id}] Symbols: ${JSON.stringify(symbolList)}`);
+        logger.debug(`[WS-Worker ${this.id}] Reconcile: ${symbolList.length} symbols`);
         const url = `${allTickService.wsUrl}?token=${allTickService.token}`;
         
         try {
@@ -135,7 +133,9 @@ class WebSocketManager {
         this.workers = new Map(); // ID -> PartitionWorker
         this.symbolToWorker = new Map(); // Symbol -> WorkerID
         this.messageBuffer = new Map(); // Symbol -> Latest Tick
-        this.bufferTimer = null;
+        this.flushTimer = null;
+        this.flushIntervalMs = Number.parseInt(process.env.WS_MANAGER_FLUSH_INTERVAL_MS || '500', 10);
+        if (!Number.isFinite(this.flushIntervalMs) || this.flushIntervalMs < 50) this.flushIntervalMs = 500;
         this.marketDataService = null;
 
         // Cleanup Interval (60s)
@@ -150,9 +150,16 @@ class WebSocketManager {
 
     init(marketDataService) {
         this.marketDataService = marketDataService;
-        
-        // Start Buffer Flush Loop
-        this.bufferTimer = setInterval(() => this.flushBuffer(), 500); 
+    }
+
+    _scheduleFlush() {
+        if (!this.marketDataService) return;
+        if (this.messageBuffer.size === 0) return;
+        if (this.flushTimer) return;
+        this.flushTimer = setTimeout(() => {
+            this.flushTimer = null;
+            this.flushBuffer();
+        }, this.flushIntervalMs);
     }
 
     /**
@@ -199,7 +206,7 @@ class WebSocketManager {
         // Sync with Actual Workers
         const currentActive = new Set(this.symbolToWorker.keys());
         
-        // Reporting
+        // Metrics
         metricsCollector.updateWsConnections(this.workers.size);
 
         // 1. Remove Unwanted
@@ -293,8 +300,8 @@ class WebSocketManager {
             const worker = this.workers.get(id);
 
             // Handle Heartbeat Response (cmd_id 22000/22001)
-            if (message.cmd_id === 22000 || message.cmd_id === 22001 || (message.trace && message.trace.startsWith('hb-'))) {
-                logger.info(`[WS-Manager] Received Heartbeat ACK from ${id}`);
+             if (message.cmd_id === 22000 || message.cmd_id === 22001 || (message.trace && message.trace.startsWith('hb-'))) {
+                logger.debug(`[WS-Manager] Received Heartbeat ACK from ${id}`);
                 if (worker && worker.lastHeartbeatTime) {
                     const rtt = Date.now() - worker.lastHeartbeatTime;
                     allTickService.latency = rtt > 0 ? rtt : 1;
@@ -335,6 +342,7 @@ class WebSocketManager {
             bid: parseFloat(tick.bid || 0),
             ask: parseFloat(tick.ask || 0)
         });
+        this._scheduleFlush();
     }
 
     _bufferDepth(tick) {
@@ -355,6 +363,7 @@ class WebSocketManager {
             bid: bid,
             ask: ask
         });
+        this._scheduleFlush();
     }
 
     flushBuffer() {
@@ -372,13 +381,16 @@ class WebSocketManager {
 
         // Send to MarketData
         if (ticks.length > 0) {
-            logger.info(`[WS-Manager] Flushing ${ticks.length} ticks to MarketDataService`);
+            logger.debug(`[WS-Manager] Flushing ${ticks.length} ticks to MarketDataService`);
             this.marketDataService.processLiveTicks(ticks, 'alltick');
             metricsCollector.trackWsMessage(); // Count batches or ticks? Let's count batches. 
             // Or maybe count raw ticks? "Messages/Second" usually means frames. 
             // Since we send 1 frame to Frontend via socket.js (which we track later?), 
             // here we track internal throughput.
         }
+
+        // If buffer refilled during processing, schedule next flush.
+        this._scheduleFlush();
     }
 }
 

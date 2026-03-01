@@ -1,22 +1,10 @@
 import WebSocket from 'ws';
 import axios from 'axios';
 import EventEmitter from 'events';
-import logger from '../config/logger.js';
-import fs from 'fs';
-import path from 'path';
+import logger from '../config/log.js';
 import { ALLTICK_POPULAR_SYMBOLS } from '../data/alltick_popular.js';
 import requestQueue from '../utils/requestQueue.js';
 import cacheManager from './cacheManager.js';
-
-const DEBUG_LOG_FILE = path.join(process.cwd(), 'logs', 'alltick_debug.log');
-
-function logDebug(data) {
-    try {
-        fs.appendFileSync(DEBUG_LOG_FILE, new Date().toISOString() + ': ' + data + '\n');
-    } catch (e) {
-        console.error('Failed to write debug log', e);
-    }
-}
 
 class AllTickService extends EventEmitter {
     constructor() {
@@ -407,7 +395,7 @@ class AllTickService extends EventEmitter {
                 };
     
             const url = `${this.baseUrl}/kline?token=${this.token}`;
-            logger.info(`[AllTick-History] Fetching: ${code} (${interval}). URL: ${url} Params: ${JSON.stringify(queryObj)}`);
+            logger.debug(`[AllTick-History] Fetching: ${code} (${interval}). URL: ${url}`);
 
             const response = await axios.get(url, { 
                 params: { query: JSON.stringify(queryObj) },
@@ -415,7 +403,7 @@ class AllTickService extends EventEmitter {
             });
             
             if (response?.data) {
-                 logger.info(`[AllTick-History] Response for ${code}: Ret=${response.data.ret} Msg=${response.data.msg} Count=${response.data.data?.kline_list?.length || 0}`);
+                 logger.debug(`[AllTick-History] Response for ${code}: Ret=${response.data.ret} Msg=${response.data.msg} Count=${response.data.data?.kline_list?.length || 0}`);
             }
     
                 if (response?.data?.data?.kline_list) {

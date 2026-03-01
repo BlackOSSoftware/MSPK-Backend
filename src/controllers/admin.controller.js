@@ -7,7 +7,6 @@ import ApiError from '../utils/ApiError.js';
 import { redisClient } from '../services/redis.service.js';
 import transactionService from '../services/transaction.service.js';
 import { subBrokerService, announcementService } from '../services/index.js';
-import hybridStrategyService from '../services/hybridStrategy.service.js';
 
 const createUser = catchAsync(async (req, res) => {
     console.log("Create User Payload:", JSON.stringify(req.body, null, 2)); // DEBUG LOG
@@ -371,18 +370,6 @@ const liquidateUser = catchAsync(async (req, res) => {
     res.send(user);
 });
 
-const getStrategyStatus = catchAsync(async (req, res) => {
-    const { symbol } = req.query;
-    if (!symbol) {
-        // Return all
-        const allStatus = hybridStrategyService.status;
-        res.send(allStatus);
-    } else {
-        const status = hybridStrategyService.getLiveStatus(symbol);
-        res.send(status || {});
-    }
-});
-
 const updateUser = catchAsync(async (req, res) => {
     const { userId } = req.params;
     const { planId, ...body } = req.body; // Extract planId separately
@@ -475,6 +462,5 @@ export default {
   liquidateUser,
   updateSignalAccess,
   getSystemHealth,
-  getStrategyStatus,
   broadcastMessage
 };

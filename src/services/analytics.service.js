@@ -1,7 +1,6 @@
 import Transaction from '../models/Transaction.js';
 import User from '../models/User.js';
 import Subscription from '../models/Subscription.js';
-import Strategy from '../models/Strategy.js';
 import Signal from '../models/Signal.js';
 import Ticket from '../models/Ticket.js';
 import { startOfMonth, subMonths, startOfYear, startOfQuarter, endOfDay, subDays } from 'date-fns';
@@ -165,22 +164,17 @@ const getSignalPerformance = async (range) => {
                 totalSignals: { $sum: 1 },
                 wins: { 
                     $sum: { 
-                        $cond: [
-                            { $or: [
-                                { $eq: ["$status", "Target Hit"] },
-                                { $gt: ["$report.result", 0] }
-                            ]}, 1, 0
-                        ]
+                        $cond: [{ $eq: ["$status", "Target Hit"] }, 1, 0]
                     }
-                },
-                totalProfit: { $sum: "$report.result" }
+                }
             }
         }
     ]);
 
-    const stats = statsAgg[0] || { totalSignals: 0, wins: 0, totalProfit: 0 };
+    const stats = statsAgg[0] || { totalSignals: 0, wins: 0 };
+    const totalProfit = 0;
     const winRate = stats.totalSignals > 0 ? ((stats.wins / stats.totalSignals) * 100).toFixed(1) : 0;
-    const avgProfit = stats.totalSignals > 0 ? (stats.totalProfit / stats.totalSignals).toFixed(2) : 0; // Avg PnL per trade
+    const avgProfit = stats.totalSignals > 0 ? (totalProfit / stats.totalSignals).toFixed(2) : 0; // Avg PnL per trade
 
     // 2. Loss Streak (Mock or Simple check of last N)
     // Fetch last 10 closed signals desc
@@ -190,7 +184,7 @@ const getSignalPerformance = async (range) => {
 
     let currentLossStreak = 0;
     for (let s of lastSignals) {
-        if (s.status === 'Stoploss Hit' || (s.report && s.report.result < 0)) {
+        if (s.status === 'Stoploss Hit') {
             currentLossStreak++;
         } else {
             break; 
@@ -211,12 +205,7 @@ const getSignalPerformance = async (range) => {
                 volume: { $sum: 1 },
                 wins: { 
                     $sum: { 
-                        $cond: [
-                            { $or: [
-                                { $eq: ["$status", "Target Hit"] },
-                                { $gt: ["$report.result", 0] }
-                            ]}, 1, 0
-                        ]
+                        $cond: [{ $eq: ["$status", "Target Hit"] }, 1, 0]
                     }
                 }
             }

@@ -1,5 +1,5 @@
 import admin from 'firebase-admin';
-import logger from './logger.js';
+import logger from './log.js';
 import fs from 'fs';
 import path from 'path';
 

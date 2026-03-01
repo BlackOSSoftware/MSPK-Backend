@@ -1,6 +1,6 @@
 import { Worker } from 'bullmq';
 import config from '../config/config.js';
-import logger from '../config/logger.js';
+import logger from '../config/log.js';
 import User from '../models/User.js';
 import Setting from '../models/Setting.js';
 import telegramService from '../services/channels/telegram.service.js';

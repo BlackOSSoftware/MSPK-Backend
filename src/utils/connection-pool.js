@@ -1,6 +1,6 @@
 import { EventEmitter } from 'events';
 import WebSocket from 'ws';
-import logger from '../config/logger.js';
+import logger from '../config/log.js';
 
 /**
  * @typedef {Object} ConnectionOptions
@@ -54,13 +54,16 @@ class ConnectionPool extends EventEmitter {
         try {
             const ws = new WebSocket(url);
             
-            // Metadata for recovery
+            // Metadata for recovery (preserve retries across reconnects)
+            const prevMeta = this.metadata.get(id);
+            if (prevMeta?.reconnectTimer) clearTimeout(prevMeta.reconnectTimer);
             this.metadata.set(id, { 
                 options, 
-                retries: 0, 
+                retries: prevMeta?.retries ?? 0, 
                 reconnectTimer: null,
                 heartbeatTimer: null,
-                isAlive: true
+                isAlive: true,
+                stopReconnect: prevMeta?.stopReconnect ?? false
             });
 
             this.connections.set(id, ws);
@@ -120,14 +123,22 @@ class ConnectionPool extends EventEmitter {
     }
 
     _handleError(id, ws, error) {
-        if (error.message?.includes('429')) {
+        const errorMessage = error?.message || String(error);
+        if (/\b(401|403)\b/.test(errorMessage)) {
+            const meta = this.metadata.get(id);
+            if (meta) meta.stopReconnect = true;
+            logger.error(`[Pool] Auth error for ${id}. Reconnect disabled. (${errorMessage})`);
+            this.emit(`error:${id}`, error);
+            return;
+        }
+        if (errorMessage.includes('429')) {
             logger.warn(`[Pool] 429 Rate Limit detected for ${id}. Applying search cool-down.`);
             const meta = this.metadata.get(id);
             if (meta) {
                  meta.retries = Math.max(meta.retries, 5); // Jump to high backoff
             }
         }
-        logger.error(`[Pool] Error in ${id}: ${error.message}`);
+        logger.error(`[Pool] Error in ${id}: ${errorMessage}`);
         this.emit(`error:${id}`, error);
     }
 
@@ -161,6 +172,15 @@ class ConnectionPool extends EventEmitter {
         const meta = this.metadata.get(id);
         if (!meta || this.isShuttingDown) return;
 
+        if (meta.stopReconnect) {
+            logger.error(`[Pool] Reconnect disabled for ${id}.`);
+            this.emit(`failed:${id}`);
+            this.metadata.delete(id);
+            return;
+        }
+
+        if (meta.reconnectTimer) return; // Avoid duplicate timers
+
         if (meta.retries >= (meta.options.maxRetries || 10)) {
             logger.error(`[Pool] Max retries reached for ${id}. Giving up.`);
             this.emit(`failed:${id}`);
@@ -179,6 +199,7 @@ class ConnectionPool extends EventEmitter {
         logger.info(`[Pool] Reconnecting ${id} in ${Math.round(finalDelay)}ms (Attempt ${meta.retries + 1})`);
 
         meta.reconnectTimer = setTimeout(() => {
+            meta.reconnectTimer = null;
             meta.retries++;
             this._createConnection(id, meta.options);
         }, finalDelay);

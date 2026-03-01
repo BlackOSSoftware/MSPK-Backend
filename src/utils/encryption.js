@@ -1,5 +1,5 @@
 import crypto from 'crypto';
-import logger from '../config/logger.js';
+import logger from '../config/log.js';
 
 // Use a secure key from env or fallback for dev (32 bytes for AES-256)
 const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || '12345678901234567890123456789012'; 

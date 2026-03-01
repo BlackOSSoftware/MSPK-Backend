@@ -1,6 +1,5 @@
 import express from 'express';
 import authRoute from './auth.route.js';
-import strategyRoute from './strategy.route.js';
 import adminRoute from './admin.route.js';
 import planRoute from './plan.route.js';
 import segmentRoute from './segment.route.js';
@@ -46,12 +45,8 @@ const defaultRoutes = [
     route: authRoute,
   },
   {
-      path: '/health',
-      route: healthRoute,
-  },
-  {
-    path: '/strategies',
-    route: strategyRoute,
+    path: '/health',
+    route: healthRoute,
   },
   {
     path: '/admin',

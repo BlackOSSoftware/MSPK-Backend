@@ -23,11 +23,6 @@ const updateSignal = {
     }),
     body: Joi.object().keys({
         status: Joi.string().valid('Active', 'Target Hit', 'Stoploss Hit', 'Closed'),
-        report: Joi.object().keys({
-            result: Joi.number(),
-            closedAt: Joi.date(),
-            closedPrice: Joi.number()
-        }),
         notes: Joi.string()
     }).min(1)
 };

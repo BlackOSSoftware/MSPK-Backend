@@ -2,26 +2,8 @@ import { WebSocketServer, WebSocket } from 'ws';
 import jwt from 'jsonwebtoken';
 import config from '../config/config.js';
 import { redisSubscriber } from './redis.service.js';
-import logger, { logEmitter } from '../config/logger.js';
+import logger, { logEmitter } from '../config/log.js';
 import pipeline from '../utils/pipeline/DataPipeline.js';
-
-// Re-subscribe to stats (moved from top)
-redisSubscriber.subscribe('market_stats', (err) => {
-  if (err) logger.error('Failed to subscribe to market_stats channel');
-});
-
-redisSubscriber.on('message', (channel, message) => {
-  try {
-    const data = JSON.parse(message);
-    if (channel === 'market_stats') {
-      // We need broadcastToAll which is defined later. 
-      // We can't call it here if it's const.
-      // We'll move this listener setup INTO initWebSocket or after definitions.
-    }
-  } catch (error) {
-    logger.error('WebSocket Broadcast Error', error);
-  }
-});
 
 let wss;
 const rooms = new Map(); // Map<string, Set<WebSocket>>
@@ -220,9 +202,6 @@ const logActiveRooms = () => {
   const summary = Array.from(rooms.entries()).map(([room, clients]) => `${room}(${clients.size})`).join(', ');
   logger.info(`WebSocket: Active Rooms -> [${summary}]`);
 };
-
-// Log room status every 30 seconds
-setInterval(logActiveRooms, 30000);
 
 const unsubscribeFromRoom = (ws, roomName) => {
   if (!roomName) return;

@@ -1,6 +1,6 @@
 import { Queue } from 'bullmq';
 import config from '../config/config.js';
-import logger from '../config/logger.js';
+import logger from '../config/log.js';
 import { redisSubscriber } from './redis.service.js';
 import Notification from '../models/Notification.js';
 import User from '../models/User.js';

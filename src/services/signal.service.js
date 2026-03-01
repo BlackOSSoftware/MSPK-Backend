@@ -1,6 +1,6 @@
 import Signal from '../models/Signal.js';
 import announcementService from './announcement.service.js';
-import logger from '../config/logger.js';
+import logger from '../config/log.js';
 import { broadcastToAll } from './websocket.service.js';
 
 const mapSignalToCategory = (signalBody) => {
@@ -184,7 +184,7 @@ const updateSignalById = async (signalId, updateBody) => {
   Object.assign(signal, updateBody);
   
   // Status update broadcast
-  if (updateBody.status || updateBody.report) {
+  if (updateBody.status || updateBody.notes) {
        try {
            broadcastToAll({ type: 'update_signal', payload: signal });
 
@@ -198,10 +198,10 @@ const updateSignalById = async (signalId, updateBody) => {
               notificationData.targetLevel = 'TP1'; // Logic to detect which target? usually TP1
           } else if (updateBody.status === 'Stoploss Hit') {
               subType = 'SIGNAL_STOPLOSS';
-          } else if (updateBody.report || updateBody.notes || updateBody.status) {
+          } else if (updateBody.notes || updateBody.status) {
               // Generic Update
               subType = 'SIGNAL_UPDATE';
-              notificationData.updateMessage = updateBody.notes || updateBody.report || `Status changed to ${updateBody.status}`;
+              notificationData.updateMessage = updateBody.notes || `Status changed to ${updateBody.status}`;
           }
 
           if (subType) {

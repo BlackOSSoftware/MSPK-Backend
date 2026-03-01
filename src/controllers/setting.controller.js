@@ -1,7 +1,7 @@
 import httpStatus from 'http-status';
 import catchAsync from '../utils/catchAsync.js';
 import Setting from '../models/Setting.js';
-import logger from '../config/logger.js';
+import logger from '../config/log.js';
 
 import { encrypt } from '../utils/encryption.js';
 

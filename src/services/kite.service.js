@@ -1,5 +1,5 @@
 import { KiteConnect, KiteTicker } from 'kiteconnect';
-import logger from '../config/logger.js';
+import logger from '../config/log.js';
 
 class KiteService {
     constructor() {

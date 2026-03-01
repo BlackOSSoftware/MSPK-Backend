@@ -32,10 +32,6 @@ router
   .route('/system/health')
   .get(adminController.getSystemHealth);
 
-router
-  .route('/strategy/status')
-  .get(adminController.getStrategyStatus);
-
 router.post('/broadcast', adminController.broadcastMessage);
 
 export default router;

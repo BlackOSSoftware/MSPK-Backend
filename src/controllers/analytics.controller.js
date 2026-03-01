@@ -25,7 +25,7 @@ const exportAnalytics = catchAsync(async (req, res) => {
     const csvData = await analyticsService.getAnalyticsCSV(type || 'revenue', range || 'month');
     
     res.header('Content-Type', 'text/csv');
-    res.attachment(`report-${type}-${range}-${new Date().toISOString().split('T')[0]}.csv`);
+    res.attachment(`analytics-${type}-${range}-${new Date().toISOString().split('T')[0]}.csv`);
     res.send(csvData);
 });
 

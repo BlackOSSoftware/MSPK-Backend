@@ -1,13 +1,10 @@
 import app from './src/app.js';
 import config from './src/config/config.js';
-import logger from './src/config/logger.js';
+import logger from './src/config/log.js';
 import connectDB from './src/config/database.js';
 import { initWebSocket } from './src/services/websocket.service.js';
 import { connectRedis } from './src/services/redis.service.js';
-import strategyService from './src/services/strategy.service.js';
-import signalMonitor from './src/services/signal.monitor.js';
 import schedulerService from './src/services/scheduler.service.js';
-import hybridStrategyService from './src/services/hybridStrategy.service.js';
 import { initializeFirebase } from './src/config/firebase.js';
 import marketDataService from './src/services/marketData.service.js';
 import subscriptionCron from './src/jobs/subscriptionCron.js';
@@ -67,10 +64,6 @@ const startServer = async () => {
     marketDataService.init(); 
     initWebSocket(server);
     if (dbConnected) {
-      await strategyService.seedStrategies();
-      strategyService.startEngine();
-      hybridStrategyService.start();
-      signalMonitor.start();
       schedulerService.initScheduler();
       subscriptionCron.start(); // Start subscription expiry checker
     } else {
