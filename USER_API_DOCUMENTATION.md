@@ -1,270 +1,189 @@
-# User API Documentation (Postman Ready)
+# User API Documentation (A to Z, Simple English)
 
 Project: MSPK-Backend  
-Base URL: `http://localhost:<PORT>/v1`
+Main Base URL: `http://localhost:4000/v1`
 
-## 1. Postman Setup
+Auth Base URL: `http://localhost:4000/v1/auth`
 
-### Auth Header (for private APIs)
-- Key: `Authorization`
-- Value: `Bearer <your_jwt_token>`
+This file is for **normal app user APIs** (public + logged-in user).  
+Admin-only APIs are not included.
 
-### Content Types
-- JSON APIs: `Content-Type: application/json`
-- File upload APIs: `form-data` in Postman
+## 1. Easy Flow (Start to End)
 
-## 1.1 OTP Env Setup (`/auth/send-otp`)
+Follow this order:
 
-`send-otp` endpoint 2 mode support karta hai:
-- `type: "phone"` -> MSG91 SMS OTP
-- `type: "email"` -> MSG91 Email OTP + Redis rate-limit/expiry
-
-`.env` mein minimum ye keys add karo:
-
-```env
-# App
-PORT=5000
-FRONTEND_URL=http://localhost:5173
-
-# Redis (email OTP store + cooldown + daily limit)
-REDIS_HOST=127.0.0.1
-REDIS_PORT=6379
-
-# MSG91 Core (required for phone/email OTP)
-MSG91_AUTH_KEY=your_msg91_auth_key
-
-# Phone OTP template (required for type=phone)
-MSG91_OTP_TEMPLATE_ID=your_msg91_sms_otp_template_id
-
-# Email OTP template (required for type=email)
-MSG91_EMAIL_TEMPLATE_ID=your_msg91_email_otp_template_id
-MSG91_FROM_EMAIL=no-reply@yourdomain.com
-MSG91_EMAIL_DOMAIN=yourdomain.com
-```
+1. Register user
+2. Send OTP to email
+3. Verify email OTP
+4. Login
+5. **Immediately send FCM token** (important for push notifications)
+6. Use all private user APIs with Bearer token
 
 Important:
-- `MSG91_AUTH_KEY` missing hua to OTP fail hoga.
-- `type=phone` ke liye `MSG91_OTP_TEMPLATE_ID` required hai.
-- `type=email` ke liye `MSG91_EMAIL_TEMPLATE_ID`, `MSG91_FROM_EMAIL`, `MSG91_EMAIL_DOMAIN` required hain.
-- Redis running hona chahiye, warna email OTP flow ka TTL/daily-limit logic fail ho sakta hai.
-- `.env` update ke baad server restart zaroor karo.
+- Login/private APIs require verified email.
+- Private API means: add `Authorization: Bearer <token>`.
 
----
+## 2. Header Rules
 
-## 2. Public APIs (No Token Required)
+Public API:
+- No token needed.
 
-### Auth
+Private API:
+- Header required: `Authorization: Bearer <token>`
 
-#### POST `/auth/register`
-- Type: `POST`
-- Body (JSON):
+Content type:
+- JSON API: `Content-Type: application/json`
+- File API: `form-data`
+
+## 3. Auth APIs (`/v1/auth`)
+
+### 3.1 Register
+
+`POST http://localhost:4000/v1/auth/register`  
+Authorization: Not required
+
+Body:
 ```json
 {
-  "email": "user@example.com",
+  "email": "student@example.com",
   "password": "secret123",
-  "name": "Demo User",
+  "name": "Student",
   "phone": "9876543210",
-  "referralCode": "REF123"
+  "referralCode": "ABC123"
 }
 ```
 
-#### POST `/auth/login`
-- Type: `POST`
-- Body (JSON):
+Success (201):
 ```json
 {
-  "email": "user@example.com",
-  "password": "secret123",
-  "deviceId": "device-1",
-  "ip": "",
-  "sessionId": ""
+  "user": {
+    "_id": "65f1...",
+    "email": "student@example.com",
+    "name": "Student",
+    "isEmailVerified": false,
+    "status": "Active"
+  },
+  "token": "<jwt_token>"
 }
 ```
 
-#### POST `/auth/send-otp`
-- Type: `POST`
-- Body (JSON):
-```json
-{
-  "type": "email",
-  "identifier": "user@example.com"
-}
-```
-`type` allowed: `phone` or `email`
+### 3.2 Send Email OTP
 
-#### POST `/auth/verify-otp`
-- Type: `POST`
-- Body (JSON):
+`POST http://localhost:4000/v1/auth/send-otp`  
+Authorization: Not required
+
+Body:
 ```json
 {
   "type": "email",
-  "identifier": "user@example.com",
+  "identifier": "student@example.com"
+}
+```
+
+Success (200):
+```json
+{
+  "message": "OTP sent successfully to email",
+  "dailyRemaining": 4
+}
+```
+
+### 3.3 Verify Email OTP
+
+`POST http://localhost:4000/v1/auth/verify-otp`  
+Authorization: Not required
+
+Body:
+```json
+{
+  "type": "email",
+  "identifier": "student@example.com",
   "otp": "123456"
 }
 ```
 
-### Plans / Segments / CMS
-
-#### GET `/plans`
-- Type: `GET`
-- Query (optional): `role=<value>`
-- Body: none
-
-#### GET `/plans/:planId`
-- Type: `GET`
-- Body: none
-
-#### GET `/segments`
-- Type: `GET`
-- Body: none
-
-#### GET `/cms/pages/:slug`
-- Type: `GET`
-- Example: `/cms/pages/contact`
-- Body: none
-
-#### GET `/cms/faqs`
-j- Type: `GET`
-- Body: none
-
-### Announcements
-
-#### GET `/announcements`
-- Type: `GET`
-- Body: none
-
-#### GET `/announcements/:announcementId`
-- Type: `GET`
-- Body: none
-
-### Signals (Optional Auth)
-
-#### GET `/signals`
-- Type: `GET`
-- Body: none
-
-#### GET `/signals/:signalId`
-- Type: `GET`
-- Body: none
-
-#### GET `/signals/:signalId/analysis`
-- Type: `GET`
-- Body: none
-
-### Contact / Lead
-
-#### POST `/leads`
-- Type: `POST`
-- Content-Type: `form-data`
-- Body fields:
-- `name` (text, required)
-- `email` (text, required)
-- `phone` (text, required)
-- `password` (text, required)
-- `city` (text, optional)
-- `segment` (text, optional)
-- `plan` (text, optional)
-- `verificationToken` (text, required; from email OTP verify)
-- `paymentScreenshot` (file, optional)
-
-### Tickets (Public Contact Style)
-
-#### POST `/tickets`
-- Type: `POST`
-- Body (JSON):
+Success (200):
 ```json
 {
-  "subject": "Need help",
-  "ticketType": "SUPPORT",
-  "description": "Issue details here",
-  "contactEmail": "user@example.com",
-  "contactNumber": "9876543210"
+  "message": "Email verified successfully",
+  "verified": true,
+  "verificationToken": "<email_verification_token>"
 }
 ```
 
-#### POST `/dashboard/tickets`
-- Type: `POST`
-- Body: same as `/tickets`
+### 3.4 Login
 
-### Market (Public)
+`POST http://localhost:4000/v1/auth/login`  
+Authorization: Not required
 
-#### GET `/market/segments`
-- Type: `GET`
-- Body: none
-
-#### GET `/market/symbols`
-- Type: `GET`
-- Query (optional):
-- `segment=EQUITY`
-- `watchlist=true`
-
-#### GET `/market/history`
-- Type: `GET`
-- Required query:
-- `symbol`
-- `resolution`
-- `from`
-- `to`
-- Example: `/market/history?symbol=NSE:NIFTY%2050-INDEX&resolution=5&from=1700000000&to=1700003600`
-
-#### GET `/market/search`
-- Type: `GET`
-- Query: `q=<search_text>`
-
-#### GET `/market/login/:provider/url`
-- Type: `GET`
-- Example provider: `kite`
-
-#### POST `/market/login/:provider`
-- Type: `POST`
-- Body (JSON):
+Body:
 ```json
 {
-  "code": "provider_code_or_request_token"
+  "email": "student@example.com",
+  "password": "secret123",
+  "deviceId": "android-device-1"
 }
 ```
 
-#### GET `/market/login/:provider`
-- Type: `GET`
-- Provider callback route
+Success (200):
+```json
+{
+  "user": {
+    "_id": "65f1...",
+    "email": "student@example.com",
+    "name": "Student",
+    "isEmailVerified": true
+  },
+  "token": "<jwt_token>"
+}
+```
 
-### Utility
+### 3.5 Login ke turant baad FCM token hit karna hai
 
-#### GET `/health`
-- Type: `GET`
-- Body: none
+`POST http://localhost:4000/v1/notifications/fcm-token`  
+Authorization: **Required** (`Bearer <login token>`)
 
----
+Body:
+```json
+{
+  "token": "<fcm_device_token>"
+}
+```
 
-## 3. Private User APIs (Token Required)
+Success (200):
+```json
+{
+  "message": "Token registered successfully"
+}
+```
 
-### Auth Profile
+### 3.6 My Profile
 
-#### GET `/auth/me`
-- Type: `GET`
-- Body: none
+`GET http://localhost:4000/v1/auth/me`  
+Authorization: Required
 
-#### PATCH `/auth/me`
-- Type: `PATCH`
-- Content-Type: `form-data` (if avatar upload), otherwise JSON
-- Allowed body fields:
+`PATCH http://localhost:4000/v1/auth/me`  
+Authorization: Required
+
+Body example:
 ```json
 {
   "name": "New Name",
   "phone": "9999999999",
   "profile": {
-    "avatar": "https://example.com/a.jpg",
     "address": "Street 1",
     "city": "Mumbai",
     "state": "MH"
   }
 }
 ```
-- File key for upload: `avatar`
 
-#### POST `/auth/change-password`
-- Type: `POST`
-- Body (JSON):
+### 3.7 Change Password
+
+`POST http://localhost:4000/v1/auth/change-password`  
+Authorization: Required
+
+Body:
 ```json
 {
   "oldPassword": "secret123",
@@ -273,15 +192,53 @@ j- Type: `GET`
 }
 ```
 
-#### POST `/auth/logout`
-- Type: `POST`
-- Body: none
+Success:
+```json
+{
+  "message": "Password changed successfully. Please log in again."
+}
+```
 
-### Subscription
+### 3.8 Logout
 
-#### POST `/subscribe/purchase`
-- Type: `POST`
-- Body (JSON):
+`POST http://localhost:4000/v1/auth/logout`  
+Authorization: Required
+
+Success:
+```json
+{
+  "message": "Logged out successfully."
+}
+```
+
+## 4. Plans and Segments
+
+### 4.1 Get all plans (public)
+
+`GET http://localhost:4000/v1/plans`  
+Authorization: Not required
+
+Optional query:
+- `role=user`
+
+### 4.2 Get plan by ID (public)
+
+`GET http://localhost:4000/v1/plans/:planId`  
+Authorization: Not required
+
+### 4.3 Get subscription segments (public)
+
+`GET http://localhost:4000/v1/segments`  
+Authorization: Not required
+
+## 5. Subscription APIs
+
+### 5.1 Purchase subscription
+
+`POST http://localhost:4000/v1/subscribe/purchase`  
+Authorization: Required
+
+Body:
 ```json
 {
   "segments": ["EQUITY", "FNO"],
@@ -289,181 +246,348 @@ j- Type: `GET`
 }
 ```
 
-#### GET `/subscribe/status`
-- Type: `GET`
-- Body: none
+Success (201): returns subscription object.
 
-#### GET `/subscribe/has-access/:segment`
-- Type: `GET`
-- Example: `/subscribe/has-access/EQUITY`
-- Body: none
+### 5.2 Check my subscription status
 
-### Payments
+`GET http://localhost:4000/v1/subscribe/status`  
+Authorization: Required
 
-#### GET `/payments/details`
-- Type: `GET`
-- Body: none
-
-#### POST `/payments/verify-payment`
-- Type: `POST`
-- Content-Type: `form-data`
-- Body fields:
-- `segmentCodes` (text; JSON string like `["EQUITY","OPTIONS"]`)
-- `transactionId` (text)
-- `screenshot` (file, required)
-
-### Notifications
-
-#### GET `/notifications`
-- Type: `GET`
-- Body: none
-
-#### POST `/notifications/fcm-token`
-- Type: `POST`
-- Body (JSON):
+Success:
 ```json
 {
-  "token": "fcm_device_token"
+  "hasActiveSubscription": true,
+  "subscription": {
+    "_id": "..."
+  }
 }
 ```
 
-#### PATCH `/notifications/read-all`
-- Type: `PATCH`
-- Body: none
+### 5.3 Check access by segment
 
-#### GET `/notifications/:notificationId`
-- Type: `GET`
-- Body: none
+`GET http://localhost:4000/v1/subscribe/has-access/:segment`  
+Authorization: Required
 
-#### DELETE `/notifications/:notificationId`
-- Type: `DELETE`
-- Body: none
+Example: `/subscribe/has-access/EQUITY`
 
-#### PATCH `/notifications/:notificationId/read`
-- Type: `PATCH`
-- Body: none
+Success:
+```json
+{
+  "segment": "EQUITY",
+  "hasAccess": true
+}
+```
 
-### Watchlist
+## 6. Payment APIs
 
-#### GET `/watchlist`
-- Type: `GET`
-- Body: none
+### 6.1 Get payment details (UPI/QR data)
 
-#### POST `/watchlist`
-- Type: `POST`
-- Body (JSON):
+`GET http://localhost:4000/v1/payments/details`  
+Authorization: Required
+
+Success: returns payment detail object.
+
+### 6.2 Submit manual payment
+
+`POST http://localhost:4000/v1/payments/verify-payment`  
+Authorization: Required  
+Content type: `form-data`
+
+Fields:
+- `segmentCodes` (text, JSON string) example: `["EQUITY","FNO"]`
+- `transactionId` (text)
+- `screenshot` (file, required)
+
+Success (201):
+```json
+{
+  "message": "Payment submitted for verification",
+  "subscription": {
+    "_id": "...",
+    "status": "pending"
+  }
+}
+```
+
+## 7. Signals APIs
+
+### 7.1 Get signals list
+
+`GET http://localhost:4000/v1/signals`  
+Authorization: Optional (without token only free/limited data)
+
+Useful query params:
+- `page`, `limit`, `search`, `symbol`, `status`, `segment`, `type`, `timeframe`
+
+Success:
+```json
+{
+  "results": [],
+  "pagination": {
+    "page": 1,
+    "limit": 10,
+    "totalPages": 1,
+    "totalResults": 0
+  },
+  "stats": {}
+}
+```
+
+### 7.2 Get one signal
+
+`GET http://localhost:4000/v1/signals/:signalId`  
+Authorization: Optional
+
+### 7.3 Signal analysis
+
+`GET http://localhost:4000/v1/signals/:signalId/analysis`  
+Authorization: Optional
+
+Success:
+```json
+{
+  "symbol": "NSE:NIFTY 50-INDEX",
+  "analysis": {},
+  "volatility": {},
+  "timestamp": "2026-03-01T00:00:00.000Z"
+}
+```
+
+## 8. Watchlist APIs
+
+All watchlist APIs are private.
+
+### 8.1 Get my watchlists
+
+`GET http://localhost:4000/v1/watchlist`  
+Authorization: Required
+
+### 8.2 Create watchlist
+
+`POST http://localhost:4000/v1/watchlist`  
+Authorization: Required
+
+Body:
 ```json
 {
   "name": "My Watchlist"
 }
 ```
 
-#### DELETE `/watchlist/:id`
-- Type: `DELETE`
-- Body: none
+### 8.3 Delete watchlist
 
-#### PATCH `/watchlist/:id/toggle`
-- Type: `PATCH`
-- Body (JSON):
+`DELETE http://localhost:4000/v1/watchlist/:id`  
+Authorization: Required
+
+### 8.4 Add/remove signal in watchlist
+
+`PATCH http://localhost:4000/v1/watchlist/:id/toggle`  
+Authorization: Required
+
+Body:
 ```json
 {
   "signalId": "<signal_object_id>"
 }
 ```
 
-### Tickets
+## 9. Notification APIs
 
-#### GET `/tickets`
-- Type: `GET`
-- Body: none
+All notification APIs are private.
 
-#### GET `/tickets/:id`
-- Type: `GET`
-- Body: none
+### 9.1 My notifications
 
-#### GET `/dashboard/tickets`
-- Type: `GET`
-- Body: none
+`GET http://localhost:4000/v1/notifications`
 
-### Market (Private Endpoints)
-
-#### GET `/market/stats`
-- Type: `GET`
-- Body: none
-
-#### GET `/market/tickers`
-- Type: `GET`
-- Body: none
-
-#### GET `/market/sentiment`
-- Type: `GET`
-- Body: none
-
-#### GET `/market/analysis/:symbol`
-- Type: `GET`
-- Example: `/market/analysis/NSE:NIFTY%2050-INDEX`
-
-#### GET `/market/news/:symbol`
-- Type: `GET`
-- Example: `/market/news/AAPL`
-
-### Other User APIs
-
-#### GET `/economic-calendar`
-- Type: `GET`
-- Query (optional):
-- `from=YYYY-MM-DD`
-- `to=YYYY-MM-DD`
-
-#### GET `/bot/status`
-- Type: `GET`
-- Body: none
-
-#### GET `/search`
-- Type: `GET`
-- Query: `q=<min_2_chars>`
-
-### Strategies (Authenticated)
-
-#### GET `/strategies`
-- Type: `GET`
-- Body: none
-
-#### POST `/strategies`
-- Type: `POST`
-- Body (minimum JSON):
+Success:
 ```json
 {
-  "name": "RSI Reversal",
-  "symbol": "NSE:NIFTY 50-INDEX",
-  "timeframe": "5m",
-  "segment": "EQUITY"
+  "results": [],
+  "unreadCount": 0
 }
 ```
 
-#### PATCH `/strategies/:strategyId`
-- Type: `PATCH`
-- Body: fields you want to update
+### 9.2 Register FCM token
 
-#### DELETE `/strategies/:strategyId`
-- Type: `DELETE`
-- Body: none
+`POST http://localhost:4000/v1/notifications/fcm-token`
 
-#### POST `/strategies/seed`
-- Type: `POST`
-- Body: none
+Body:
+```json
+{
+  "token": "<fcm_device_token>"
+}
+```
 
----
+### 9.3 Read all notifications
 
-## 4. Quick Postman Flow (Recommended)
-1. Call `POST /v1/auth/login` and copy token.
-2. In Postman Collection Authorization, set Bearer token.
-3. Test private APIs (`/auth/me`, `/subscribe/status`, `/notifications`, etc.).
-4. For file upload APIs, use `form-data` (not raw JSON).
+`PATCH http://localhost:4000/v1/notifications/read-all`  
+Success: `204 No Content`
 
----
+### 9.4 Notification by ID
 
-## 5. Important Notes
-- Admin-only APIs are intentionally excluded from this user file.
-- Some APIs support both public and private behavior (for example signals with optional auth).
-- Ticket create is public now: `/v1/tickets` and `/v1/dashboard/tickets`.
+`GET http://localhost:4000/v1/notifications/:notificationId`
+
+`DELETE http://localhost:4000/v1/notifications/:notificationId`
+
+`PATCH http://localhost:4000/v1/notifications/:notificationId/read`
+
+## 10. Ticket APIs
+
+### 10.1 Create ticket (public)
+
+`POST http://localhost:4000/v1/tickets`  
+Authorization: Not required
+
+Body:
+```json
+{
+  "subject": "Need help",
+  "ticketType": "SUPPORT",
+  "description": "Issue details",
+  "contactEmail": "student@example.com",
+  "contactNumber": "9876543210"
+}
+```
+
+Success (201): returns created ticket object.
+
+### 10.2 My tickets (private)
+
+`GET http://localhost:4000/v1/tickets`  
+Authorization: Required
+
+### 10.3 Ticket by ID (private)
+
+`GET http://localhost:4000/v1/tickets/:id`  
+Authorization: Required
+
+## 11. Dashboard Ticket APIs
+
+### 11.1 Create ticket from dashboard (public)
+
+`POST http://localhost:4000/v1/dashboard/tickets`  
+Authorization: Not required
+
+Body same as ticket create.
+
+### 11.2 Get my dashboard tickets (private)
+
+`GET http://localhost:4000/v1/dashboard/tickets`  
+Authorization: Required
+
+## 12. Lead API (public onboarding)
+
+### 12.1 Create lead
+
+`POST http://localhost:4000/v1/leads`  
+Authorization: Not required  
+Content type: `form-data`
+
+Fields:
+- `name` (required)
+- `email` (required)
+- `phone` (required)
+- `password` (required)
+- `city` (optional)
+- `segment` (optional)
+- `plan` (optional)
+- `verificationToken` (required, from `/auth/verify-otp`)
+- `paymentScreenshot` (file, optional)
+
+Success (201): returns lead object.
+
+## 13. Market APIs
+
+### 13.1 Public market data
+
+- `GET http://localhost:4000/v1/market/segments`
+- `GET http://localhost:4000/v1/market/symbols?segment=EQUITY&watchlist=true`
+- `GET http://localhost:4000/v1/market/history?symbol=NSE:NIFTY%2050-INDEX&resolution=5&from=1700000000&to=1700003600`
+- `GET http://localhost:4000/v1/market/search?q=nifty`
+- `GET http://localhost:4000/v1/market/login/kite/url`
+- `POST http://localhost:4000/v1/market/login/kite`
+- `GET http://localhost:4000/v1/market/login/kite`
+
+Authorization: Not required
+
+`POST /market/login/:provider` body example:
+```json
+{
+  "code": "provider_code_or_request_token"
+}
+```
+
+### 13.2 Private market data
+
+- `GET http://localhost:4000/v1/market/stats`
+- `GET http://localhost:4000/v1/market/tickers`
+- `GET http://localhost:4000/v1/market/sentiment`
+- `GET http://localhost:4000/v1/market/analysis/:symbol`
+- `GET http://localhost:4000/v1/market/news/:symbol`
+
+Authorization: Required
+
+## 14. CMS APIs (public)
+
+- `GET http://localhost:4000/v1/cms/pages/:slug`
+- `GET http://localhost:4000/v1/cms/faqs`
+
+Authorization: Not required
+
+## 15. Announcement APIs (public read)
+
+- `GET http://localhost:4000/v1/announcements`
+- `GET http://localhost:4000/v1/announcements/:announcementId`
+- `GET http://localhost:4000/v1/announcements/export`
+
+Authorization: Not required
+
+Useful query params for list/export:
+- `status=active|scheduled|history`
+- `type=<value>`
+- `priority=<value>`
+- `page`, `limit`
+
+## 16. Economic Calendar API
+
+`GET http://localhost:4000/v1/economic-calendar`  
+Authorization: Required
+
+Optional query:
+- `from=YYYY-MM-DD`
+- `to=YYYY-MM-DD`
+
+## 18. Bot API
+
+`GET http://localhost:4000/v1/bot/status`  
+Authorization: Required
+
+Success:
+```json
+{
+  "status": "OFF"
+}
+```
+
+## 20. Common Error Shape
+
+Many errors come in this format:
+
+```json
+{
+  "status": "error",
+  "statusCode": 401,
+  "message": "Please authenticate"
+}
+```
+
+## 21. Super Quick Postman Flow
+
+1. `POST /v1/auth/register`
+2. `POST /v1/auth/send-otp` (email)
+3. `POST /v1/auth/verify-otp`
+4. `POST /v1/auth/login`
+5. Copy login token
+6. Add `Authorization: Bearer <token>`
+7. **Immediately call** `POST /v1/notifications/fcm-token`
+8. Then test other private APIs
