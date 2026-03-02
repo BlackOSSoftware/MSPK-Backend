@@ -2,6 +2,15 @@ import mongoose from 'mongoose';
 
 const signalSchema = new mongoose.Schema(
   {
+    uniqueId: {
+      type: String,
+      trim: true,
+    },
+    webhookId: {
+      type: String,
+      trim: true,
+      index: true,
+    },
     symbol: {
       type: String,
       required: true,
@@ -84,6 +93,26 @@ const signalSchema = new mongoose.Schema(
         type: String,
         required: false
     },
+    signalTime: {
+        type: Date,
+        required: false
+    },
+    exitPrice: {
+      type: Number,
+      required: false,
+    },
+    totalPoints: {
+      type: Number,
+      required: false,
+    },
+    exitReason: {
+      type: String,
+      required: false,
+    },
+    exitTime: {
+      type: Date,
+      required: false,
+    },
     metrics: {
         sma: Number,
         ema: Number,
@@ -96,6 +125,8 @@ const signalSchema = new mongoose.Schema(
     timestamps: true,
   }
 );
+
+signalSchema.index({ uniqueId: 1 }, { unique: true, sparse: true });
 
 const Signal = mongoose.model('Signal', signalSchema);
 

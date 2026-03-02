@@ -86,7 +86,51 @@ const getUserActivePlan = async (user) => {
       };
   }
 
-  // 2. Fallback to Legacy User.subscription (for Converted Leads / Old Users)
+  // 2. Check Segment-based Subscription Model (UserSubscription)
+  const UserSubscription = (await import('../models/UserSubscription.js')).default;
+  const activeSegmentSub = await UserSubscription.findOne({
+      user_id: user._id,
+      status: 'active',
+      is_active: true,
+      end_date: { $gt: new Date() }
+  }).sort({ end_date: -1 });
+
+  if (activeSegmentSub) {
+      const segments = Array.isArray(activeSegmentSub.segments) ? activeSegmentSub.segments : [];
+      const permissions = new Set();
+
+      segments.forEach(seg => {
+          const s = String(seg || '').toUpperCase();
+          if (s === 'EQUITY') {
+              permissions.add('EQUITY_INTRA');
+              permissions.add('EQUITY_DELIVERY');
+          }
+          if (s === 'CRYPTO') {
+              permissions.add('CRYPTO');
+          }
+          if (s === 'COMMODITY') {
+              permissions.add('MCX_FUT');
+          }
+          if (s === 'FOREX') {
+              permissions.add('CURRENCY');
+          }
+          if (s === 'OPTIONS') {
+              permissions.add('NIFTY_OPT');
+              permissions.add('BANKNIFTY_OPT');
+              permissions.add('FINNIFTY_OPT');
+              permissions.add('STOCK_OPT');
+          }
+      });
+
+      return {
+          planId: 'segments',
+          planName: segments.join(' + ') || 'Segments',
+          permissions: Array.from(permissions),
+          planExpiry: activeSegmentSub.end_date
+      };
+  }
+
+  // 3. Fallback to Legacy User.subscription (for Converted Leads / Old Users)
   if (user.subscription && user.subscription.plan && user.subscription.plan !== 'free') {
       const now = new Date();
       const expiry = user.subscription.expiresAt ? new Date(user.subscription.expiresAt) : null;

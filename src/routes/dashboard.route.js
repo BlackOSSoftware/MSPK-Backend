@@ -5,11 +5,8 @@ import dashboardController from '../controllers/dashboard.controller.js';
 const router = express.Router();
 
 // User Routes
-router.post('/tickets', dashboardController.createTicket);
-
-router.use(auth());
-
-router.get('/tickets', dashboardController.getMyTickets);
+router.post('/tickets', auth(), dashboardController.createTicket);
+router.get('/tickets', auth(), dashboardController.getMyTickets);
 
 // Admin Routes (Would normally be under /admin/...)
 // But since we are creating a unified module, let's keep it here or separate?

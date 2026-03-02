@@ -1,6 +1,7 @@
 
 import httpStatus from 'http-status';
 import catchAsync from '../utils/catchAsync.js';
+import ApiError from '../utils/ApiError.js';
 import Notification from '../models/Notification.js';
 
 const getMyNotifications = catchAsync(async (req, res) => {

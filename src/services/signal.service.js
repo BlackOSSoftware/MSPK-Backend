@@ -36,12 +36,21 @@ setInterval(() => {
 }, 5 * 60 * 1000);
 
 const createSignal = async (signalBody, user) => {
+  // Idempotency for webhook-style signals
+  if (signalBody.uniqueId) {
+    signalBody.uniqueId = String(signalBody.uniqueId).trim();
+    const existing = await Signal.findOne({ uniqueId: signalBody.uniqueId });
+    if (existing) return existing;
+  }
+
   // Normalize symbol for consistent matching
   const normalizedSymbol = signalBody.symbol?.toUpperCase().trim();
   const normalizedPrice = Math.round(parseFloat(signalBody.entryPrice) * 100) / 100; // Round to 2 decimals
   
   // Global Deduplication Guard (Prevent identical signals in 5 minutes)
-  const dedupKey = `${normalizedSymbol}_${signalBody.type}_${normalizedPrice}`;
+  const dedupKey = signalBody.uniqueId
+    ? `UID_${signalBody.uniqueId}`
+    : `${normalizedSymbol}_${signalBody.type}_${normalizedPrice}`;
   const now = Date.now();
   
   if (signalCreationGuard.has(dedupKey)) {
@@ -51,6 +60,12 @@ const createSignal = async (signalBody, user) => {
     // Block if created within last 5 minutes (300 seconds)
     if (timeSinceLastSignal < 300000) {
       logger.warn(`[SIGNAL_GUARD] Blocking duplicate signal for ${dedupKey} (${Math.round(timeSinceLastSignal/1000)}s ago)`);
+
+      if (signalBody.uniqueId) {
+        const existing = await Signal.findOne({ uniqueId: signalBody.uniqueId });
+        if (existing) return existing;
+      }
+
       return null;
     }
   }
@@ -62,7 +77,24 @@ const createSignal = async (signalBody, user) => {
       signalBody.category = mapSignalToCategory(signalBody);
   }
 
-  const signal = await Signal.create({ ...signalBody, createdBy: user.id });
+  let signal;
+  try {
+    signal = await Signal.create({ ...signalBody, createdBy: user?.id });
+  } catch (e) {
+    // Handle rare race where multiple webhook requests try to create the same uniqueId.
+    if (signalBody.uniqueId && e?.code === 11000) {
+      const existing = await Signal.findOne({ uniqueId: signalBody.uniqueId });
+      if (existing) return existing;
+    }
+    throw e;
+  }
+
+  // Realtime broadcast (for admin panel / live users)
+  try {
+    broadcastToAll({ type: 'new_signal', payload: signal });
+  } catch (e) {
+    // Passive fail (WS may not be initialized in some environments)
+  }
   
   // Create Announcement for the Feed
   try {
@@ -90,7 +122,7 @@ const createSignal = async (signalBody, user) => {
       // Payload for notification service
       const payload = JSON.stringify({ 
           ...signal.toJSON(), 
-          user: user.id,
+          user: user?.id ?? 'system',
           subType: 'SIGNAL_NEW'  // Explicitly tell worker to use New Signal Template
       }); 
       await redisClient.publish('signals', payload);
@@ -123,35 +155,44 @@ const querySignals = async (filter, options) => {
   };
 };
 
-const getSignalStats = async () => {
-  const stats = await Signal.aggregate([
-    {
-      $group: {
-        _id: null,
-        totalSignals: { $sum: 1 },
-        activeSignals: {
-          $sum: {
-            $cond: [{ $in: ["$status", ["Open", "Active", "Paused"]] }, 1, 0]
-          }
-        },
-        closedSignals: {
-          $sum: {
-            $cond: [{ $eq: ["$status", "Closed"] }, 1, 0]
-          }
-        },
-        targetHit: {
-          $sum: {
-            $cond: [{ $eq: ["$status", "Target Hit"] }, 1, 0]
-          }
-        },
-        stoplossHit: {
-          $sum: {
-            $cond: [{ $eq: ["$status", "Stoploss Hit"] }, 1, 0]
-          }
+const getSignalById = async (signalId) => {
+  return Signal.findById(signalId);
+};
+
+const getSignalStats = async (filter = {}) => {
+  const pipeline = [];
+  if (filter && Object.keys(filter).length > 0) {
+    pipeline.push({ $match: filter });
+  }
+
+  pipeline.push({
+    $group: {
+      _id: null,
+      totalSignals: { $sum: 1 },
+      activeSignals: {
+        $sum: {
+          $cond: [{ $in: ["$status", ["Open", "Active", "Paused"]] }, 1, 0]
+        }
+      },
+      closedSignals: {
+        $sum: {
+          $cond: [{ $eq: ["$status", "Closed"] }, 1, 0]
+        }
+      },
+      targetHit: {
+        $sum: {
+          $cond: [{ $eq: ["$status", "Target Hit"] }, 1, 0]
+        }
+      },
+      stoplossHit: {
+        $sum: {
+          $cond: [{ $eq: ["$status", "Stoploss Hit"] }, 1, 0]
         }
       }
     }
-  ]);
+  });
+
+  const stats = await Signal.aggregate(pipeline);
 
   const data = stats[0] || { totalSignals: 0, activeSignals: 0, closedSignals: 0, targetHit: 0, stoplossHit: 0 };
   
@@ -233,6 +274,7 @@ const deleteSignalById = async (signalId) => {
 export default {
   createSignal,
   querySignals,
+  getSignalById,
   getSignalStats,
   updateSignalById,
   deleteSignalById,

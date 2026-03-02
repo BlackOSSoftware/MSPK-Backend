@@ -1,7 +1,146 @@
 import httpStatus from 'http-status';
 import catchAsync from '../utils/catchAsync.js';
 import ApiError from '../utils/ApiError.js';
-import { signalService, subscriptionService, allTickService, technicalAnalysisService } from '../services/index.js';
+import { signalService, allTickService, technicalAnalysisService } from '../services/index.js';
+
+const getAllowedAccessFromPermissions = (permissions = []) => {
+  const perms = Array.isArray(permissions) ? permissions : [];
+  const allowedSegments = [];
+  const allowedCategories = [];
+
+  // Map Permissions to Segments/Categories
+  if (perms.includes('COMMODITY') || perms.includes('MCX_FUT')) {
+    allowedSegments.push('COMMODITY', 'MCX');
+    allowedCategories.push('MCX_FUT');
+  }
+  if (perms.includes('EQUITY_INTRA') || perms.includes('EQUITY_DELIVERY')) {
+    allowedSegments.push('EQUITY', 'NSE', 'BSE');
+    allowedCategories.push('EQUITY_INTRA', 'EQUITY_DELIVERY');
+  }
+  if (perms.includes('NIFTY_OPT') || perms.includes('BANKNIFTY_OPT') || perms.includes('FINNIFTY_OPT') || perms.includes('STOCK_OPT')) {
+    allowedSegments.push('FNO', 'NFO', 'CDS');
+    allowedCategories.push('NIFTY_OPT', 'BANKNIFTY_OPT', 'STOCK_OPT', 'FINNIFTY_OPT');
+  }
+  if (perms.includes('CURRENCY')) {
+    allowedSegments.push('CURRENCY', 'CDS', 'BCD');
+    allowedCategories.push('CURRENCY');
+  }
+  if (perms.includes('CRYPTO')) {
+    allowedSegments.push('CRYPTO', 'BINANCE');
+    allowedCategories.push('CRYPTO');
+  }
+  if (perms.includes('BTST')) {
+    allowedSegments.push('EQUITY', 'NSE', 'BSE');
+    allowedCategories.push('BTST');
+  }
+  if (perms.includes('HERO_ZERO')) {
+    allowedSegments.push('EQUITY', 'NSE', 'BSE');
+    allowedCategories.push('HERO_ZERO');
+  }
+
+  return { allowedSegments, allowedCategories };
+};
+
+const getSignalAccessContext = async (req) => {
+  const tokenProvided = Boolean(req.headers.authorization);
+
+  if (!req.user) {
+    return {
+      mode: 'guest',
+      tokenProvided,
+      planStatus: null,
+      planName: null,
+      planExpiry: null,
+      permissions: [],
+      allowedSegments: [],
+      allowedCategories: [],
+      scope: 'free_only',
+      message: 'Guest mode: only free signals are visible. Login to view premium signals.'
+    };
+  }
+
+  if (req.user.role === 'admin') {
+    return {
+      mode: 'admin',
+      tokenProvided,
+      planStatus: 'active',
+      planName: 'admin',
+      planExpiry: null,
+      permissions: [],
+      allowedSegments: [],
+      allowedCategories: [],
+      scope: 'all',
+      message: null
+    };
+  }
+
+  const { default: authService } = await import('../services/auth.service.js');
+  const planData = await authService.getUserActivePlan(req.user);
+  const permissions = Array.isArray(planData?.permissions) ? planData.permissions : [];
+  const now = new Date();
+  const planExpiry = planData?.planExpiry ? new Date(planData.planExpiry) : null;
+  const planExpiryValid = planExpiry instanceof Date && !Number.isNaN(planExpiry.getTime());
+  const isActiveByExpiry = planExpiryValid && planExpiry > now;
+  const hasPlanId = Boolean(planData?.planId);
+  const planStatus = isActiveByExpiry || permissions.length > 0 || (hasPlanId && !planExpiryValid) ? 'active' : 'expired';
+
+  const { allowedSegments, allowedCategories } =
+    planStatus === 'active' ? getAllowedAccessFromPermissions(permissions) : { allowedSegments: [], allowedCategories: [] };
+
+  return {
+    mode: 'user',
+    tokenProvided,
+    planStatus,
+    planName: planData?.planName || null,
+    planExpiry: planData?.planExpiry || null,
+    permissions,
+    allowedSegments,
+    allowedCategories,
+    scope: allowedSegments.length > 0 || allowedCategories.length > 0 ? 'free_and_subscribed' : 'free_only',
+    message:
+      planStatus === 'active'
+        ? null
+        : 'Plan expired: only free signals are visible. Renew to view premium signals.'
+  };
+};
+
+const buildBaseFilterForAccess = (access) => {
+  if (access.mode === 'admin') return {};
+  if (!access.allowedSegments?.length && !access.allowedCategories?.length) return { isFree: true };
+
+  return {
+    $or: [
+      { isFree: true },
+      {
+        $or: [
+          { segment: { $in: access.allowedSegments } },
+          { category: { $in: access.allowedCategories } }
+        ]
+      }
+    ]
+  };
+};
+
+const assertSignalAccess = (access, signal) => {
+  if (access.mode === 'admin') return;
+  if (signal.isFree) return;
+
+  if (access.mode === 'guest') {
+    throw new ApiError(httpStatus.UNAUTHORIZED, 'Please login to view this signal');
+  }
+
+  if (access.planStatus !== 'active') {
+    throw new ApiError(httpStatus.FORBIDDEN, 'Plan expired. Please renew to view premium signals.');
+  }
+
+  const hasAccess =
+    (access.allowedSegments || []).includes(signal.segment) ||
+    (access.allowedCategories || []).includes(signal.category);
+
+  if (!hasAccess) {
+    throw new ApiError(httpStatus.FORBIDDEN, 'You do not have access to this signal');
+  }
+};
 
 const createSignal = catchAsync(async (req, res) => {
   const signal = await signalService.createSignal(req.body, req.user);
@@ -13,6 +152,10 @@ const getSignal = catchAsync(async (req, res) => {
   if (!signal) {
     throw new ApiError(httpStatus.NOT_FOUND, 'Signal not found');
   }
+
+  const access = await getSignalAccessContext(req);
+  assertSignalAccess(access, signal);
+
   res.send(signal);
 });
 
@@ -31,63 +174,17 @@ const createManualSignal = catchAsync(async (req, res) => {
 });
 
 const getSignals = catchAsync(async (req, res) => {
-  // Logic: Show all if admin. If user, show Free OR Subscribed segments.
+  // Logic: Show all if admin. If user/guest, show Free OR Subscribed segments.
   let filter = {};
   const { page = 1, limit = 10 } = req.query;
 
-  // 1. Build Base Filter (Permissions)
-  let baseFilter = {};
-  if (!req.user || req.user.role !== 'admin') {
-      let allowedCategories = [];
-      let allowedSegments = []; 
-
-      // If user is logged in, fetch their subscriptions (with legacy fallback)
-      if (req.user) {
-          const { default: authService } = await import('../services/auth.service.js');
-          const planData = await authService.getUserActivePlan(req.user);
-          
-          if (planData && planData.permissions.length > 0) {
-              const perms = planData.permissions;
-              allowedSegments = []; 
-              allowedCategories = [];
-
-              // Map Permissions to Segments
-              if (perms.includes('COMMODITY') || perms.includes('MCX_FUT')) {
-                   allowedSegments.push('COMMODITY', 'MCX');
-                   allowedCategories.push('MCX_FUT');
-              }
-              if (perms.includes('EQUITY_INTRA') || perms.includes('EQUITY_DELIVERY')) {
-                   allowedSegments.push('EQUITY', 'NSE', 'BSE');
-                   allowedCategories.push('EQUITY_INTRA', 'EQUITY_DELIVERY');
-              }
-              if (perms.includes('NIFTY_OPT') || perms.includes('BANKNIFTY_OPT')) {
-                   allowedSegments.push('FNO', 'NFO', 'CDS');
-                   allowedCategories.push('NIFTY_OPT', 'BANKNIFTY_OPT', 'STOCK_OPT', 'FINNIFTY_OPT');
-              }
-              if (perms.includes('CURRENCY')) {
-                   allowedSegments.push('CURRENCY', 'CDS', 'BCD');
-                   allowedCategories.push('CURRENCY');
-              }
-              if (perms.includes('CRYPTO')) {
-                   allowedSegments.push('CRYPTO', 'BINANCE');
-                   allowedCategories.push('CRYPTO');
-              }
-          }
-      }
-
-      baseFilter = {
-          $or: [
-             { isFree: true }, 
-             {
-                 // Subscribed (Active OR Closed)
-                 $or: [
-                    { segment: { $in: allowedSegments } },
-                    { category: { $in: allowedCategories } }
-                 ]
-             }
-          ]
-      };
+  const access = await getSignalAccessContext(req);
+  if (access.mode === 'user' && access.planStatus !== 'active') {
+      throw new ApiError(httpStatus.FORBIDDEN, 'Plan expired. Please renew to view signals.');
   }
+
+  // 1. Build Base Filter (Permissions)
+  const baseFilter = buildBaseFilterForAccess(access);
 
   // 2. Build Query Filters Array
   const { search, symbol, status, segment, type, dateFilter, signalId } = req.query;
@@ -157,11 +254,13 @@ const getSignals = catchAsync(async (req, res) => {
   // 3. Query Data
   const signalsData = await signalService.querySignals(filter, { page, limit });
   
-  // 4. Get Global Stats
-  const stats = await signalService.getSignalStats();
+  // 4. Get Visible Stats (based on access scope)
+  const stats = await signalService.getSignalStats(baseFilter);
 
   const formattedResults = signalsData.results.map(s => ({
       id: s._id,
+      uniqueId: s.uniqueId,
+      webhookId: s.webhookId,
       symbol: s.symbol,
       type: s.type,
       entry: s.entryPrice,
@@ -169,6 +268,11 @@ const getSignals = catchAsync(async (req, res) => {
       status: s.status,
       timestamp: s.createdAt,
       createdAt: s.createdAt,
+      signalTime: s.signalTime,
+      exitPrice: s.exitPrice,
+      totalPoints: s.totalPoints,
+      exitReason: s.exitReason,
+      exitTime: s.exitTime,
       segment: s.segment,
       category: s.category,
       targets: s.targets,
@@ -181,6 +285,15 @@ const getSignals = catchAsync(async (req, res) => {
   }));
 
   res.send({
+      access: {
+          mode: access.mode,
+          scope: access.scope,
+          tokenProvided: access.tokenProvided,
+          planStatus: access.planStatus,
+          planName: access.planName,
+          planExpiry: access.planExpiry,
+          message: access.message
+      },
       results: formattedResults,
       pagination: {
           page: signalsData.page,
@@ -210,6 +323,10 @@ const getSignalAnalysis = catchAsync(async (req, res) => {
     if (!signal) {
         throw new ApiError(httpStatus.NOT_FOUND, 'Signal not found');
     }
+
+    const access = await getSignalAccessContext(req);
+    assertSignalAccess(access, signal);
+
     const symbol = signal.symbol;
 
     // 2. Fetch Candles Parallel (5m, 15m, 1H, 1D)

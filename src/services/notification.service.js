@@ -19,6 +19,11 @@ class NotificationService {
   }
 
   init() {
+    // Ensure we are actually subscribed to the channel we claim to listen to.
+    redisSubscriber.subscribe('signals', (err) => {
+      if (err) logger.error('Failed to subscribe to signals channel', err);
+    });
+
     // Subscribe to signals channel from Redis
     // Note: redisSubscriber is shared, so we just add another listener
     redisSubscriber.on('message', (channel, message) => {
@@ -37,6 +42,22 @@ class NotificationService {
 
   async scheduleNotifications(signal) {
       try {
+          const getSignalSegmentGroup = (sig) => {
+              const segment = (sig?.segment || '').toString().trim().toUpperCase();
+              const category = (sig?.category || '').toString().trim().toUpperCase();
+
+              if (category === 'CRYPTO' || segment === 'CRYPTO' || segment === 'BINANCE') return 'CRYPTO';
+              if (['MCX', 'COMMODITY'].includes(segment)) return 'COMMODITY';
+              if (['CDS', 'BCD', 'CURRENCY'].includes(segment)) return 'CURRENCY';
+              if (['NFO', 'FNO', 'FO', 'INDICES'].includes(segment)) return 'FNO';
+              if (['NSE', 'BSE', 'EQ', 'EQUITY'].includes(segment)) return 'EQUITY';
+
+              // Category fallback (options)
+              if (['NIFTY_OPT', 'BANKNIFTY_OPT', 'FINNIFTY_OPT', 'STOCK_OPT'].includes(category)) return 'FNO';
+
+              return null;
+          };
+
           // Fetch Global Notification Settings
           const settings = await Setting.find({ 
               key: { $in: ['telegram_config', 'whatsapp_config', 'push_config'] } 
@@ -62,11 +83,9 @@ class NotificationService {
           // 2. TARGETED NOTIFICATIONS (WhatsApp / Push)
           // Find users with Active Subscriptions matching this Segment
           
-          // Step A: Find Plans that cover this segment
-          // Note: Plan schema uses 'segment' enum. Signal has 'segment' field.
-          // Adjust matching logic if segment names differ. Assuming exact match for now.
+          // Step A: Find Plans that cover this segment (segment groups derived from plan permissions)
           const { default: Subscription } = await import('../models/Subscription.js');
-          const { default: Plan } = await import('../models/Plan.js');
+          const { default: authService } = await import('./auth.service.js');
 
           // Find active subscriptions
           const now = new Date();
@@ -75,16 +94,30 @@ class NotificationService {
               endDate: { $gt: now }
           }).populate('plan');
 
+          const signalSegmentGroup = getSignalSegmentGroup(signal);
+
           // Filter for segment match
           const eligibleUserIds = new Set();
           
           activeSubs.forEach(sub => {
               if (sub.plan && sub.user) {
-                  // Direct Segment Match
-                  if (sub.plan.segment === signal.segment) {
+                  const planSegmentsFromPerms = Array.isArray(sub.plan.permissions) && sub.plan.permissions.length > 0
+                      ? authService.getSegmentsFromPermissions(sub.plan.permissions)
+                      : [];
+
+                  const planSegmentGroups = planSegmentsFromPerms.length > 0
+                      ? planSegmentsFromPerms
+                      : (sub.plan.segment ? [sub.plan.segment] : []);
+
+                  // Segment group match (preferred)
+                  if (signalSegmentGroup && planSegmentGroups.includes(signalSegmentGroup)) {
                       eligibleUserIds.add(sub.user.toString());
                   }
-                  // TODO: Handle 'All Segments' plans if any
+
+                  // Fallback: if group not detected, fall back to exact match
+                  if (!signalSegmentGroup && sub.plan.segment && sub.plan.segment === signal.segment) {
+                      eligibleUserIds.add(sub.user.toString());
+                  }
               }
           });
 

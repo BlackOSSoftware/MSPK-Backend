@@ -233,6 +233,57 @@ paths:
           description: Signal details
 
   # ============================================================
+  # WEBHOOKS
+  # ============================================================
+  /webhooks/signals:
+    post:
+      summary: Receive trading signal (Webhook)
+      tags: [Webhooks]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - title: EntrySignal
+                  type: object
+                  required: [event, uniq_id, symbol, segment, trade_type, timeframe, entry_price, targets, stop_loss, signal_time]
+                  properties:
+                    event: { type: string, enum: ["ENTRY"] }
+                    uniq_id: { type: string }
+                    symbol: { type: string }
+                    segment: { type: string }
+                    trade_type: { type: string, enum: ["BUY", "SELL"] }
+                    timeframe: { type: string }
+                    entry_price: { type: number }
+                    is_free: { type: boolean, description: "Optional. Defaults to true in development, false otherwise." }
+                    targets:
+                      type: object
+                      required: [t1]
+                      properties:
+                        t1: { type: number }
+                        t2: { type: number }
+                        t3: { type: number }
+                    stop_loss: { type: number }
+                    signal_time: { type: string, format: date-time }
+                - title: ExitSignal
+                  type: object
+                  required: [event, uniq_id, symbol, segment, exit_price, total_points, exit_reason, exit_time]
+                  properties:
+                    event: { type: string, enum: ["EXIT"] }
+                    uniq_id: { type: string }
+                    symbol: { type: string }
+                    segment: { type: string }
+                    exit_price: { type: number }
+                    total_points: { type: number }
+                    exit_reason: { type: string }
+                    exit_time: { type: string, format: date-time }
+      responses:
+        200:
+          description: Accepted (idempotent)
+
+  # ============================================================
   # SUBSCRIPTIONS & PLANS
   # ============================================================
   /plans:
@@ -297,11 +348,13 @@ paths:
           application/json:
             schema:
               type: object
-              required: [subject, message]
+              required: [subject, ticketType, description, contactEmail, contactNumber]
               properties:
                 subject: { type: string }
-                message: { type: string }
-                priority: { type: string, enum: ["Low", "Medium", "High"] }
+                ticketType: { type: string }
+                description: { type: string }
+                contactEmail: { type: string, format: email }
+                contactNumber: { type: string }
       responses:
         201:
           description: Ticket created
