@@ -8,6 +8,10 @@ const getStats = catchAsync(async (req, res) => {
 });
 
 const createTicket = catchAsync(async (req, res) => {
+    const userId = req.user?.id || req.user?._id;
+    if (!userId) {
+        return res.status(httpStatus.UNAUTHORIZED).send({ message: 'Please authenticate' });
+    }
     const ticketBody = {
         subject: req.body.subject,
         ticketType: req.body.ticketType,
@@ -15,7 +19,7 @@ const createTicket = catchAsync(async (req, res) => {
         contactEmail: req.body.contactEmail,
         contactNumber: req.body.contactNumber
     };
-    const ticket = await dashboardService.createTicket(ticketBody, req.user);
+    const ticket = await dashboardService.createTicket(ticketBody, { ...req.user, id: userId });
     res.status(httpStatus.CREATED).send(ticket);
 });
 

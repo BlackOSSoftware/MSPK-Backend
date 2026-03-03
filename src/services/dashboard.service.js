@@ -111,6 +111,7 @@ const getAdminStats = async () => {
  * Create Support Ticket
  */
 const createTicket = async (ticketBody, user) => {
+  const userId = user?.id || user?._id;
   const lastTicket = await Ticket.findOne().sort({ createdAt: -1 });
   let nextId = 1001;
 
@@ -121,7 +122,7 @@ const createTicket = async (ticketBody, user) => {
 
   const ticket = await Ticket.create({
     ticketId: `TK-${nextId}`,
-    user: user?.id,
+    user: userId,
     subject: ticketBody.subject,
     ticketType: ticketBody.ticketType,
     description: ticketBody.description,

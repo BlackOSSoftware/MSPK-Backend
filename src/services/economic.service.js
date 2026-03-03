@@ -27,21 +27,55 @@ class EconomicService {
     /**
      * Get Events from Database (Filtered)
      */
-    async getEvents(filter = {}) {
+    async getEvents(filter = {}, options = {}) {
         const query = {};
-        if (filter.from && filter.to) {
-            const toDate = new Date(filter.to);
-            toDate.setHours(23, 59, 59, 999);
-            query.date = { 
-                $gte: new Date(filter.from), 
-                $lte: toDate
-            };
-        } else if (filter.from) {
-             query.date = { $gte: new Date(filter.from) };
+
+        const page = Math.max(1, Number.parseInt(options.page, 10) || 1);
+        const limit = [10, 20].includes(Number.parseInt(options.limit, 10))
+            ? Number.parseInt(options.limit, 10)
+            : 10;
+
+        if (filter.from || filter.to) {
+            query.date = {};
+
+            if (filter.from) {
+                const fromDate = new Date(filter.from);
+                fromDate.setHours(0, 0, 0, 0);
+                query.date.$gte = fromDate;
+            }
+
+            if (filter.to) {
+                const toDate = new Date(filter.to);
+                toDate.setHours(23, 59, 59, 999);
+                query.date.$lte = toDate;
+            }
         }
-        
-        // Return latest events from DB
-        return await EconomicEvent.find(query).sort({ date: 1 });
+
+        if (filter.impact) {
+            const normalizedImpact = String(filter.impact).toLowerCase();
+            if (normalizedImpact === 'important') {
+                query.impact = 'High';
+            } else if (['low', 'medium', 'high', 'none'].includes(normalizedImpact)) {
+                query.impact = normalizedImpact.charAt(0).toUpperCase() + normalizedImpact.slice(1);
+            }
+        }
+
+        const totalResults = await EconomicEvent.countDocuments(query);
+        const totalPages = Math.max(1, Math.ceil(totalResults / limit));
+        const skip = (page - 1) * limit;
+
+        const results = await EconomicEvent.find(query)
+            .sort({ date: -1 })
+            .skip(skip)
+            .limit(limit);
+
+        return {
+            results,
+            page,
+            limit,
+            totalPages,
+            totalResults,
+        };
     }
 
     /**

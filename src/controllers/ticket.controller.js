@@ -3,6 +3,10 @@ import catchAsync from '../utils/catchAsync.js';
 import Ticket from '../models/Ticket.js';
 
 const createTicket = catchAsync(async (req, res) => {
+  const userId = req.user?.id || req.user?._id;
+  if (!userId) {
+    return res.status(httpStatus.UNAUTHORIZED).send({ message: 'Please authenticate' });
+  }
   const lastTicket = await Ticket.findOne().sort({ createdAt: -1 });
   let nextId = 1001;
   if (lastTicket?.ticketId) {
@@ -12,7 +16,7 @@ const createTicket = catchAsync(async (req, res) => {
 
   const ticket = await Ticket.create({
     ticketId: `TK-${nextId}`,
-    user: req.user?.id,
+    user: userId,
     subject: req.body.subject,
     ticketType: req.body.ticketType,
     description: req.body.description,
@@ -25,7 +29,11 @@ const createTicket = catchAsync(async (req, res) => {
 });
 
 const getTickets = catchAsync(async (req, res) => {
-  const filter = req.user.role === 'admin' ? {} : { user: req.user.id };
+  const userId = req.user?.id || req.user?._id;
+  if (!userId && req.user?.role !== 'admin') {
+    return res.status(httpStatus.UNAUTHORIZED).send({ message: 'Please authenticate' });
+  }
+  const filter = req.user.role === 'admin' ? {} : { user: userId };
   const tickets = await Ticket.find(filter)
     .sort({ updatedAt: -1 })
     .populate('user', 'name email phone');
@@ -33,12 +41,16 @@ const getTickets = catchAsync(async (req, res) => {
 });
 
 const getTicketById = catchAsync(async (req, res) => {
+  const userId = req.user?.id || req.user?._id;
+  if (!userId && req.user?.role !== 'admin') {
+    return res.status(httpStatus.UNAUTHORIZED).send({ message: 'Please authenticate' });
+  }
   const ticket = await Ticket.findById(req.params.id).populate('user', 'name email phone');
   if (!ticket) {
     return res.status(httpStatus.NOT_FOUND).send({ message: 'Ticket not found' });
   }
 
-  if (req.user.role !== 'admin' && ticket.user?._id.toString() !== req.user.id.toString()) {
+  if (req.user.role !== 'admin' && ticket.user?._id.toString() !== userId.toString()) {
     return res.status(httpStatus.FORBIDDEN).send({ message: 'Forbidden' });
   }
 
