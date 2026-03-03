@@ -7,6 +7,7 @@ import logger from '../config/log.js';
 
 // Seed Data (Standard Set)
 import marketDataService from '../services/marketData.service.js';
+import { mt5Service } from '../services/mt5.service.js';
 import { kiteService } from '../services/kite.service.js';
 import subscriptionService from '../services/subscription.service.js';
 import { technicalAnalysisService } from '../services/index.js';
@@ -35,6 +36,7 @@ const enrichMarketSymbols = (symbols) => {
             name: s.name,
             segment: s.segment,
             exchange: s.exchange,
+            provider: s.provider || null,
             price: live,
             prevClose: Number.isFinite(prevClose) ? parseFloat(prevClose.toFixed(2)) : 0,
             change: Number.isFinite(change) ? parseFloat(change.toFixed(2)) : 0,
@@ -129,6 +131,11 @@ const getUserWatchlist = catchAsync(async (req, res) => {
         .map(sym => map.get(sym))
         .filter(Boolean);
 
+    const mt5Symbols = ordered.filter(s => s.provider === 'mt5').map(s => s.symbol);
+    if (mt5Symbols.length > 0) {
+        mt5Service.subscribe(mt5Symbols);
+    }
+
     const needsQuote = ordered.some(s => {
         const live = marketDataService.currentPrices[s.symbol];
         const fallback = (s.lastPrice && s.lastPrice > 0) || (s.prevClose && s.prevClose > 0);
@@ -178,12 +185,17 @@ const removeUserWatchlist = catchAsync(async (req, res) => {
     }
 
     const normalized = String(symbol).toUpperCase();
+    const symbolDoc = await MasterSymbol.findOne({ symbol: normalized }).select('provider symbol');
     const user = req.user;
     const list = Array.isArray(user.marketWatchlist) ? user.marketWatchlist : [];
     const next = list.filter(s => s !== normalized);
 
     user.marketWatchlist = next;
     await user.save();
+
+    if (symbolDoc?.provider === 'mt5') {
+        mt5Service.unsubscribe([symbolDoc.symbol]);
+    }
 
     res.send({ symbols: user.marketWatchlist });
 });

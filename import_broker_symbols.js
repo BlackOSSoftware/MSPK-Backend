@@ -1,0 +1,101 @@
+import mongoose from 'mongoose';
+import dotenv from 'dotenv';
+import fs from 'fs';
+import path from 'path';
+import MasterSymbol from './src/models/MasterSymbol.js';
+
+dotenv.config();
+
+const SEGMENT_MAP = {
+    forex: 'CURRENCY',
+    crypto: 'CRYPTO',
+    commodity: 'COMMODITY',
+    index: 'INDICES',
+    stock: 'EQUITY',
+    etf: 'EQUITY',
+    future: 'COMMODITY'
+};
+
+function mapExchange(segment) {
+    if (segment === 'CURRENCY') return 'FOREX';
+    if (segment === 'CRYPTO') return 'CRYPTO';
+    return 'MT5';
+}
+
+async function run() {
+    try {
+        const inputPath = process.argv[2] ||
+            process.env.BROKER_SYMBOLS_PATH ||
+            path.join('D:', 'BlackOS', 'market', 'public', 'logos', 'BROKER_SYMBOLS_SEGMENTS.json');
+
+        if (!fs.existsSync(inputPath)) {
+            throw new Error(`File not found: ${inputPath}`);
+        }
+
+        const raw = fs.readFileSync(inputPath, 'utf8');
+        const data = JSON.parse(raw);
+        const symbols = Array.isArray(data.symbols) ? data.symbols : [];
+
+        console.log(`Loaded ${symbols.length} broker symbols.`);
+
+        console.log('Connecting to MongoDB...');
+        await mongoose.connect(process.env.MONGO_URI);
+        console.log('Connected.');
+
+        let upserted = 0;
+        let skipped = 0;
+
+        for (const item of symbols) {
+            const baseSegment = item.segment || 'other';
+            const segment = SEGMENT_MAP[baseSegment] || 'EQUITY';
+            const exchange = mapExchange(segment);
+            const symbol = String(item.symbol || '').trim();
+            if (!symbol) {
+                skipped += 1;
+                continue;
+            }
+
+            const doc = {
+                symbol,
+                name: item.description || symbol,
+                segment,
+                exchange,
+                lotSize: Number(item?.trading?.contract_size) || 1,
+                tickSize: Number(item?.pricing?.tick_size) || Number(item?.pricing?.point) || 0.01,
+                isActive: true,
+                isWatchlist: false,
+                provider: 'mt5',
+                sourceSymbol: symbol,
+                subsegment: item.subsegment || null,
+                region: item.region || null,
+                meta: {
+                    broker_group: item.broker_group || null,
+                    currencies: item.currencies || null,
+                    pricing: item.pricing || null,
+                    trading: item.trading || null,
+                    tags: item.tags || []
+                }
+            };
+
+            const result = await MasterSymbol.updateOne(
+                { symbol },
+                { $set: doc },
+                { upsert: true }
+            );
+
+            if (result.upsertedCount || result.modifiedCount) {
+                upserted += 1;
+            } else {
+                skipped += 1;
+            }
+        }
+
+        console.log(`Import complete. Upserted: ${upserted}, Skipped: ${skipped}`);
+        process.exit(0);
+    } catch (error) {
+        console.error('Import failed:', error);
+        process.exit(1);
+    }
+}
+
+run();

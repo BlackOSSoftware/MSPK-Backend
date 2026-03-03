@@ -44,6 +44,26 @@ const masterSymbolSchema = new mongoose.Schema(
         type: Date,
         default: null
     },
+    provider: {
+        type: String,
+        default: null // e.g. 'kite', 'alltick', 'mt5'
+    },
+    sourceSymbol: {
+        type: String,
+        default: null
+    },
+    subsegment: {
+        type: String,
+        default: null
+    },
+    region: {
+        type: String,
+        default: null
+    },
+    meta: {
+        type: mongoose.Schema.Types.Mixed,
+        default: null
+    },
     instrumentToken: {
         type: String // Kite Instrument Token
     },

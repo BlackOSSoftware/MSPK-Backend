@@ -6,6 +6,7 @@ import { kiteService } from './kite.service.js';
 import { kiteInstrumentsService } from './kiteInstruments.service.js';
 import { allTickService } from './alltick.service.js';
 import { economicService } from './economic.service.js';
+import { mt5Service } from './mt5.service.js';
 import pipeline from '../utils/pipeline/DataPipeline.js'; // Pipeline Optimization
 import { redisClient } from './redis.service.js';
 import logger from '../config/log.js';
@@ -28,6 +29,8 @@ class MarketDataService extends EventEmitter {
         this.startTime = new Date();
         this.config = {}; // Prevent startup crash
         this._lastPersistedAt = {};
+        this.mt5TickCount = 0;
+        this.mt5Latency = 0;
 
         // Throttle noisy stats logs (avoid slowing down dev terminals / log pipelines)
         this._lastKiteStatsLogAtMs = 0;
@@ -97,7 +100,9 @@ class MarketDataService extends EventEmitter {
         logger.info(`MARKET_DATA: Adding new symbol ${symbolDoc.symbol} to memory`);
         this.symbols[symbolDoc.symbol] = symbolDoc;
         
-        if (symbolDoc.instrumentToken) {
+        if (symbolDoc.provider === 'mt5') {
+            mt5Service.subscribe([symbolDoc.symbol]);
+        } else if (symbolDoc.instrumentToken) {
             this.tokenMap[symbolDoc.instrumentToken] = symbolDoc.symbol;
             if (this.adapter && this.adapter.isTickerConnected) {
                 this.adapter.subscribe([symbolDoc.instrumentToken]);
@@ -332,6 +337,8 @@ class MarketDataService extends EventEmitter {
                 logger.debug(`[ALLTICK_STATS] Batch: ${ticks.length}, total ticks: ${this.allTickTickCount}`);
                 this._lastAllTickStatsLogAtMs = nowMs;
             }
+        } else if (provider === 'mt5') {
+            this.mt5TickCount += ticks.length;
         }
 
         ticks.forEach(tick => {
@@ -370,6 +377,7 @@ class MarketDataService extends EventEmitter {
                 quote.ohlc.open = tick.ohlc.open || quote.ohlc.open;
                 quote.ohlc.high = tick.ohlc.high || quote.ohlc.high;
                 quote.ohlc.low = tick.ohlc.low || quote.ohlc.low;
+                quote.ohlc.close = tick.ohlc.close || quote.ohlc.close;
             } else {
                 // AllTick or Manual Update: Manual High/Low tracking
                 if (price > (quote.ohlc.high || 0)) quote.ohlc.high = price;
@@ -558,7 +566,8 @@ class MarketDataService extends EventEmitter {
         // Can go live if EITHER provider is valid
         const hasKite = !!(this.config.kite_api_key && this.config.kite_api_secret);
         const hasAllTick = !!(this.config.alltick_api_key);
-        return hasKite || hasAllTick;
+        const hasMt5 = !!process.env.MT5_WS_URL;
+        return hasKite || hasAllTick || hasMt5;
     }
 
     async startLiveFeed() {
@@ -616,6 +625,18 @@ class MarketDataService extends EventEmitter {
              })());
         }
 
+        // 3. Start MT5 WebSocket if configured
+        if (process.env.MT5_WS_URL) {
+             promises.push((async () => {
+                 try {
+                    mt5Service.init(process.env.MT5_WS_URL, this);
+                    logger.info('MT5 WebSocket Initialized');
+                 } catch (e) {
+                    logger.error('Error starting MT5 WebSocket', e);
+                 }
+             })());
+        }
+
         await Promise.allSettled(promises);
     }
 
@@ -652,6 +673,11 @@ class MarketDataService extends EventEmitter {
                 latency: allTickService.isConnected ? `${allTickService.latency}ms` : 'Disconnected',
                 tickCount: this.allTickTickCount
             },
+            mt5: {
+                connected: mt5Service.isConnected || false,
+                latency: mt5Service.isConnected ? `${this.mt5Latency}ms` : 'Disconnected',
+                tickCount: this.mt5TickCount
+            },
             
             // DEBUG: Expose current prices to verify initialization
             prices: this.currentPrices || {}
@@ -662,6 +688,9 @@ class MarketDataService extends EventEmitter {
         if (stats.provider === 'kite') {
             stats.latency = stats.kite.latency;
             stats.tickCount = stats.kite.tickCount;
+        } else if (stats.provider === 'mt5') {
+            stats.latency = stats.mt5.latency;
+            stats.tickCount = stats.mt5.tickCount;
         } else {
             stats.latency = stats.alltick.latency;
             stats.tickCount = stats.alltick.tickCount;
@@ -895,6 +924,7 @@ class MarketDataService extends EventEmitter {
                 name: s.name,
                 segment: s.segment,
                 exchange: s.exchange,
+                provider: s.provider || null,
                 lotSize: s.lotSize,
                 tickSize: s.tickSize || 0.05
             }));
