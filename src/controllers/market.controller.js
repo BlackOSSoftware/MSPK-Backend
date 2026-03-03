@@ -12,6 +12,38 @@ import subscriptionService from '../services/subscription.service.js';
 import { technicalAnalysisService } from '../services/index.js';
 import fmpService from '../services/fmp.service.js';
 
+const toNumber = (value, fallback = 0) => {
+    const num = Number(value);
+    return Number.isFinite(num) ? num : fallback;
+};
+
+const enrichMarketSymbols = (symbols) => {
+    return symbols.map(s => {
+        const fallbackLive = (s.lastPrice && s.lastPrice > 0) ? s.lastPrice : (s.prevClose && s.prevClose > 0 ? s.prevClose : 0);
+        const live = toNumber(marketDataService.currentPrices[s.symbol] ?? fallbackLive, 0);
+        const ohlc = marketDataService.currentQuotes?.[s.symbol]?.ohlc;
+        const prevCloseRaw = ohlc ? ohlc.close : (s.prevClose && s.prevClose > 0 ? s.prevClose : live);
+        const prevClose = toNumber(prevCloseRaw, live);
+        
+        let change = 0;
+        if (prevClose > 0 && live > 0) {
+            change = ((live - prevClose) / prevClose) * 100;
+        }
+
+        return {
+            symbol: s.symbol,
+            name: s.name,
+            segment: s.segment,
+            exchange: s.exchange,
+            price: live,
+            prevClose: Number.isFinite(prevClose) ? parseFloat(prevClose.toFixed(2)) : 0,
+            change: Number.isFinite(change) ? parseFloat(change.toFixed(2)) : 0,
+            isUp: change >= 0,
+            lotSize: s.lotSize || 1,
+            color: change >= 0 ? '#22C55E' : '#EF4444'
+        };
+    });
+};
 
 
 // Get Subscription-Based Tickers (Watchlist)
@@ -74,32 +106,86 @@ const getTickers = catchAsync(async (req, res) => {
     const symbols = await MasterSymbol.find(query).sort({ segment: 1, symbol: 1 }).lean();
 
     // Inject Real-Time Prices
-    const enriched = symbols.map(s => {
-        const live = marketDataService.currentPrices[s.symbol] || s.lastPrice || 0;
-        const ohlc = marketDataService.currentQuotes[s.symbol]?.ohlc;
-        const prevClose = ohlc ? ohlc.close : (s.prevClose || live); 
-        
-        let change = 0;
-        if (prevClose > 0 && live > 0) {
-            change = ((live - prevClose) / prevClose) * 100;
-        }
-
-        return {
-            symbol: s.symbol,
-            name: s.name,
-            segment: s.segment,
-            exchange: s.exchange,
-            price: live,
-            prevClose: parseFloat(prevClose.toFixed(2)),
-            change: parseFloat(change.toFixed(2)),
-            isUp: change >= 0,
-            lotSize: s.lotSize || 1,
-            // Add color hint?
-            color: change >= 0 ? '#22C55E' : '#EF4444'
-        };
-    });
+    const enriched = enrichMarketSymbols(symbols);
 
     res.send(enriched);
+});
+
+// Get User Market Watchlist (Symbols)
+const getUserWatchlist = catchAsync(async (req, res) => {
+    const user = req.user;
+    const symbols = Array.isArray(user.marketWatchlist)
+        ? user.marketWatchlist.map(sym => String(sym).toUpperCase())
+        : [];
+
+    if (symbols.length === 0) {
+        return res.send([]);
+    }
+
+    const docs = await MasterSymbol.find({ symbol: { $in: symbols } }).lean();
+    const map = new Map(docs.map(d => [d.symbol, d]));
+
+    const ordered = symbols
+        .map(sym => map.get(sym))
+        .filter(Boolean);
+
+    const needsQuote = ordered.some(s => {
+        const live = marketDataService.currentPrices[s.symbol];
+        const fallback = (s.lastPrice && s.lastPrice > 0) || (s.prevClose && s.prevClose > 0);
+        return !Number.isFinite(Number(live)) || Number(live) <= 0 || !fallback;
+    });
+
+    if (needsQuote) {
+        await marketDataService.fetchQuoteBySymbols(ordered.map(s => s.symbol));
+    }
+
+    const enriched = enrichMarketSymbols(ordered);
+    res.send(enriched);
+});
+
+const addUserWatchlist = catchAsync(async (req, res) => {
+    const { symbol } = req.body;
+    if (!symbol) {
+        res.status(400);
+        throw new Error('Symbol is required');
+    }
+
+    const normalized = String(symbol).toUpperCase();
+    const symbolDoc = await MasterSymbol.findOne({ symbol: normalized });
+    if (!symbolDoc) {
+        res.status(400);
+        throw new Error('Symbol not found');
+    }
+
+    const user = req.user;
+    const list = Array.isArray(user.marketWatchlist) ? user.marketWatchlist : [];
+    if (!list.includes(normalized)) list.push(normalized);
+
+    user.marketWatchlist = list;
+    await user.save();
+
+    // Ensure symbol is subscribed and initial quote fetched (Kite authenticated)
+    await marketDataService.addSymbol(symbolDoc);
+
+    res.send({ symbols: user.marketWatchlist });
+});
+
+const removeUserWatchlist = catchAsync(async (req, res) => {
+    const { symbol } = req.body;
+    if (!symbol) {
+        res.status(400);
+        throw new Error('Symbol is required');
+    }
+
+    const normalized = String(symbol).toUpperCase();
+    const user = req.user;
+    const list = Array.isArray(user.marketWatchlist) ? user.marketWatchlist : [];
+    const next = list.filter(s => s !== normalized);
+
+    user.marketWatchlist = next;
+    await user.save();
+
+    res.send({ symbols: user.marketWatchlist });
 });
 
 import { calculateRSI, getFearGreedFromRSI } from '../utils/technicalIndicators.js'; // Import Utility
@@ -709,6 +795,9 @@ export default {
     getSentiment, // New
     getSymbolAnalysis,
     getNews,
+    getUserWatchlist,
+    addUserWatchlist,
+    removeUserWatchlist,
     getMarketStats: (req, res) => {
         const stats = marketDataService.getStats();
         res.send(stats);

@@ -107,6 +107,10 @@ const userSchema = new mongoose.Schema(
     currentDeviceId: {
       type: String,
       default: null
+    },
+    marketWatchlist: {
+      type: [String],
+      default: []
     }
   },
   {

@@ -32,6 +32,18 @@ const masterSymbolSchema = new mongoose.Schema(
       type: Boolean,
       default: true
     },
+    lastPrice: {
+        type: Number,
+        default: 0
+    },
+    prevClose: {
+        type: Number,
+        default: 0
+    },
+    lastPriceUpdatedAt: {
+        type: Date,
+        default: null
+    },
     instrumentToken: {
         type: String // Kite Instrument Token
     },

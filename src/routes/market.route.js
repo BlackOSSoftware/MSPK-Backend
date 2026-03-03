@@ -22,6 +22,9 @@ router.delete('/symbols/:id', marketController.deleteSymbol);
 router.get('/stats', auth(), marketController.getMarketStats); 
 router.get('/tickers', auth(), marketController.getTickers); // Authenticated for Subscription Logic
 router.get('/sentiment', auth(), marketController.getSentiment); // Authenticated for Context Awareness
+router.get('/watchlist', auth(), marketController.getUserWatchlist);
+router.post('/watchlist/add', auth(), marketController.addUserWatchlist);
+router.post('/watchlist/remove', auth(), marketController.removeUserWatchlist);
 router.post('/login/:provider', marketController.handleLogin);
 router.get('/login/:provider', marketController.handleLoginCallback); // Browser Redirect Callback
 router.get('/login/:provider/url', marketController.getLoginUrl); // Generic Login URL

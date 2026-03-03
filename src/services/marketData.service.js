@@ -27,6 +27,7 @@ class MarketDataService extends EventEmitter {
         this.allTickTickCount = 0;
         this.startTime = new Date();
         this.config = {}; // Prevent startup crash
+        this._lastPersistedAt = {};
 
         // Throttle noisy stats logs (avoid slowing down dev terminals / log pipelines)
         this._lastKiteStatsLogAtMs = 0;
@@ -422,6 +423,9 @@ class MarketDataService extends EventEmitter {
             
             // NEW: Push to Data Pipeline (In-Memory RingBuffer)
             pipeline.push(payload);
+
+            // Persist last known price periodically for closed-market display
+            this._persistSymbolPrice(symbol);
             
             // Legacy Redis Fallback (Optional, commented out for optimization target)
             // if (redisClient.status === 'ready') {
@@ -431,6 +435,84 @@ class MarketDataService extends EventEmitter {
             //      }));
             // }
         });
+    }
+
+    async fetchQuoteBySymbols(symbols) {
+        if (!Array.isArray(symbols) || symbols.length === 0) return;
+        if (!this.adapter || !this.config?.kite_access_token || !this.adapter.getQuote) return;
+
+        try {
+            const requestSymbols = [];
+            const internalByKite = new Map();
+
+            symbols.forEach(sym => {
+                if (!sym) return;
+                let kiteSymbol = sym;
+                const inst = kiteInstrumentsService.getInstrumentBySymbol(sym);
+                if (inst) {
+                    kiteSymbol = `${inst.exchange}:${inst.tradingsymbol}`;
+                } else if (sym.endsWith('-EQ')) {
+                    const raw = sym.replace('-EQ', '');
+                    const inst2 = kiteInstrumentsService.getInstrumentBySymbol(raw);
+                    if (inst2) kiteSymbol = `${inst2.exchange}:${inst2.tradingsymbol}`;
+                }
+
+                requestSymbols.push(kiteSymbol);
+                internalByKite.set(kiteSymbol, sym);
+            });
+
+            if (requestSymbols.length === 0) return;
+
+            const quoteData = await this.adapter.getQuote(requestSymbols);
+            Object.keys(quoteData || {}).forEach(kiteSym => {
+                const item = quoteData[kiteSym];
+                const internalSymbol = internalByKite.get(kiteSym) || kiteSym;
+                const price = item?.last_price;
+
+                if (internalSymbol) {
+                    this.currentPrices[internalSymbol] = price;
+                    if (!this.currentQuotes) this.currentQuotes = {};
+                    this.currentQuotes[internalSymbol] = {
+                        ...item,
+                        ohlc: item?.ohlc,
+                        last_price: price
+                    };
+                    this._persistSymbolPrice(internalSymbol);
+                }
+            });
+        } catch (error) {
+            logger.error(`Error fetching quote by symbols: ${error.message}`);
+        }
+    }
+
+    _persistSymbolPrice(symbol) {
+        try {
+            if (!symbol) return;
+            const nowMs = Date.now();
+            const lastAt = this._lastPersistedAt[symbol] || 0;
+            if (nowMs - lastAt < 60000) return; // throttle: 60s
+
+            const price = this.currentPrices[symbol];
+            const quote = this.currentQuotes?.[symbol];
+            const prevClose = quote?.ohlc?.close;
+            const lastPrice = Number.isFinite(Number(price)) ? Number(price) : 0;
+            const safePrevClose = Number.isFinite(Number(prevClose)) ? Number(prevClose) : 0;
+
+            this._lastPersistedAt[symbol] = nowMs;
+            MasterSymbol.findOneAndUpdate(
+                { symbol },
+                {
+                    lastPrice,
+                    prevClose: safePrevClose || undefined,
+                    lastPriceUpdatedAt: new Date(nowMs)
+                },
+                { new: false }
+            ).catch((e) => {
+                logger.error(`[MarketData] Failed to persist last price for ${symbol}: ${e.message}`);
+            });
+        } catch (e) {
+            logger.error(`[MarketData] Persist last price error: ${e.message}`);
+        }
     }
 
     async loadSettings() {
