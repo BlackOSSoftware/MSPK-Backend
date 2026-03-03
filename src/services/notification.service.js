@@ -153,27 +153,26 @@ class NotificationService {
           
 
           // Step C: Create In-App Notifications (DB)
-          // Only if Push/System notifications are enabled
-          if (pushConfig && pushConfig.enabled) {
-              const tpDetails = [
-                  signal.targets?.target1 ? `TP1: ${signal.targets.target1}` : null,
-                  signal.targets?.target2 ? `TP2: ${signal.targets.target2}` : null,
-                  signal.targets?.target3 ? `TP3: ${signal.targets.target3}` : null
-              ].filter(t => t).join(' | ');
+          // In-app notifications should not depend on push settings.
+          const tpDetails = [
+              signal.targets?.target1 ? `TP1: ${signal.targets.target1}` : null,
+              signal.targets?.target2 ? `TP2: ${signal.targets.target2}` : null,
+              signal.targets?.target3 ? `TP3: ${signal.targets.target3}` : null
+          ].filter(t => t).join(' | ');
 
-              const notificationDocs = Array.from(eligibleUserIds).map(userId => ({
-                  user: userId,
-                  title: `🚀 New Signal: ${signal.symbol}`,
-                  message: `Action: ${signal.type} | Entry: ${signal.entryPrice}\n${tpDetails}\nSL: ${signal.stopLoss}`,
-                  type: 'SIGNAL',
-                  data: { signalId: signal._id },
-                  link: `/signals` 
-              }));
+          const notificationDocs = Array.from(eligibleUserIds).map(userId => ({
+              user: userId,
+              title: `New Signal: ${signal.symbol}`,
+              message: `Action: ${signal.type} | Entry: ${signal.entryPrice}\n${tpDetails}\nSL: ${signal.stopLoss}`,
+              type: 'SIGNAL',
+              data: { signalId: signal._id },
+              link: `/signals` 
+          }));
 
-              if (notificationDocs.length > 0) {
-                  await Notification.insertMany(notificationDocs);
-              }
+          if (notificationDocs.length > 0) {
+              await Notification.insertMany(notificationDocs);
           }
+
 
           logger.info(`Scheduled notifications for Signal ${signal._id} to ${eligibleUserIds.size} users`);
 
