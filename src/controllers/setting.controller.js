@@ -5,7 +5,15 @@ import logger from '../config/log.js';
 
 import { encrypt } from '../utils/encryption.js';
 
-const SENSITIVE_KEYS = ['data_feed_api_key', 'data_feed_api_secret', 'data_feed_access_token', 'kite_api_secret', 'kite_access_token', 'alltick_api_key'];
+const SENSITIVE_KEYS = [
+    'data_feed_api_key',
+    'data_feed_api_secret',
+    'data_feed_access_token',
+    'kite_api_secret',
+    'kite_access_token',
+    'market_data_api_key',
+    'mt5_ws_api_key'
+];
 
 const getSettings = catchAsync(async (req, res) => {
     // Return all or filter by keys if needed

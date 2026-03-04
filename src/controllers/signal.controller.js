@@ -1,7 +1,7 @@
 import httpStatus from 'http-status';
 import catchAsync from '../utils/catchAsync.js';
 import ApiError from '../utils/ApiError.js';
-import { signalService, allTickService, technicalAnalysisService } from '../services/index.js';
+import { signalService, technicalAnalysisService, marketDataService } from '../services/index.js';
 
 const getAllowedAccessFromPermissions = (permissions = []) => {
   const perms = Array.isArray(permissions) ? permissions : [];
@@ -26,7 +26,7 @@ const getAllowedAccessFromPermissions = (permissions = []) => {
     allowedCategories.push('CURRENCY');
   }
   if (perms.includes('CRYPTO')) {
-    allowedSegments.push('CRYPTO', 'BINANCE');
+    allowedSegments.push('CRYPTO');
     allowedCategories.push('CRYPTO');
   }
   if (perms.includes('BTST')) {
@@ -333,11 +333,14 @@ const getSignalAnalysis = catchAsync(async (req, res) => {
     const now = new Date();
     const from = new Date(now.getTime() - 5 * 24 * 60 * 60 * 1000); // 5 Days back is enough for 1H/15m logic
     
+    const fromTs = Math.floor(from.getTime() / 1000);
+    const toTs = Math.floor(now.getTime() / 1000);
+
     const [c5m, c15m, c1H, c1D] = await Promise.all([
-        allTickService.getHistoricalData(symbol, '5m', from, now),
-        allTickService.getHistoricalData(symbol, '15m', from, now),
-        allTickService.getHistoricalData(symbol, '1H', from, now),
-        allTickService.getHistoricalData(symbol, '1D', from, now),
+        marketDataService.getHistory(symbol, '5', fromTs, toTs),
+        marketDataService.getHistory(symbol, '15', fromTs, toTs),
+        marketDataService.getHistory(symbol, '60', fromTs, toTs),
+        marketDataService.getHistory(symbol, 'D', fromTs, toTs),
     ]);
 
     // 3. Helper to Calculate Hybrid Logic per Timeframe

@@ -46,7 +46,7 @@ class NotificationService {
               const segment = (sig?.segment || '').toString().trim().toUpperCase();
               const category = (sig?.category || '').toString().trim().toUpperCase();
 
-              if (category === 'CRYPTO' || segment === 'CRYPTO' || segment === 'BINANCE') return 'CRYPTO';
+              if (category === 'CRYPTO' || segment === 'CRYPTO') return 'CRYPTO';
               if (['MCX', 'COMMODITY'].includes(segment)) return 'COMMODITY';
               if (['CDS', 'BCD', 'CURRENCY'].includes(segment)) return 'CURRENCY';
               if (['NFO', 'FNO', 'FO', 'INDICES'].includes(segment)) return 'FNO';

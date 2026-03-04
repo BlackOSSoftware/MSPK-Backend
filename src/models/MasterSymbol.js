@@ -46,7 +46,7 @@ const masterSymbolSchema = new mongoose.Schema(
     },
     provider: {
         type: String,
-        default: null // e.g. 'kite', 'alltick', 'mt5'
+        default: null // e.g. 'kite', 'market_data', 'mt5'
     },
     sourceSymbol: {
         type: String,

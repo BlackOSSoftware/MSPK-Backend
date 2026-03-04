@@ -6,7 +6,7 @@
     "ext": "js,json",
     "ignore": [
         "logs/*",
-        "debug_alltick_log.txt",
+        "debug_market_data_log.txt",
         "temp/*",
         "*.log"
     ],

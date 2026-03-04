@@ -70,11 +70,12 @@ const normalizeSegment = (segment) => {
   if (!segment) return segment;
   const seg = String(segment).trim().toUpperCase();
 
-  // Keep exchange codes as-is (NSE/NFO/MCX/CDS/BCD/BINANCE etc).
+  // Keep exchange codes as-is (NSE/NFO/MCX/CDS/BCD etc).
   // Only normalize a few common aliases to their canonical exchange code.
   if (['FO', 'FNO', 'NSEFO', 'NSE_FO', 'NSE-FNO', 'NSE-F&O'].includes(seg)) return 'NFO';
   if (seg === 'CM') return 'NSE';
   if (seg === 'CUR') return 'CURRENCY';
+  if (seg === 'BINANCE') return 'CRYPTO';
 
   return seg;
 };
@@ -122,7 +123,7 @@ const receiveSignal = catchAsync(async (req, res) => {
   const webhookId = req.body.uniq_id || req.body.unique_id || req.body.uniqueId || req.body.uniqe_id;
   const symbol = normalizeSymbol(req.body.symbol);
   const incomingSegment = normalizeSegment(req.body.segment);
-  const segment = isCryptoLikeSymbol(symbol) ? 'BINANCE' : incomingSegment;
+  const segment = isCryptoLikeSymbol(symbol) ? 'CRYPTO' : incomingSegment;
   const isFreeFromPayload = parseBoolean(req.body.is_free ?? req.body.isFree ?? req.body.free);
   const isFree = isFreeFromPayload ?? config.env === 'development';
 

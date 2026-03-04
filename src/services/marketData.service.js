@@ -1,963 +1,1193 @@
-import requestQueue from '../utils/requestQueue.js'; // Move to top
-import EventEmitter from 'events'; // Restart Trigger
+import { EventEmitter } from 'events';
 import Setting from '../models/Setting.js';
 import MasterSymbol from '../models/MasterSymbol.js';
 import { kiteService } from './kite.service.js';
 import { kiteInstrumentsService } from './kiteInstruments.service.js';
-import { allTickService } from './alltick.service.js';
-import { economicService } from './economic.service.js';
-import { mt5Service } from './mt5.service.js';
-import pipeline from '../utils/pipeline/DataPipeline.js'; // Pipeline Optimization
+import mt5Service from './mt5.service.js';
+import pipeline from '../utils/pipeline/DataPipeline.js';
 import { redisClient } from './redis.service.js';
 import logger from '../config/log.js';
 import { decrypt, encrypt } from '../utils/encryption.js';
-import websocketManager from './websocketManager.js';
-import startupOptimizer from './startupOptimizer.js';
 import cacheManager from './cacheManager.js';
+
+const INDIAN_EXCHANGES = new Set(['NSE', 'BSE', 'MCX', 'NFO', 'CDS', 'BCD']);
+const SENSITIVE_KEY_PATTERN = /(api_key|api_secret|access_token)/i;
+
+const toNumber = (value, fallback = 0) => {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : fallback;
+};
+
+const parseTs = (value, fallback = Math.floor(Date.now() / 1000)) => {
+    if (value === undefined || value === null || value === '') return fallback;
+    if (value instanceof Date) return Math.floor(value.getTime() / 1000);
+
+    const numeric = Number(value);
+    if (Number.isFinite(numeric)) {
+        return numeric > 10000000000 ? Math.floor(numeric / 1000) : Math.floor(numeric);
+    }
+
+    const date = new Date(value);
+    if (!Number.isNaN(date.getTime())) {
+        return Math.floor(date.getTime() / 1000);
+    }
+
+    return fallback;
+};
+
+const resolutionToKiteInterval = (resolution) => {
+    const normalized = String(resolution || '').trim().toUpperCase();
+
+    if (normalized === '1') return 'minute';
+    if (normalized === '3') return '3minute';
+    if (normalized === '5') return '5minute';
+    if (normalized === '10') return '10minute';
+    if (normalized === '15') return '15minute';
+    if (normalized === '30') return '30minute';
+    if (normalized === '45') return '60minute';
+    if (normalized === '60' || normalized === '1H') return '60minute';
+    if (normalized === 'D' || normalized === '1D' || normalized === 'DAY') return 'day';
+
+    return 'minute';
+};
 
 class MarketDataService extends EventEmitter {
     constructor() {
         super();
-        this.mode = 'idle'; // 'idle' | 'live'
-        this.symbols = {}; 
-        this.tokenMap = {}; // instrument_token -> symbol
-        this.currentPrices = {};
-        this.cumulativeVolume = {}; // Track daily volume for AllTick
-        this.kiteTickCount = 0;
-        this.kiteLatency = 0; // Real-time latency tracking
-        this.allTickTickCount = 0;
-        this.startTime = new Date();
-        this.config = {}; // Prevent startup crash
-        this._lastPersistedAt = {};
-        this.mt5TickCount = 0;
-        this.mt5Latency = 0;
 
-        // Throttle noisy stats logs (avoid slowing down dev terminals / log pipelines)
+        this.mode = 'idle';
+        this.startTime = new Date();
+
+        this.symbols = {};
+        this.tokenMap = {};
+        this.symbolCaseMap = new Map();
+        this.marketDataAliasMap = new Map();
+
+        this.currentPrices = {};
+        this.currentQuotes = {};
+        this._lastPersistedAt = {};
+
+        this.config = {};
+        this.adapter = null;
+
+        this.kiteTickCount = 0;
+        this.kiteLatency = 0;
+
+        this.marketDataTickCount = 0;
+        this.marketDataLatency = 0;
+
+        this.kiteAuthBrokenUntil = 0;
+        this.statsInterval = null;
+
         this._lastKiteStatsLogAtMs = 0;
-        this._lastAllTickStatsLogAtMs = 0;
+        this._lastMarketDataStatsLogAtMs = 0;
     }
 
-// ... (skipping for brevity)
+    async init() {
+        logger.info('MARKET_DATA: Initializing service...');
+
+        try {
+            await this.initializeKiteInstruments();
+            await this.loadMasterSymbols();
+            await this.loadSettings();
+            this.startStatsBroadcast();
+        } catch (error) {
+            logger.error('MARKET_DATA: Failed to initialize', error);
+        }
+    }
+
     async initializeKiteInstruments() {
         try {
             await kiteInstrumentsService.loadIntoMemory();
         } catch (error) {
-            logger.error('Failed to initialize Kite instruments in MarketDataService');
-        }
-    }
-
-    async init() {
-        logger.info('MARKET_DATA: Initializing Service...');
-        try {
-            await this.initializeKiteInstruments();
-            await this.loadMasterSymbols(); // Load symbols FIRST
-            await this.loadSettings();      // Then load settings (which starts feed)
-            
-            // Redundant startLiveFeed removed to prevent double-initialization crash
-
-            this.startStatsBroadcast();
-        } catch (error) {
-            logger.error('MARKET_DATA_ERROR: Failed to initialize', error);
+            logger.error(`MARKET_DATA: Failed loading Kite instruments: ${error.message}`);
         }
     }
 
     startStatsBroadcast() {
-        if (this.statsInterval) clearInterval(this.statsInterval);
+        if (this.statsInterval) {
+            clearInterval(this.statsInterval);
+        }
+
         let intervalMs = Number.parseInt(process.env.MARKETDATA_STATS_INTERVAL_MS || '5000', 10);
-        if (!Number.isFinite(intervalMs) || intervalMs < 250) intervalMs = 5000;
-        
-        this.statsInterval = setInterval(() => {
+        if (!Number.isFinite(intervalMs) || intervalMs < 500) {
+            intervalMs = 5000;
+        }
+
+        this.statsInterval = setInterval(async () => {
             const stats = this.getStats();
-            // Emit to local event bus (e.g. for socket service to pick up)
             this.emit('stats_update', stats);
+
+            if (redisClient?.status === 'ready') {
+                try {
+                    await redisClient.publish('market_stats', JSON.stringify(stats));
+                } catch (error) {
+                    logger.debug(`MARKET_DATA: Failed publishing stats to Redis: ${error.message}`);
+                }
+            }
         }, intervalMs);
+    }
+
+    _rememberSymbolCase(symbol) {
+        if (!symbol) return;
+        this.symbolCaseMap.set(symbol.toLowerCase(), symbol);
+    }
+
+    _normalizeMarketSymbol(symbol) {
+        return String(symbol || '').trim().toUpperCase();
+    }
+
+    _getUsdUsdtAlias(symbol) {
+        const normalized = this._normalizeMarketSymbol(symbol);
+        if (!normalized) return null;
+
+        const withSuffix = normalized.match(/^([A-Z0-9]+?)(USDT|USD)([.:/_-][A-Z0-9._:-]*)?$/);
+        if (withSuffix) {
+            const [, base, quote, suffix = ''] = withSuffix;
+            return `${base}${quote === 'USDT' ? 'USD' : 'USDT'}${suffix}`;
+        }
+
+        if (normalized.endsWith('USDT')) {
+            return normalized.slice(0, -1); // BTCUSDT -> BTCUSD
+        }
+
+        if (normalized.endsWith('USD')) {
+            return `${normalized}T`; // BTCUSD -> BTCUSDT
+        }
+
+        return null;
+    }
+
+    _registerMarketDataAliases(canonicalSymbol, wireSymbols = []) {
+        const canonical = this._getCanonicalSymbol(canonicalSymbol) || this._normalizeMarketSymbol(canonicalSymbol);
+        if (!canonical) return;
+
+        const list = Array.isArray(wireSymbols) ? wireSymbols : [wireSymbols];
+        for (const wire of list) {
+            const normalizedWire = this._normalizeMarketSymbol(wire);
+            if (!normalizedWire) continue;
+
+            const key = normalizedWire.toLowerCase();
+            if (!this.marketDataAliasMap.has(key)) {
+                this.marketDataAliasMap.set(key, new Set());
+            }
+
+            this.marketDataAliasMap.get(key).add(canonical);
+            this._rememberSymbolCase(normalizedWire);
+        }
+    }
+
+    _resolveMarketDataWireSymbols(symbolDoc) {
+        if (!symbolDoc?.symbol) return [];
+
+        const wireSymbols = new Set();
+        const canonical = this._normalizeMarketSymbol(symbolDoc.symbol);
+        const sourceSymbol = this._normalizeMarketSymbol(symbolDoc.sourceSymbol);
+
+        if (canonical) wireSymbols.add(canonical);
+        if (sourceSymbol) wireSymbols.add(sourceSymbol);
+
+        const segment = this._normalizeMarketSymbol(symbolDoc.segment);
+        const exchange = this._normalizeMarketSymbol(symbolDoc.exchange);
+
+        if (segment === 'CRYPTO' || exchange === 'CRYPTO') {
+            const alias = this._getUsdUsdtAlias(canonical);
+            if (alias) wireSymbols.add(alias);
+
+            const sourceAlias = this._getUsdUsdtAlias(sourceSymbol);
+            if (sourceAlias) wireSymbols.add(sourceAlias);
+        }
+
+        return Array.from(wireSymbols).filter(Boolean);
+    }
+
+    _resolveAliasTargets(symbol) {
+        const normalized = this._normalizeMarketSymbol(symbol);
+        if (!normalized) return [];
+
+        const targets = new Set();
+        const canonical = this._getCanonicalSymbol(normalized) || normalized;
+        targets.add(canonical);
+
+        const mapped = this.marketDataAliasMap.get(normalized.toLowerCase());
+        if (mapped && mapped.size > 0) {
+            for (const candidate of mapped) {
+                const resolved = this._getCanonicalSymbol(candidate) || this._normalizeMarketSymbol(candidate);
+                if (resolved) targets.add(resolved);
+            }
+        }
+
+        const usdUsdtAlias = this._getUsdUsdtAlias(normalized);
+        if (usdUsdtAlias) {
+            const resolvedAlias = this._getCanonicalSymbol(usdUsdtAlias);
+            if (resolvedAlias && this.symbols[resolvedAlias]) {
+                targets.add(resolvedAlias);
+            }
+        }
+
+        return Array.from(targets);
+    }
+
+    _collectPriceCandidates(symbol, symbolDoc = null) {
+        const candidates = [];
+        const seen = new Set();
+
+        const addCandidate = (value) => {
+            const normalized = this._normalizeMarketSymbol(value);
+            if (!normalized || seen.has(normalized)) return;
+            seen.add(normalized);
+            candidates.push(normalized);
+        };
+
+        const canonical = this._getCanonicalSymbol(symbol) || this._normalizeMarketSymbol(symbol);
+        if (!canonical) return candidates;
+
+        addCandidate(canonical);
+
+        const doc = symbolDoc || this.symbols[canonical] || null;
+        if (doc?.symbol) addCandidate(doc.symbol);
+        if (doc?.sourceSymbol) addCandidate(doc.sourceSymbol);
+
+        if (doc?.symbol) {
+            const wireSymbols = this._resolveMarketDataWireSymbols(doc);
+            wireSymbols.forEach(addCandidate);
+        }
+
+        this._resolveAliasTargets(canonical).forEach(addCandidate);
+
+        for (const value of [...candidates]) {
+            const alias = this._getUsdUsdtAlias(value);
+            if (!alias) continue;
+            addCandidate(alias);
+            this._resolveAliasTargets(alias).forEach(addCandidate);
+        }
+
+        return candidates;
+    }
+
+    getBestLivePrice(symbol, symbolDoc = null, fallback = 0) {
+        const candidates = this._collectPriceCandidates(symbol, symbolDoc);
+
+        for (const candidate of candidates) {
+            const direct = toNumber(this.currentPrices[candidate], NaN);
+            if (Number.isFinite(direct) && direct > 0) {
+                return direct;
+            }
+        }
+
+        for (const candidate of candidates) {
+            const quote = this.currentQuotes[candidate];
+            if (!quote) continue;
+
+            const close = toNumber(quote?.ohlc?.close, NaN);
+            if (Number.isFinite(close) && close > 0) return close;
+
+            const bid = toNumber(quote?.bid, NaN);
+            if (Number.isFinite(bid) && bid > 0) return bid;
+
+            const ask = toNumber(quote?.ask, NaN);
+            if (Number.isFinite(ask) && ask > 0) return ask;
+        }
+
+        return toNumber(fallback, 0);
+    }
+
+    getBestQuote(symbol, symbolDoc = null) {
+        const candidates = this._collectPriceCandidates(symbol, symbolDoc);
+        for (const candidate of candidates) {
+            const quote = this.currentQuotes[candidate];
+            if (quote && typeof quote === 'object') {
+                return quote;
+            }
+        }
+        return null;
+    }
+
+    _getCanonicalSymbol(symbol) {
+        if (!symbol) return null;
+        const raw = String(symbol).trim();
+        if (!raw) return null;
+
+        const direct = this.symbols[raw] ? raw : null;
+        if (direct) return direct;
+
+        return this.symbolCaseMap.get(raw.toLowerCase()) || raw;
+    }
+
+    _toKiteQuoteSymbol(rawSymbol, symbolDoc = null) {
+        const canonical = this._getCanonicalSymbol(rawSymbol) || this._normalizeMarketSymbol(rawSymbol);
+        if (!canonical) return null;
+
+        const token = symbolDoc?.instrumentToken;
+        if (token) {
+            const byToken = kiteInstrumentsService.getSymbolByToken(String(token));
+            if (byToken) return byToken;
+        }
+
+        const fromMap = kiteInstrumentsService.getInstrumentBySymbol(canonical);
+        if (fromMap) {
+            return `${fromMap.exchange}:${fromMap.tradingsymbol}`;
+        }
+
+        const parts = canonical.split(':');
+        if (parts.length < 2) return canonical;
+
+        const exchange = parts[0].trim().toUpperCase();
+        let tradingSymbol = parts.slice(1).join(':').trim().toUpperCase();
+        if (!exchange || !tradingSymbol) return canonical;
+
+        if (tradingSymbol.endsWith('-EQ')) {
+            tradingSymbol = tradingSymbol.slice(0, -3);
+        } else if (tradingSymbol.endsWith('.EQ')) {
+            tradingSymbol = tradingSymbol.slice(0, -3);
+        } else if (tradingSymbol.endsWith('-INDEX')) {
+            tradingSymbol = tradingSymbol.slice(0, -6);
+        }
+
+        return tradingSymbol ? `${exchange}:${tradingSymbol}` : canonical;
+    }
+
+    _isMarketDataSymbol(symbolDoc) {
+        if (!symbolDoc) return false;
+
+        const provider = String(symbolDoc.provider || '').toLowerCase();
+        if (provider === 'market_data' || provider === 'mt5') return true;
+        if (provider === 'kite') return false;
+
+        const exchange = String(symbolDoc.exchange || '').toUpperCase();
+        if (exchange) return !INDIAN_EXCHANGES.has(exchange);
+
+        return !symbolDoc.instrumentToken;
     }
 
     async loadMasterSymbols() {
         try {
-            const symbols = await MasterSymbol.find({});
+            const docs = await MasterSymbol.find({});
+
             this.symbols = {};
             this.tokenMap = {};
-            
-            symbols.forEach(s => {
-                this.symbols[s.symbol] = s;
-                if (s.instrumentToken) {
-                    this.tokenMap[s.instrumentToken] = s.symbol;
+            this.symbolCaseMap.clear();
+            this.marketDataAliasMap.clear();
+
+            for (const doc of docs) {
+                this.symbols[doc.symbol] = doc;
+                this._rememberSymbolCase(doc.symbol);
+
+                if (doc.instrumentToken) {
+                    this.tokenMap[String(doc.instrumentToken)] = doc.symbol;
                 }
-            });
-            logger.info(`MARKET_DATA: Loaded ${symbols.length} master symbols into memory`);
+
+                if (doc.sourceSymbol) {
+                    this._registerMarketDataAliases(doc.symbol, [doc.sourceSymbol]);
+                }
+            }
+
+            for (const doc of docs) {
+                if (!this._isMarketDataSymbol(doc)) continue;
+                const wireSymbols = this._resolveMarketDataWireSymbols(doc);
+                this._registerMarketDataAliases(doc.symbol, wireSymbols);
+            }
+
+            logger.info(`MARKET_DATA: Loaded ${docs.length} symbols in memory`);
         } catch (error) {
-            logger.error('Error loading master symbols:', error);
+            logger.error(`MARKET_DATA: Failed loading symbols: ${error.message}`);
         }
     }
 
-    /**
-     * Dynamically add a symbol to memory and subscribe
-     */
     async addSymbol(symbolDoc) {
-        if (!symbolDoc || !symbolDoc.symbol) return;
+        if (!symbolDoc?.symbol) return;
 
-        logger.info(`MARKET_DATA: Adding new symbol ${symbolDoc.symbol} to memory`);
         this.symbols[symbolDoc.symbol] = symbolDoc;
-        
-        if (symbolDoc.provider === 'mt5') {
-            mt5Service.subscribe([symbolDoc.symbol]);
-        } else if (symbolDoc.instrumentToken) {
-            this.tokenMap[symbolDoc.instrumentToken] = symbolDoc.symbol;
-            if (this.adapter && this.adapter.isTickerConnected) {
-                this.adapter.subscribe([symbolDoc.instrumentToken]);
-                // Fetch initial snapshot for this symbol (crucial for closed markets)
-                this.fetchInitialQuote([symbolDoc.instrumentToken]);
-            }
-        } else {
-            // Handle AllTick / Global Symbols
-            const indianExchanges = ['NSE', 'BSE', 'MCX', 'NFO', 'CDS', 'BCD'];
+        this._rememberSymbolCase(symbolDoc.symbol);
 
-            if (!indianExchanges.includes(symbolDoc.exchange) && (allTickService.isConnected || this.config.alltick_api_key)) {
-                // Fetch initial data immediately
-                allTickService.getQuote([symbolDoc.symbol]).then(quotes => {
-                    this._processQuotes(quotes);
-                });
-                
-                // We rely on WebSocketManager's dynamic viewport update from frontend
-                // to trigger the permanent subscription for this new symbol.
+        if (symbolDoc.instrumentToken) {
+            this.tokenMap[String(symbolDoc.instrumentToken)] = symbolDoc.symbol;
+        }
+
+        if (symbolDoc.sourceSymbol) {
+            this._registerMarketDataAliases(symbolDoc.symbol, [symbolDoc.sourceSymbol]);
+        }
+        if (this._isMarketDataSymbol(symbolDoc)) {
+            const wireSymbols = this._resolveMarketDataWireSymbols(symbolDoc);
+            this._registerMarketDataAliases(symbolDoc.symbol, wireSymbols);
+        }
+
+        await this.ensureSymbolSubscription(symbolDoc.symbol, symbolDoc);
+    }
+
+    async ensureSymbolSubscription(symbol, preloadedDoc = null) {
+        const canonical = this._getCanonicalSymbol(symbol);
+        if (!canonical) return null;
+
+        let symbolDoc = preloadedDoc || this.symbols[canonical] || null;
+
+        if (!symbolDoc) {
+            try {
+                symbolDoc = await MasterSymbol.findOne({ symbol: new RegExp(`^${canonical.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') });
+            } catch (error) {
+                logger.error(`MARKET_DATA: Symbol lookup failed for ${canonical}: ${error.message}`);
             }
+
+            if (symbolDoc?.symbol) {
+                this.symbols[symbolDoc.symbol] = symbolDoc;
+                this._rememberSymbolCase(symbolDoc.symbol);
+                if (symbolDoc.instrumentToken) {
+                    this.tokenMap[String(symbolDoc.instrumentToken)] = symbolDoc.symbol;
+                }
+            }
+        }
+
+        if (!symbolDoc) return canonical;
+
+        const canUseMarketData = this._isMarketDataSymbol(symbolDoc) || !symbolDoc.instrumentToken;
+        if (canUseMarketData) {
+            const wireSymbols = this._resolveMarketDataWireSymbols(symbolDoc);
+            const symbolsToSubscribe = wireSymbols.length > 0 ? wireSymbols : [symbolDoc.symbol];
+            this._registerMarketDataAliases(symbolDoc.symbol, symbolsToSubscribe);
+            mt5Service.subscribe(symbolsToSubscribe);
+            return symbolDoc.symbol;
+        }
+
+        if (symbolDoc.instrumentToken) {
+            if (this.adapter?.isTickerConnected) {
+                this.adapter.subscribe([symbolDoc.instrumentToken]);
+                await this.fetchInitialQuote([symbolDoc.instrumentToken]);
+            }
+            return symbolDoc.symbol;
+        }
+
+        return symbolDoc.symbol;
+    }
+
+    unsubscribeSymbol(symbol) {
+        const canonical = this._getCanonicalSymbol(symbol);
+        if (!canonical) return;
+
+        const symbolDoc = this.symbols[canonical];
+        if (!symbolDoc) return;
+
+        if (symbolDoc.instrumentToken && this.adapter?.isTickerConnected) {
+            this.adapter.unsubscribe([symbolDoc.instrumentToken]);
+        }
+
+        const canUseMarketData = this._isMarketDataSymbol(symbolDoc) || !symbolDoc.instrumentToken;
+        if (canUseMarketData) {
+            const wireSymbols = this._resolveMarketDataWireSymbols(symbolDoc);
+            const symbolsToUnsubscribe = wireSymbols.length > 0 ? wireSymbols : [symbolDoc.symbol];
+            mt5Service.unsubscribe(symbolsToUnsubscribe);
         }
     }
 
     subscribeToSymbols() {
-        if (Object.keys(this.symbols).length === 0) {
-            logger.warn('MARKET_DATA: No symbols loaded to subscribe');
+        const allSymbols = Object.keys(this.symbols);
+        if (allSymbols.length === 0) {
+            logger.warn('MARKET_DATA: No symbols available to subscribe');
             return;
         }
 
-        const allSymbols = Object.keys(this.symbols);
+        const kiteTokens = allSymbols
+            .map((symbol) => this.symbols[symbol]?.instrumentToken)
+            .filter(Boolean)
+            .map((token) => String(token));
 
-        // 1. Kite Subscription
-        if (this.adapter && this.adapter.isTickerConnected) {
-            const tokens = allSymbols
-                .map(s => this.symbols[s].instrumentToken)
-                .filter(t => t); // Filter only those with tokens
-            
-            logger.debug(`[DEBUG_SUB] Found ${allSymbols.length} total symbols. ${tokens.length} have Kite tokens.`);
-
-            if (tokens.length > 0) {
-                 this.adapter.subscribe(tokens);
-                 logger.debug(`[DEBUG_SUB] Subscribed to ${tokens.length} Kite tokens.`);
-                 
-                 // Fetch initial static Data (for closed markets like NSE Equity at night)
-                 this.fetchInitialQuote(tokens);
-            } else {
-                logger.debug('[DEBUG_SUB] No user symbols found, but Indices should be auto-subscribed?');
-            }
-            
-            // Force Subscribe to Critical Indices (If not in master list already)
-            // Ideally these should be in MasterSymbols, but safekeep here:
-            // "NSE:INDIA VIX" isn't standard in all instrument lists, check instrument service.
-            
-            const coreINDICES = ['NSE:NIFTY 50-INDEX', 'NSE:NIFTY BANK-INDEX', 'NSE:INDIA VIX'];
-            coreINDICES.forEach(sym => {
-                const instrument = kiteInstrumentsService.getInstrumentBySymbol(sym);
-                if (instrument) {
-                    const token = parseInt(instrument.instrument_token);
-                    this.adapter.subscribe([token]);
-                    this.tokenMap[token] = sym;
-                    logger.debug(`[DEBUG_SUB] Force subscribed to Index: ${sym} (Token: ${token})`);
-                }
-            });
-        } else {
-            logger.debug('[DEBUG_SUB] Adapter not connected or missing');
+        if (kiteTokens.length > 0 && this.adapter?.isTickerConnected) {
+            this.adapter.subscribe(kiteTokens);
+            this.fetchInitialQuote(kiteTokens);
         }
 
-        // 2. AllTick Subscription (via WebSocket Manager)
-        if (allTickService.isConnected || this.config.alltick_api_key) { 
-             const symbolsToSubscribe = allSymbols.filter(s => {
-                 const sym = this.symbols[s];
-                 const indianExchanges = ['NSE', 'BSE', 'MCX', 'NFO', 'CDS', 'BCD'];
-                 if (s.includes(':')) return false; // Safety: Any colon usually implies "EXCHANGE:SYMBOL" which AllTick doesn't use (except maybe crypto pairs like BTC:USD but usually they are BTCUSD)
-                 return !indianExchanges.includes(sym.exchange) && !sym.instrumentToken;
-             });
+        const bootSymbols = String(process.env.MARKET_DATA_BOOT_SYMBOLS || '')
+            .split(',')
+            .map((value) => value.trim())
+            .filter(Boolean);
 
-              const sentimentSymbols = ['BTCUSD', 'ETHUSD', 'XAUUSD', 'EURUSD'];
-              const combinedSubs = [...new Set([...symbolsToSubscribe, ...sentimentSymbols])];
-
-             if (combinedSubs.length > 0) {
-                 logger.info(`[MarketData] Delegating ${combinedSubs.length} symbols to WebSocketManager`);
-                 
-                  // Dynamic Viewport Update
-                  websocketManager.updateViewport(combinedSubs);
-
-                  // Avoid heavy "history-based quotes" at startup (can spam API / slow server).
-                  // Enable only if you really need a snapshot before ticks start flowing.
-                  if (process.env.ENABLE_ALLTICK_INITIAL_QUOTES === 'true') {
-                      allTickService.getQuote(sentimentSymbols).then(quotes => {
-                          this._processQuotes(quotes);
-                      });
-                  }
-              }
-         }
-         
-         // --- PHASE 4: Smart Startup Sequence (History) ---
-         if (process.env.ENABLE_STARTUP_OPTIMIZER === 'true') {
-             startupOptimizer.start(this);
-         }
-    }
-
-    
-
-
-    // Helper to process quotes and update state
-    _processQuotes(quotes) {
-        const pseudoTicks = [];
-        Object.keys(quotes).forEach(sym => {
-            const q = quotes[sym];
-            this.currentPrices[sym] = q.last_price;
-            if (!this.currentQuotes) this.currentQuotes = {};
-            this.currentQuotes[sym] = {
-                last_price: q.last_price,
-                ohlc: q.ohlc,
-                bid: 0, ask: 0, volume: 0, // Vol updated separately
-                ...this.currentQuotes[sym] // Keep existing vol if any
-            };
-
-            pseudoTicks.push({
-                symbol: sym,
-                last_price: q.last_price,
-                ohlc: q.ohlc,
-                total_volume: this.cumulativeVolume[sym] || 0,
-                provider: 'alltick'
-            });
-        });
-        
-        if (pseudoTicks.length > 0) {
-            this._broadcastPseudoTicks(pseudoTicks);
+        if (bootSymbols.length > 0) {
+            mt5Service.subscribe(bootSymbols);
         }
-    }
-
-    _updateVolumeFromCandles(sym, candles) {
-        if (candles && candles.length > 0) {
-             const lastCandle = candles[candles.length - 1];
-             this.cumulativeVolume[sym] = lastCandle.volume;
-             if (this.currentQuotes[sym]) {
-                 this.currentQuotes[sym].volume = lastCandle.volume;
-             }
-             // Re-broadcast? Maybe not spam. UI updates on next tick.
-        }
-    }
-    
-    _broadcastPseudoTicks(ticks) {
-        ticks.forEach(t => {
-            this.emit('price_update', {
-                ...t,
-                open: t.ohlc.open, high: t.ohlc.high, low: t.ohlc.low,
-                change: 0, changePercent: 0, volume: 0, bid: 0, ask: 0,
-                timestamp: new Date()
-            });
-        });
     }
 
     async fetchInitialQuote(tokens) {
+        if (!Array.isArray(tokens) || tokens.length === 0) return;
+        if (!this.adapter || !this.config?.kite_access_token || !this.adapter.getQuote) return;
+
         try {
             const symbolsToFetch = [];
-            // We don't need tokenToSymbolMap here because processLiveTicks uses Token -> Internal Symbol map
 
-            tokens.forEach(t => {
-                // Use Kite Instruments Service to get the actual "EXCHANGE:TRADINGSYMBOL" 
-                // that Kite API expects (e.g. "NSE:TCS" instead of "NSE:TCS-EQ")
-                const correctKiteSymbol = kiteInstrumentsService.getSymbolByToken(t);
-                if (correctKiteSymbol) {
-                    symbolsToFetch.push(correctKiteSymbol);
-                } else {
-                    // Fallback to internal map if not found in cache (unlikely if token exists)
-                    const symStr = this.tokenMap[t];
-                    if (symStr) symbolsToFetch.push(symStr);
+            for (const token of tokens) {
+                const key = String(token);
+                const kiteSymbol = kiteInstrumentsService.getSymbolByToken(key);
+                if (kiteSymbol) {
+                    symbolsToFetch.push(kiteSymbol);
+                    continue;
                 }
-            });
+
+                const mappedSymbol = this.tokenMap[key];
+                if (mappedSymbol) {
+                    const symbolDoc = this.symbols[mappedSymbol] || null;
+                    const normalized = this._toKiteQuoteSymbol(mappedSymbol, symbolDoc);
+                    symbolsToFetch.push(normalized || mappedSymbol);
+                }
+            }
+
             if (symbolsToFetch.length === 0) return;
 
-            logger.info(`Fetching Initial QUOTE for ${symbolsToFetch.length} symbols...`);
-            
-            // Use getQuote instead of getLTP to get OHLC
-            const startFetch = Date.now();
+            const startedAt = Date.now();
             const quoteData = await this.adapter.getQuote(symbolsToFetch);
-            
-            // Set initial latency based on REST API RTT
-            this.kiteLatency = Date.now() - startFetch;
-            logger.info(`[DEBUG_QUOTE] Fetch took ${this.kiteLatency}ms. Wrapper Response keys: ${Object.keys(quoteData).join(',')}`);
-            
-            // Response: { "NSE:TCS": { instrument_token, last_price, ohlc: {...} } }
-            const pseudoTicks = [];
-            
-            Object.keys(quoteData).forEach(kiteSym => {
-                const item = quoteData[kiteSym];
-                const token = item.instrument_token;
-                
-                // Store Quote/OHLC in memory mapping (Token -> Quote)
-                // We need to map it back to our internal symbol if possible
-                const internalSymbol = this.tokenMap[token];
-                if (internalSymbol) {
-                    if (!this.currentQuotes) this.currentQuotes = {};
-                    this.currentQuotes[internalSymbol] = item;
-                }
+            this.kiteLatency = Date.now() - startedAt;
 
+            const pseudoTicks = [];
+            for (const kiteSymbol of Object.keys(quoteData || {})) {
+                const item = quoteData[kiteSymbol];
                 pseudoTicks.push({
-                    instrument_token: token,
+                    instrument_token: item.instrument_token,
                     last_price: item.last_price,
-                    mode: 'quote' 
+                    ohlc: item.ohlc,
+                    bid: item.depth?.buy?.[0]?.price,
+                    ask: item.depth?.sell?.[0]?.price,
+                    volume: item.volume,
+                    timestamp: new Date(),
                 });
-            });
+            }
 
             if (pseudoTicks.length > 0) {
-                logger.info(`Pushing ${pseudoTicks.length} initial Quote updates to frontend`);
                 this.processLiveTicks(pseudoTicks, 'kite');
             }
-
         } catch (error) {
-            logger.error('Error fetching initial Quote:', error);
+            logger.error(`MARKET_DATA: Initial Kite quote fetch failed: ${error.message}`);
         }
-    }
-
-
-
-    processLiveTicks(ticks, provider) {
-        if (!Array.isArray(ticks)) return;
-
-        const nowMs = Date.now();
-
-        if (provider === 'kite') {
-            this.kiteTickCount += ticks.length;
-            if (nowMs - this._lastKiteStatsLogAtMs >= 10000) {
-                logger.debug(`[KITE_STATS] Total ticks: ${this.kiteTickCount}`);
-                this._lastKiteStatsLogAtMs = nowMs;
-            }
-            // ... keys
-        } else if (provider === 'alltick') {
-            this.allTickTickCount += ticks.length;
-            if (nowMs - this._lastAllTickStatsLogAtMs >= 10000) {
-                logger.debug(`[ALLTICK_STATS] Batch: ${ticks.length}, total ticks: ${this.allTickTickCount}`);
-                this._lastAllTickStatsLogAtMs = nowMs;
-            }
-        } else if (provider === 'mt5') {
-            this.mt5TickCount += ticks.length;
-        }
-
-        ticks.forEach(tick => {
-            let symbol = tick.symbol;
-            
-            // Map Token to Symbol for Kite
-            if (provider === 'kite' && tick.instrument_token) {
-                 symbol = this.tokenMap[tick.instrument_token];
-            }
-
-            if (!symbol) return;
-            
-            // Optimization: Do NOT invalidate on every tick.
-            // Cache invalidation for History/Quotes should be time-based or event-based, not tick-based.
-            // cacheManager.invalidateOnWebSocket(symbol);
-
-            const price = tick.last_price;
-            this.currentPrices[symbol] = price;
-
-            // Maintain OHLC in memory
-            if (!this.currentQuotes) this.currentQuotes = {};
-            if (!this.currentQuotes[symbol]) {
-                this.currentQuotes[symbol] = {
-                    last_price: price,
-                    ohlc: { open: price, high: price, low: price, close: price },
-                    bid: 0, ask: 0, volume: 0
-                };
-            }
-
-            const quote = this.currentQuotes[symbol];
-            quote.last_price = price;
-            
-            // Update OHLC from Provider Data (Prioritize official values)
-            if (tick.ohlc) {
-                // Kite Ticker format: tick.ohlc = { open, high, low, close }
-                quote.ohlc.open = tick.ohlc.open || quote.ohlc.open;
-                quote.ohlc.high = tick.ohlc.high || quote.ohlc.high;
-                quote.ohlc.low = tick.ohlc.low || quote.ohlc.low;
-                quote.ohlc.close = tick.ohlc.close || quote.ohlc.close;
-            } else {
-                // AllTick or Manual Update: Manual High/Low tracking
-                if (price > (quote.ohlc.high || 0)) quote.ohlc.high = price;
-                if (price < (quote.ohlc.low || 999999999)) quote.ohlc.low = price;
-            }
-            
-            // Calculate Change against Day's Open (Official)
-            const open = quote.ohlc.open || price;
-            const change = price - open;
-            const changePercent = open !== 0 ? (change / open) * 100 : 0;
-
-            // --- VOLUME HANDLING ---
-            let incrementalVolume = parseFloat(tick.volume || tick.last_quantity || 0);
-            let totalVolume = 0;
-
-            if (provider === 'kite') {
-                totalVolume = parseFloat(tick.volume || 0);
-            } else {
-                // AllTick: Accumulate
-                if (!this.cumulativeVolume[symbol]) this.cumulativeVolume[symbol] = 0;
-                this.cumulativeVolume[symbol] += incrementalVolume;
-                totalVolume = this.cumulativeVolume[symbol];
-            }
-
-            // Update Bid/Ask
-            const newBid = parseFloat(tick.bid || (tick.depth?.buy?.[0]?.price) || 0);
-            const newAsk = parseFloat(tick.ask || (tick.depth?.sell?.[0]?.price) || 0);
-
-            if (newBid > 0) quote.bid = newBid;
-            if (newAsk > 0) quote.ask = newAsk;
-            quote.volume = totalVolume; 
-
-            // Emit Normalized Event
-            const payload = {
-                symbol: symbol,
-                price: price,
-                open: open,
-                high: quote.ohlc.high,
-                low: quote.ohlc.low,
-                change: change,
-                changePercent: changePercent,
-                volume: incrementalVolume,
-                total_volume: totalVolume,
-                bid: quote.bid || 0,
-                ask: quote.ask || 0,
-                timestamp: tick.timestamp || new Date(),
-                provider: provider
-            };
-
-            this.emit('price_update', payload);
-            
-            // NEW: Push to Data Pipeline (In-Memory RingBuffer)
-            pipeline.push(payload);
-
-            // Persist last known price periodically for closed-market display
-            this._persistSymbolPrice(symbol);
-            
-            // Legacy Redis Fallback (Optional, commented out for optimization target)
-            // if (redisClient.status === 'ready') {
-            //      redisClient.publish('market_data', JSON.stringify({
-            //          ...payload,
-            //          last_price: price 
-            //      }));
-            // }
-        });
     }
 
     async fetchQuoteBySymbols(symbols) {
         if (!Array.isArray(symbols) || symbols.length === 0) return;
+
+        const kiteSymbols = [];
+        const marketDataSymbols = new Set();
+        const internalByKite = new Map();
+
+        for (const rawSymbol of symbols) {
+            const canonical = this._getCanonicalSymbol(rawSymbol);
+            if (!canonical) continue;
+
+            const symbolDoc = this.symbols[canonical] || null;
+
+            const canUseMarketData = symbolDoc && (this._isMarketDataSymbol(symbolDoc) || !symbolDoc.instrumentToken);
+            if (canUseMarketData) {
+                const wireSymbols = this._resolveMarketDataWireSymbols(symbolDoc);
+                const symbolsToSubscribe = wireSymbols.length > 0 ? wireSymbols : [symbolDoc.symbol];
+                this._registerMarketDataAliases(symbolDoc.symbol, symbolsToSubscribe);
+                symbolsToSubscribe.forEach((value) => marketDataSymbols.add(value));
+            } else if (symbolDoc?.instrumentToken) {
+                const kiteSymbol = this._toKiteQuoteSymbol(canonical, symbolDoc) || canonical;
+                kiteSymbols.push(kiteSymbol);
+                internalByKite.set(kiteSymbol, symbolDoc.symbol);
+            } else {
+                marketDataSymbols.add(symbolDoc?.symbol || canonical);
+            }
+        }
+
+        if (marketDataSymbols.size > 0) {
+            mt5Service.subscribe(Array.from(marketDataSymbols));
+        }
+
+        if (kiteSymbols.length === 0) return;
         if (!this.adapter || !this.config?.kite_access_token || !this.adapter.getQuote) return;
 
         try {
-            const requestSymbols = [];
-            const internalByKite = new Map();
+            const startedAt = Date.now();
+            const quoteData = await this.adapter.getQuote([...new Set(kiteSymbols)]);
+            this.kiteLatency = Date.now() - startedAt;
 
-            symbols.forEach(sym => {
-                if (!sym) return;
-                let kiteSymbol = sym;
-                const inst = kiteInstrumentsService.getInstrumentBySymbol(sym);
-                if (inst) {
-                    kiteSymbol = `${inst.exchange}:${inst.tradingsymbol}`;
-                } else if (sym.endsWith('-EQ')) {
-                    const raw = sym.replace('-EQ', '');
-                    const inst2 = kiteInstrumentsService.getInstrumentBySymbol(raw);
-                    if (inst2) kiteSymbol = `${inst2.exchange}:${inst2.tradingsymbol}`;
-                }
+            for (const kiteSymbol of Object.keys(quoteData || {})) {
+                const item = quoteData[kiteSymbol] || {};
+                const fallbackInternal = this.tokenMap[String(item.instrument_token || '')] || null;
+                const internalSymbol = internalByKite.get(kiteSymbol) || fallbackInternal || kiteSymbol;
+                const price = toNumber(item.last_price, 0);
 
-                requestSymbols.push(kiteSymbol);
-                internalByKite.set(kiteSymbol, sym);
-            });
+                this.currentPrices[internalSymbol] = price;
+                this.currentQuotes[internalSymbol] = {
+                    last_price: price,
+                    ohlc: item.ohlc || this.currentQuotes[internalSymbol]?.ohlc || {
+                        open: price,
+                        high: price,
+                        low: price,
+                        close: price,
+                    },
+                    bid: item.depth?.buy?.[0]?.price || this.currentQuotes[internalSymbol]?.bid || 0,
+                    ask: item.depth?.sell?.[0]?.price || this.currentQuotes[internalSymbol]?.ask || 0,
+                    volume: toNumber(item.volume, this.currentQuotes[internalSymbol]?.volume || 0),
+                };
 
-            if (requestSymbols.length === 0) return;
-
-            const quoteData = await this.adapter.getQuote(requestSymbols);
-            Object.keys(quoteData || {}).forEach(kiteSym => {
-                const item = quoteData[kiteSym];
-                const internalSymbol = internalByKite.get(kiteSym) || kiteSym;
-                const price = item?.last_price;
-
-                if (internalSymbol) {
-                    this.currentPrices[internalSymbol] = price;
-                    if (!this.currentQuotes) this.currentQuotes = {};
-                    this.currentQuotes[internalSymbol] = {
-                        ...item,
-                        ohlc: item?.ohlc,
-                        last_price: price
-                    };
-                    this._persistSymbolPrice(internalSymbol);
-                }
-            });
+                this._persistSymbolPrice(internalSymbol);
+            }
         } catch (error) {
-            logger.error(`Error fetching quote by symbols: ${error.message}`);
+            logger.error(`MARKET_DATA: Quote fetch failed: ${error.message}`);
+        }
+    }
+
+    processLiveTicks(ticks, provider = 'market_data') {
+        if (!Array.isArray(ticks) || ticks.length === 0) return;
+
+        const nowMs = Date.now();
+        const source = String(provider || '').toLowerCase();
+
+        if (source === 'kite') {
+            this.kiteTickCount += ticks.length;
+            if (nowMs - this._lastKiteStatsLogAtMs >= 10000) {
+                logger.debug(`[KITE_STATS] ticks=${this.kiteTickCount}`);
+                this._lastKiteStatsLogAtMs = nowMs;
+            }
+        } else {
+            this.marketDataTickCount += ticks.length;
+            if (nowMs - this._lastMarketDataStatsLogAtMs >= 10000) {
+                logger.debug(`[MARKET_DATA_STATS] ticks=${this.marketDataTickCount}`);
+                this._lastMarketDataStatsLogAtMs = nowMs;
+            }
+        }
+
+        for (const tick of ticks) {
+            let symbol = tick.symbol;
+
+            if (source === 'kite' && tick.instrument_token) {
+                symbol = this.tokenMap[String(tick.instrument_token)] || symbol;
+            }
+
+            symbol = this._getCanonicalSymbol(symbol);
+            if (!symbol) continue;
+
+            const lastPrice = toNumber(tick.last_price ?? tick.price ?? tick.last, NaN);
+            if (!Number.isFinite(lastPrice)) continue;
+
+            const targetSymbols = this._resolveAliasTargets(symbol);
+            if (targetSymbols.length === 0) {
+                targetSymbols.push(symbol);
+            }
+
+            for (const targetSymbol of targetSymbols) {
+                this.currentPrices[targetSymbol] = lastPrice;
+                const incomingSessionId =
+                    typeof tick.session_id === 'string' && tick.session_id.trim()
+                        ? tick.session_id.trim()
+                        : null;
+
+                if (!this.currentQuotes[targetSymbol]) {
+                    this.currentQuotes[targetSymbol] = {
+                        last_price: lastPrice,
+                        ohlc: {
+                            open: lastPrice,
+                            high: lastPrice,
+                            low: lastPrice,
+                            close: lastPrice,
+                        },
+                        bid: 0,
+                        ask: 0,
+                        volume: 0,
+                        session_id: incomingSessionId,
+                    };
+                }
+
+                const quote = this.currentQuotes[targetSymbol];
+                quote.last_price = lastPrice;
+
+                if (tick.ohlc) {
+                    const prevOpen = toNumber(quote.ohlc.open, lastPrice);
+                    const prevHigh = toNumber(quote.ohlc.high, lastPrice);
+                    const prevLow = toNumber(quote.ohlc.low, lastPrice);
+                    const incomingOpen = toNumber(tick.ohlc.open, prevOpen);
+                    const incomingHigh = toNumber(tick.ohlc.high, NaN);
+                    const incomingLow = toNumber(tick.ohlc.low, NaN);
+                    const incomingClose = toNumber(tick.ohlc.close, lastPrice);
+                    const open = Number.isFinite(incomingOpen) ? incomingOpen : prevOpen;
+                    const close = Number.isFinite(incomingClose) ? incomingClose : lastPrice;
+                    const prevSessionId =
+                        typeof quote.session_id === 'string' && quote.session_id.trim()
+                            ? quote.session_id.trim()
+                            : null;
+                    const isSessionReset = Boolean(
+                        incomingSessionId &&
+                        prevSessionId &&
+                        incomingSessionId !== prevSessionId
+                    );
+                    const high = Number.isFinite(incomingHigh)
+                        ? (
+                            isSessionReset
+                                ? Math.max(incomingHigh, open, close, lastPrice)
+                                : Math.max(prevHigh, incomingHigh, open, close, lastPrice)
+                        )
+                        : (
+                            isSessionReset
+                                ? Math.max(open, close, lastPrice)
+                                : Math.max(prevHigh, open, close, lastPrice)
+                        );
+                    const low = Number.isFinite(incomingLow)
+                        ? (
+                            isSessionReset
+                                ? Math.min(incomingLow, open, close, lastPrice)
+                                : Math.min(prevLow, incomingLow, open, close, lastPrice)
+                        )
+                        : (
+                            isSessionReset
+                                ? Math.min(open, close, lastPrice)
+                                : Math.min(prevLow, open, close, lastPrice)
+                        );
+
+                    quote.ohlc = {
+                        open,
+                        high,
+                        low,
+                        close,
+                    };
+                    if (incomingSessionId) {
+                        quote.session_id = incomingSessionId;
+                    }
+                } else {
+                    quote.ohlc.high = Math.max(toNumber(quote.ohlc.high, lastPrice), lastPrice);
+                    quote.ohlc.low = Math.min(toNumber(quote.ohlc.low, lastPrice), lastPrice);
+                    quote.ohlc.close = lastPrice;
+                    if (!Number.isFinite(quote.ohlc.open)) {
+                        quote.ohlc.open = lastPrice;
+                    }
+                }
+
+                const newBid = toNumber(tick.bid ?? tick.depth?.buy?.[0]?.price, 0);
+                const newAsk = toNumber(tick.ask ?? tick.depth?.sell?.[0]?.price, 0);
+                if (newBid > 0) quote.bid = newBid;
+                if (newAsk > 0) quote.ask = newAsk;
+
+                const volume = toNumber(tick.total_volume ?? tick.volume ?? tick.last_quantity, quote.volume || 0);
+                quote.volume = volume;
+
+                const open = toNumber(quote.ohlc.open, lastPrice);
+                const change = lastPrice - open;
+                const changePercent = open > 0 ? (change / open) * 100 : 0;
+
+                const payload = {
+                    symbol: targetSymbol,
+                    price: lastPrice,
+                    last_price: lastPrice,
+                    open,
+                    high: toNumber(quote.ohlc.high, lastPrice),
+                    low: toNumber(quote.ohlc.low, lastPrice),
+                    change,
+                    changePercent,
+                    volume,
+                    total_volume: volume,
+                    bid: quote.bid || 0,
+                    ask: quote.ask || 0,
+                    timestamp: tick.timestamp || new Date(),
+                    provider: source === 'kite' ? 'kite' : 'market_data',
+                };
+
+                this.emit('price_update', payload);
+                pipeline.push(payload);
+                this._persistSymbolPrice(targetSymbol);
+            }
+
+            if (source !== 'kite') {
+                const candidateLatency = toNumber(tick._latencyMs, 0);
+                if (candidateLatency > 0) {
+                    this.marketDataLatency = candidateLatency;
+                }
+            }
         }
     }
 
     _persistSymbolPrice(symbol) {
         try {
-            if (!symbol) return;
-            const nowMs = Date.now();
+            const now = Date.now();
             const lastAt = this._lastPersistedAt[symbol] || 0;
-            if (nowMs - lastAt < 60000) return; // throttle: 60s
+            if (now - lastAt < 60000) return;
 
-            const price = this.currentPrices[symbol];
-            const quote = this.currentQuotes?.[symbol];
-            const prevClose = quote?.ohlc?.close;
-            const lastPrice = Number.isFinite(Number(price)) ? Number(price) : 0;
-            const safePrevClose = Number.isFinite(Number(prevClose)) ? Number(prevClose) : 0;
+            const quote = this.currentQuotes[symbol] || {};
+            const lastPrice = toNumber(this.currentPrices[symbol], 0);
+            const prevClose = toNumber(quote?.ohlc?.close, 0);
 
-            this._lastPersistedAt[symbol] = nowMs;
+            this._lastPersistedAt[symbol] = now;
+
             MasterSymbol.findOneAndUpdate(
                 { symbol },
                 {
                     lastPrice,
-                    prevClose: safePrevClose || undefined,
-                    lastPriceUpdatedAt: new Date(nowMs)
+                    prevClose: prevClose || undefined,
+                    lastPriceUpdatedAt: new Date(now),
                 },
                 { new: false }
-            ).catch((e) => {
-                logger.error(`[MarketData] Failed to persist last price for ${symbol}: ${e.message}`);
+            ).catch((error) => {
+                logger.error(`MARKET_DATA: Failed persisting ${symbol}: ${error.message}`);
             });
-        } catch (e) {
-            logger.error(`[MarketData] Persist last price error: ${e.message}`);
+        } catch (error) {
+            logger.error(`MARKET_DATA: Persist error for ${symbol}: ${error.message}`);
         }
     }
 
     async loadSettings() {
-        const settings = await Setting.find({ 
-            key: { $regex: '^(data_feed_|kite_|fmp_|alltick_)' } 
-        });
-        
-        this.config = {};
-        settings.forEach(s => {
-            if (s.key.includes('api_key') || s.key.includes('api_secret') || s.key.includes('access_token')) {
-                this.config[s.key] = decrypt(s.value);
-            } else {
-                this.config[s.key] = s.value;
+        const nextConfig = {};
+
+        try {
+            const settings = await Setting.find({
+                key: { $regex: '^(data_feed_|kite_|fmp_|market_data_|mt5_)' },
+            });
+
+            for (const setting of settings) {
+                if (SENSITIVE_KEY_PATTERN.test(setting.key)) {
+                    nextConfig[setting.key] = decrypt(setting.value);
+                } else {
+                    nextConfig[setting.key] = setting.value;
+                }
             }
-        });
-        
-        // Load Env Vars overrides
-        if (process.env.KITE_API_KEY) this.config.kite_api_key = process.env.KITE_API_KEY;
-        if (process.env.KITE_API_SECRET) this.config.kite_api_secret = process.env.KITE_API_SECRET;
-        if (process.env.ALLTICK_API_KEY) this.config.alltick_api_key = process.env.ALLTICK_API_KEY;
-        if (process.env.FMP_API_KEY) this.config.fmp_api_key = process.env.FMP_API_KEY;
-        
-        // Initialize Helpers
-        if (this.config.alltick_api_key) {
-            allTickService.initialize(this.config.alltick_api_key);
+        } catch (error) {
+            logger.warn(`MARKET_DATA: Settings load skipped: ${error.message}`);
         }
+
+        if (process.env.KITE_API_KEY) nextConfig.kite_api_key = process.env.KITE_API_KEY;
+        if (process.env.KITE_API_SECRET) nextConfig.kite_api_secret = process.env.KITE_API_SECRET;
+        if (process.env.KITE_ACCESS_TOKEN) nextConfig.kite_access_token = process.env.KITE_ACCESS_TOKEN;
+
+        if (process.env.FMP_API_KEY) nextConfig.fmp_api_key = process.env.FMP_API_KEY;
+
+        if (process.env.MARKET_DATA_WS_URL) nextConfig.market_data_ws_url = process.env.MARKET_DATA_WS_URL;
+        if (!nextConfig.market_data_ws_url && process.env.MT5_WS_URL) {
+            nextConfig.market_data_ws_url = process.env.MT5_WS_URL;
+        }
+
+        if (process.env.MARKET_DATA_API_KEY) nextConfig.market_data_api_key = process.env.MARKET_DATA_API_KEY;
+        if (!nextConfig.market_data_api_key && process.env.MT5_WS_API_KEY) {
+            nextConfig.market_data_api_key = process.env.MT5_WS_API_KEY;
+        }
+
+        if (process.env.MARKET_DATA_INTERVAL_MS) {
+            nextConfig.market_data_interval_ms = Number.parseInt(process.env.MARKET_DATA_INTERVAL_MS, 10);
+        } else if (!nextConfig.market_data_interval_ms && process.env.MT5_WS_INTERVAL_MS) {
+            nextConfig.market_data_interval_ms = Number.parseInt(process.env.MT5_WS_INTERVAL_MS, 10);
+        }
+
+        if (!nextConfig.data_feed_provider) {
+            if (nextConfig.market_data_ws_url) {
+                nextConfig.data_feed_provider = 'market_data';
+            } else if (nextConfig.kite_api_key) {
+                nextConfig.data_feed_provider = 'kite';
+            } else {
+                nextConfig.data_feed_provider = 'none';
+            }
+        }
+
+        this.config = nextConfig;
 
         if (this.config.kite_access_token) {
             kiteService.setAccessToken(this.config.kite_access_token);
         }
 
-        // Restart Feeds
         if (String(process.env.DISABLE_LIVE_FEED || '').toLowerCase() === 'true') {
             logger.warn('MARKET_DATA: Live feed disabled via DISABLE_LIVE_FEED=true');
             return;
         }
+
         if (this.canGoLive()) {
             await this.startLiveFeed();
         }
     }
 
     canGoLive() {
-        // Can go live if EITHER provider is valid
-        const hasKite = !!(this.config.kite_api_key && this.config.kite_api_secret);
-        const hasAllTick = !!(this.config.alltick_api_key);
-        const hasMt5 = !!process.env.MT5_WS_URL;
-        return hasKite || hasAllTick || hasMt5;
+        const hasKite = Boolean(this.config.kite_api_key && this.config.kite_api_secret);
+        const hasMarketData = Boolean(this.config.market_data_ws_url);
+        return hasKite || hasMarketData;
     }
 
     async startLiveFeed() {
-        const promises = [];
+        const tasks = [];
 
-        // 1. Start Kite if configured
         if (this.config.kite_api_key && this.config.kite_api_secret) {
-            promises.push((async () => {
+            tasks.push((async () => {
                 try {
                     this.adapter = kiteService;
                     this.adapter.initialize(this.config.kite_api_key, this.config.kite_api_secret);
-                    
+
                     if (this.config.kite_access_token) {
                         this.adapter.setAccessToken(this.config.kite_access_token);
-                        this.connectTicker(); // Only Kite uses this local method wrapper
+                        this.connectTicker();
                     } else {
-                        logger.warn(`Kite Configured but NO Access Token. Waiting for Login...`);
+                        logger.warn('MARKET_DATA: Kite configured but access token is missing.');
                     }
-                } catch (e) {
-                    logger.error('Error initializing Kite Service', e);
+                } catch (error) {
+                    logger.error(`MARKET_DATA: Kite init failed: ${error.message}`);
                 }
             })());
         }
 
-        // 2. Start AllTick if configured
-        if (this.config.alltick_api_key) {
-             promises.push((async () => {
-                 try {
-                    // Initialize WebSocket Manager (Partitioning/Pooling)
-                    websocketManager.init(this);
-                    
-                    // We STILL need to connect the Main Ticker for non-pooled events?
-                    // Actually, WebSocketManager handles data via Pool.
-                    // But we might need one connection for "General" stuff or just rely on Manager.
-                    // The original code used `allTickService.connectTicker`.
-                    // If we switch to Manager, do we still need `connectTicker`? 
-                    // `websocketManager` manages connections.
-                    // But `subscribeToSymbols` calls `websocketManager.updateViewport`.
-                    // So we probably don't need `connectTicker` for AllTick anymore in the old way.
-                    
-                    // However, we should ensure `allTickService` is initialized with token.
-                    // It is (line 506).
-                    
-                    // Let's keep `connectTicker` for now as a fallback or for "Global" market events, 
-                    // OR disable it if Manager covers everything.
-                    // Manager covers QUOTES and DEPTH.
-                    // If we disable `connectTicker`, we rely solely on Manager.
-                    
-                    logger.info('WebSocket Manager Initialized for AllTick');
-                    this.subscribeToSymbols();
+        if (this.config.market_data_ws_url) {
+            tasks.push((async () => {
+                try {
+                    mt5Service.init({
+                        url: this.config.market_data_ws_url,
+                        apiKey: this.config.market_data_api_key,
+                        intervalMs: Number.parseInt(this.config.market_data_interval_ms, 10) || 300,
+                        marketDataService: this,
+                    });
 
-                 } catch (e) {
-                     logger.error('Error starting AllTick Feed', e);
-                 }
-             })());
+                    logger.info('MARKET_DATA: External market-data websocket initialized');
+                } catch (error) {
+                    logger.error(`MARKET_DATA: Market-data websocket init failed: ${error.message}`);
+                }
+            })());
         }
 
-        // 3. Start MT5 WebSocket if configured
-        if (process.env.MT5_WS_URL) {
-             promises.push((async () => {
-                 try {
-                    mt5Service.init(process.env.MT5_WS_URL, this);
-                    logger.info('MT5 WebSocket Initialized');
-                 } catch (e) {
-                    logger.error('Error starting MT5 WebSocket', e);
-                 }
-             })());
-        }
-
-        await Promise.allSettled(promises);
+        await Promise.allSettled(tasks);
+        this.mode = 'live';
+        this.subscribeToSymbols();
     }
 
     connectTicker() {
         if (!this.adapter) return;
-        
-        this.adapter.connectTicker((ticks) => {
-            this.processLiveTicks(ticks, 'kite');
-        }, () => {
-            logger.info('Kite Live Ticker Connected');
-            this.mode = 'live';
-            this.subscribeToSymbols();
-        });
+
+        this.adapter.connectTicker(
+            (ticks) => this.processLiveTicks(ticks, 'kite'),
+            () => {
+                logger.info('MARKET_DATA: Kite ticker connected');
+                this.subscribeToSymbols();
+            }
+        );
     }
 
     getStats() {
-        // Return Decoupled Stats
+        const marketDataStats = {
+            connected: mt5Service.isConnected || false,
+            latency: mt5Service.isConnected ? `${toNumber(this.marketDataLatency, 0)}ms` : 'Disconnected',
+            tickCount: this.marketDataTickCount,
+            subscribedSymbols: mt5Service.subscriptionCount || 0,
+        };
+
         const stats = {
             provider: this.config?.data_feed_provider || 'none',
             startTime: this.startTime,
-            uptime: Math.floor((new Date() - this.startTime) / 1000),
+            uptime: Math.floor((Date.now() - this.startTime.getTime()) / 1000),
             mode: this.mode,
-            
-            // Explicit Kite Stats
             kite: {
                 connected: this.adapter?.isTickerConnected || false,
-                latency: this.adapter?.isTickerConnected ? `${this.kiteLatency}ms` : 'Disconnected',
-                tickCount: this.kiteTickCount
+                latency: this.adapter?.isTickerConnected ? `${toNumber(this.kiteLatency, 0)}ms` : 'Disconnected',
+                tickCount: this.kiteTickCount,
             },
-
-            // Explicit AllTick Stats
-            alltick: {
-                connected: allTickService.isConnected || false,
-                latency: allTickService.isConnected ? `${allTickService.latency}ms` : 'Disconnected',
-                tickCount: this.allTickTickCount
-            },
-            mt5: {
-                connected: mt5Service.isConnected || false,
-                latency: mt5Service.isConnected ? `${this.mt5Latency}ms` : 'Disconnected',
-                tickCount: this.mt5TickCount
-            },
-            
-            // DEBUG: Expose current prices to verify initialization
-            prices: this.currentPrices || {}
+            marketData: marketDataStats,
+            mt5: marketDataStats,
+            prices: this.currentPrices || {},
         };
 
-        // Legacy support for flat latency logic (optional, for other consumers)
-        // We use the 'Active' provider for the main latency field
         if (stats.provider === 'kite') {
             stats.latency = stats.kite.latency;
             stats.tickCount = stats.kite.tickCount;
-        } else if (stats.provider === 'mt5') {
-            stats.latency = stats.mt5.latency;
-            stats.tickCount = stats.mt5.tickCount;
         } else {
-            stats.latency = stats.alltick.latency;
-            stats.tickCount = stats.alltick.tickCount;
+            stats.latency = stats.marketData.latency;
+            stats.tickCount = stats.marketData.tickCount;
         }
 
         return stats;
     }
 
-    async handleLogin(provider, payload) {
+    async handleLogin(provider, payload = {}) {
         await this.loadSettings();
 
         if (provider === 'kite') {
             return this.handleKiteLogin(payload.request_token || payload.code);
-        } else {
-             throw new Error(`Login provider ${provider} not supported yet`);
         }
+
+        throw new Error(`Login provider ${provider} is not supported`);
     }
 
     async handleKiteLogin(requestToken) {
-         await this.loadSettings();
-         if (!this.config.kite_api_key) throw new Error('API Key not configured');
+        await this.loadSettings();
 
-         kiteService.initialize(this.config.kite_api_key, this.config.kite_api_secret);
-         const response = await kiteService.generateSession(requestToken);
-         
-         await Setting.findOneAndUpdate(
-             { key: 'kite_access_token' }, 
-             { key: 'kite_access_token', value: encrypt(response.access_token), description: 'Kite Access Token' }, 
-             { upsert: true }
-         );
+        if (!this.config.kite_api_key || !this.config.kite_api_secret) {
+            throw new Error('Kite API credentials are not configured');
+        }
 
-         this.config.kite_access_token = response.access_token;
-         this.mode = 'live';
-         this.connectTicker();
-         return response;
+        kiteService.initialize(this.config.kite_api_key, this.config.kite_api_secret);
+        const response = await kiteService.generateSession(requestToken);
+
+        await Setting.findOneAndUpdate(
+            { key: 'kite_access_token' },
+            {
+                key: 'kite_access_token',
+                value: encrypt(response.access_token),
+                description: 'Kite Access Token',
+            },
+            { upsert: true }
+        );
+
+        this.config.kite_access_token = response.access_token;
+        this.connectTicker();
+        return response;
     }
 
-    async getHistory(symbol, resolution, from, to, priority = null) {
-        // Generate Standard Cache Key
-        const provider = this.config.data_feed_provider || 'alltick';
-        
-        // Normalize Dates (Support Seconds, Milliseconds, or Date String)
-        // Normalize Dates (Support Seconds, Milliseconds, or Date String)
-        const parseTs = (val) => {
-             if (!val) return Math.floor(Date.now() / 1000);
-             // CRITICAL: Handle Date objects first because isNaN(Date) is false but parseInt(Date) is NaN
-             if (val instanceof Date) return Math.floor(val.getTime() / 1000);
-             
-             if (!isNaN(val)) {
-                  const num = Number(val);
-                  // Standard heuristic: Timestamps > 10 billion are ms
-                  return num > 10000000000 ? Math.floor(num / 1000) : Math.floor(num);
-             }
-             const d = new Date(val);
-             return !isNaN(d.getTime()) ? Math.floor(d.getTime() / 1000) : Math.floor(Date.now() / 1000);
-        };
+    async getHistory(symbol, resolution, from, to) {
+        const canonical = this._getCanonicalSymbol(symbol) || String(symbol || '').trim();
+        if (!canonical) return [];
 
         const fromTs = parseTs(from);
-        const toTs = to ? parseTs(to) : Math.floor(Date.now() / 1000);
-        
-        // Normalize for Deduplication & Caching (Round to 30s)
-        const toTsNormal = Math.floor(toTs / 30) * 30;
-        const fromTsNormal = Math.floor(fromTs / 30) * 30;
-        
-        // Cache Key: "history_BTCUSD_5_170000_171000"
-        const cacheKey = `history_${symbol}_${resolution}_${fromTsNormal}_${toTsNormal}`;
-        
-        // 1. Unified Cache Check (L1 -> L2 -> L3)
+        const toTs = parseTs(to, Math.floor(Date.now() / 1000));
+
+        const fromKey = Math.floor(fromTs / 30) * 30;
+        const toKey = Math.floor(toTs / 30) * 30;
+        const cacheKey = `history_${canonical}_${resolution}_${fromKey}_${toKey}`;
+
         return cacheManager.getOrFetch(cacheKey, async () => {
-            
-            // 2. Direct Call (Provider handles its own queuing/limits)
-            logger.debug(`[MarketData] Fetching History: ${symbol} (${resolution}) via ${provider}`);
-            
             try {
-                let data = [];
-                
-                const isGlobalSymbol = ['XAUUSD', 'XAGUSD', 'BTCUSD', 'ETHUSD', 'EURUSD'].includes(symbol) || 
-                                     (this.symbols[symbol] && ['FOREX', 'CRYPTO', 'BINANCE'].includes(this.symbols[symbol].exchange));
+                const symbolDoc = this.symbols[canonical] || null;
+                const canUseKite = Boolean(
+                    symbolDoc?.instrumentToken &&
+                    this.config.kite_api_key &&
+                    !this._isMarketDataSymbol(symbolDoc)
+                );
 
-                const isKiteRequest = !isGlobalSymbol && (provider === 'kite' || (this.symbols[symbol]?.instrumentToken && this.config.kite_api_key));
-                logger.info(`[MarketData-Trace] Symbol: ${symbol}, Provider: ${provider}, IsKite: ${isKiteRequest}`);
+                if (canUseKite) {
+                    if (this.kiteAuthBrokenUntil && Date.now() < this.kiteAuthBrokenUntil) {
+                        logger.warn(`MARKET_DATA: Skipping Kite history for ${canonical}; auth cooldown active`);
+                        return [];
+                    }
 
-                if (isKiteRequest) {
-                        // Check if Kite Auth is globally broken to avoid clogging queue with known failures
-                        if (this.kiteAuthBrokenUntil && Date.now() < this.kiteAuthBrokenUntil) {
-                            logger.warn(`[MarketData] Skipping Kite history for ${symbol} - Auth recently failed.`);
-                            return [];
-                        }
+                    const data = await this._fetchKiteHistory(
+                        canonical,
+                        resolution,
+                        new Date(fromTs * 1000),
+                        new Date(toTs * 1000)
+                    );
 
-                        // --- KITE STRATEGY ---
-                        // Pass Date objects derived from safe timestamps
-                        data = await this._fetchKiteHistory(symbol, resolution, new Date(fromTsNormal * 1000), new Date(toTsNormal * 1000));
-                        // No extra mapping needed here
-                } else {
-                        // --- ALLTICK STRATEGY (Crypto/Forex/Fallback) ---
-                        // AllTickService handles its own Rate Limiting via RequestQueue internally.
-                        logger.info(`[MarketData-Trace] Delegating to AllTick for ${symbol}`);
-                        const isRecent = (Date.now() / 1000) - toTsNormal < 3600; 
-                        const effectivePriority = priority || (isRecent ? 1 : 2);
-                        data = await allTickService.getHistoricalData(symbol, resolution, new Date(fromTsNormal * 1000), new Date(toTsNormal * 1000), effectivePriority);
+                    return Array.isArray(data)
+                        ? data.filter((candle) => candle && candle.time && candle.close !== undefined)
+                        : [];
                 }
 
-                if (!Array.isArray(data)) {
-                    logger.warn(`[MarketData] Fetch Returned NON-ARRAY for ${symbol}`);
-                    return [];
-                }
-                
-                logger.info(`[History Debug] ${symbol}: Returned ${data.length} candles. First: ${JSON.stringify(data[0])}`);
-                return data.filter(c => c && c.time && c.close !== undefined);
+                // External market-data websocket currently provides live ticks only.
+                // Return best-effort snapshot candle when available.
+                const livePrice = toNumber(this.currentPrices[canonical], 0);
+                const quote = this.currentQuotes[canonical];
 
-            } catch (e) {
-                if (e.message?.includes('403') || e.message?.includes('Incorrect api_key') || e.message?.includes('401')) {
-                    logger.error(`[MarketData] Kite AUTH FAILURE detected. Disabling Kite history for 5 minutes.`);
-                    this.kiteAuthBrokenUntil = Date.now() + (5 * 60 * 1000); // 5 min cooldown
+                if (quote?.ohlc) {
+                    return [{
+                        time: toTs,
+                        open: toNumber(quote.ohlc.open, livePrice),
+                        high: toNumber(quote.ohlc.high, livePrice),
+                        low: toNumber(quote.ohlc.low, livePrice),
+                        close: toNumber(quote.ohlc.close, livePrice),
+                        volume: toNumber(quote.volume, 0),
+                    }];
                 }
-                logger.error(`[MarketData] Fetch Failed ${symbol}: ${e.message}`);
-                return []; // Return empty instead of throwing to unblock UI/Queue
+
+                return [];
+            } catch (error) {
+                if (
+                    error.message?.includes('403') ||
+                    error.message?.includes('401') ||
+                    error.message?.toLowerCase().includes('incorrect api_key')
+                ) {
+                    this.kiteAuthBrokenUntil = Date.now() + 5 * 60 * 1000;
+                }
+
+                logger.error(`MARKET_DATA: History fetch failed for ${canonical}: ${error.message}`);
+                return [];
             }
-
         }, '24h');
     }
 
-    // Extracted Kite logic from original getHistory
     async _fetchKiteHistory(symbol, resolution, from, to) {
-        const masterSymbol = this.symbols[symbol];
-        let interval = 'minute';
-        // Mapping Logic
-        if (resolution === '1') interval = 'minute';
-        else if (resolution === '3') interval = '3minute';
-        else if (resolution === '5') interval = '5minute';
-        else if (resolution === '15') interval = '15minute';
-        else if (resolution === '30') interval = '30minute';
-        else if (resolution === '60' || resolution === '1h') interval = '60minute';
-        else if (resolution === 'D' || resolution === '1D') interval = 'day';
+        const symbolDoc = this.symbols[symbol];
+        if (!symbolDoc?.instrumentToken) return [];
 
-        // Range Clamping logic (Kite limits per request, not necessarily total retention)
-        // If we want to support older data, we should paginate, but for now let's just respect the TO date.
-        const now = Math.floor(Date.now() / 1000);
-        let safeFrom = new Date(from).getTime() / 1000;
-        
-        // Only clamp strict lookback if necessary, but don't break the range
-        // For debugging, we remove the logic that shifts 'from' past 'to'
-        // let maxDays = 60;
-        // if (interval === 'day') maxDays = 2000;
-        // else if (interval === '60minute') maxDays = 400;
-        // if (now - safeFrom > maxDays * 86400) safeFrom = now - (maxDays * 86400);
+        const interval = resolutionToKiteInterval(resolution);
 
-        if (safeFrom > new Date(to).getTime() / 1000) {
-             logger.warn(`[KITE] Adjusted 'from' date was after 'to' date. Resetting to 'to' - interval.`);
-             safeFrom = (new Date(to).getTime() / 1000) - 86400; // Fallback to 1 day before TO
-        }
+        const safeFromTs = parseTs(from);
+        const safeToTs = parseTs(to);
 
-        logger.info(`[HISTORY_DEBUG] Fetching Kite History for ${symbol} (Token: ${masterSymbol.instrumentToken}). Range: ${new Date(safeFrom * 1000).toISOString()} to ${new Date(to).toISOString()}`);
+        const adjustedFromTs = safeFromTs > safeToTs ? safeToTs - 86400 : safeFromTs;
 
-        const data = await kiteService.getHistoricalData(
-            masterSymbol.instrumentToken, 
-            interval, 
-            new Date(safeFrom * 1000), 
-            new Date(to)
+        return kiteService.getHistoricalData(
+            symbolDoc.instrumentToken,
+            interval,
+            new Date(adjustedFromTs * 1000),
+            new Date(safeToTs * 1000)
         );
-        
-        return data;
     }
 
-
     async searchInstruments(query = '') {
-        try {
-            let kiteResults = [];
-            let allTickResults = [];
-            const safeQuery = typeof query === 'string' ? query : '';
+        const safeQuery = typeof query === 'string' ? query.trim() : '';
 
-            // 1. Kite Search
-            if (this.config && this.config.kite_api_key) {
+        try {
+            const dbFilter = safeQuery
+                ? {
+                    $or: [
+                        { symbol: { $regex: safeQuery, $options: 'i' } },
+                        { name: { $regex: safeQuery, $options: 'i' } },
+                    ],
+                }
+                : {};
+
+            const dbSymbols = await MasterSymbol.find(dbFilter)
+                .sort({ symbol: 1 })
+                .limit(50)
+                .lean();
+
+            const dbMapped = dbSymbols.map((item) => ({
+                symbol: item.symbol,
+                name: item.name,
+                segment: item.segment,
+                exchange: item.exchange,
+                provider: item.provider || null,
+                lotSize: item.lotSize || 1,
+                tickSize: item.tickSize || 0.01,
+            }));
+
+            let kiteResults = [];
+            if (safeQuery && this.config?.kite_api_key) {
                 try {
-                    kiteResults = await kiteInstrumentsService.search(safeQuery);
-                } catch (e) {
-                    logger.error(`Kite search error: ${e.message}`);
+                    kiteResults = kiteInstrumentsService.search(safeQuery, 50);
+                } catch (error) {
+                    logger.error(`MARKET_DATA: Kite search failed: ${error.message}`);
                 }
             }
 
-            // 2. AllTick Search
-            try {
-                // Even without API key, use service for potential fallback or handling
-                allTickResults = await allTickService.search(safeQuery);
-            } catch (e) {
-                logger.error(`AllTick search error: ${e.message}`);
-            }
-
-            // 3. Hardcoded Master List (Fallback & Priority)
-            const popular = [
-                // INDICES
-                { symbol: 'NSE:NIFTY 50-INDEX', name: 'Nifty 50', segment: 'INDICES', exchange: 'NSE', lotSize: 50, tickSize: 0.05 },
-                { symbol: 'NSE:NIFTY BANK-INDEX', name: 'Nifty Bank', segment: 'INDICES', exchange: 'NSE', lotSize: 15, tickSize: 0.05 },
-                { symbol: 'BSE:SENSEX-INDEX', name: 'Sensex', segment: 'INDICES', exchange: 'BSE', lotSize: 10, tickSize: 0.05 },
-                { symbol: 'NSE:FINNIFTY-INDEX', name: 'Nifty Fin Service', segment: 'INDICES', exchange: 'NSE', lotSize: 40, tickSize: 0.05 },
-                
-                // STOCKS (Major)
-                { symbol: 'NSE:RELIANCE-EQ', name: 'Reliance Industries', segment: 'EQUITY', exchange: 'NSE', lotSize: 1, tickSize: 0.05 },
-                { symbol: 'NSE:TCS-EQ', name: 'Tata Consultancy Services', segment: 'EQUITY', exchange: 'NSE', lotSize: 1, tickSize: 0.05 },
-                { symbol: 'NSE:HDFCBANK-EQ', name: 'HDFC Bank', segment: 'EQUITY', exchange: 'NSE', lotSize: 1, tickSize: 0.05 },
-                { symbol: 'NSE:INFY-EQ', name: 'Infosys', segment: 'EQUITY', exchange: 'NSE', lotSize: 1, tickSize: 0.05 },
-                { symbol: 'NSE:ICICIBANK-EQ', name: 'ICICI Bank', segment: 'EQUITY', exchange: 'NSE', lotSize: 1, tickSize: 0.05 },
-                { symbol: 'NSE:SBIN-EQ', name: 'State Bank of India', segment: 'EQUITY', exchange: 'NSE', lotSize: 1, tickSize: 0.05 },
-                { symbol: 'NSE:BHARTIARTL-EQ', name: 'Bharti Airtel', segment: 'EQUITY', exchange: 'NSE', lotSize: 1, tickSize: 0.05 },
-                { symbol: 'NSE:ITC-EQ', name: 'ITC Ltd', segment: 'EQUITY', exchange: 'NSE', lotSize: 1, tickSize: 0.05 },
-                { symbol: 'NSE:KOTAKBANK-EQ', name: 'Kotak Mahindra Bank', segment: 'EQUITY', exchange: 'NSE', lotSize: 1, tickSize: 0.05 },
-                { symbol: 'NSE:LT-EQ', name: 'Larsen & Toubro', segment: 'EQUITY', exchange: 'NSE', lotSize: 1, tickSize: 0.05 },
-
-                // GLOBAL / CRYPTO
-                { symbol: 'BTCUSD', name: 'Bitcoin USD', segment: 'CRYPTO', exchange: 'BINANCE', lotSize: 1, tickSize: 0.01 },
-                { symbol: 'ETHUSD', name: 'Ethereum USD', segment: 'CRYPTO', exchange: 'BINANCE', lotSize: 1, tickSize: 0.01 },
-                // Use 'FOREX' exchange for Global/Currencies, but ensure Plan 'CURRENCY' allows 'FOREX'
-                { symbol: 'EURUSD', name: 'Euro / US Dollar', segment: 'CURRENCY', exchange: 'FOREX', lotSize: 1, tickSize: 0.0001 },
-                // Use 'FOREX' for Commodities like Gold if data comes from global provider, but Segment MUST be COMMODITY
-                { symbol: 'XAUUSD', name: 'Gold / US Dollar', segment: 'COMMODITY', exchange: 'FOREX', lotSize: 1, tickSize: 0.01 },
-                { symbol: 'XAGUSD', name: 'Silver / US Dollar', segment: 'COMMODITY', exchange: 'FOREX', lotSize: 1, tickSize: 0.001 },
-                // Add Crude Oil if missing
-                { symbol: 'MCX:CRUDEOIL24NOVFUT', name: 'Crude Oil', segment: 'COMMODITY', exchange: 'MCX', lotSize: 100, tickSize: 1.00 }
-            ];
-
-            // 4. Database Search
-            const dbSymbols = await MasterSymbol.find({
-                $or: [
-                    { symbol: { $regex: safeQuery, $options: 'i' } },
-                    { name: { $regex: safeQuery, $options: 'i' } }
-                ]
-            }).limit(10);
-
-            const dbMapped = dbSymbols.map(s => ({
-                symbol: s.symbol,
-                name: s.name,
-                segment: s.segment,
-                exchange: s.exchange,
-                provider: s.provider || null,
-                lotSize: s.lotSize,
-                tickSize: s.tickSize || 0.05
-            }));
-
-            // Filter Popular List
-            const q = safeQuery.toUpperCase();
-            const filteredPopular = popular.filter(p => 
-                p.symbol.includes(q) || 
-                p.name.toUpperCase().includes(q)
-            );
-
-            // Merge & Unique
-            const combined = [...dbMapped, ...kiteResults, ...allTickResults, ...filteredPopular];
-            const unique = Array.from(new Map(combined.map(item => [item.symbol, item])).values());
-
+            const combined = [...dbMapped, ...kiteResults];
+            const unique = Array.from(new Map(combined.map((item) => [item.symbol, item])).values());
             return unique.slice(0, 50);
-
         } catch (error) {
-            logger.error(`Critical Error in searchInstruments: ${error.message}`);
-            // Return empty array instead of 500 to keep UI alive
+            logger.error(`MARKET_DATA: Search failed: ${error.message}`);
             return [];
         }
     }
 
-    /**
-     * Get historical OHLC data for a symbol
-     * @param {string} symbol - Symbol name (e.g., 'EURUSD', 'NIFTY 50')
-     * @param {string} resolution - Timeframe (1, 5, 15, 30, 60, 1D, etc.)
-     * @param {number|string} from - Start timestamp (seconds)
-     * @param {number|string} to - End timestamp (seconds)
-     * @returns {Promise<Array>} Array of OHLC candles
-     */
+    async syncInstruments() {
+        try {
+            await this.loadSettings();
 
+            if (!this.config.kite_api_key || !this.config.kite_api_secret) {
+                return {
+                    synced: false,
+                    provider: 'kite',
+                    message: 'Kite API key/secret not configured',
+                };
+            }
+
+            if (!this.config.kite_access_token) {
+                return {
+                    synced: false,
+                    provider: 'kite',
+                    message: 'Kite access token missing. Login first.',
+                };
+            }
+
+            kiteService.initialize(this.config.kite_api_key, this.config.kite_api_secret);
+            kiteService.setAccessToken(this.config.kite_access_token);
+
+            const result = await kiteInstrumentsService.syncFromZerodha();
+            return {
+                synced: true,
+                provider: 'kite',
+                count: result?.count || 0,
+            };
+        } catch (error) {
+            logger.error(`MARKET_DATA: Instrument sync failed: ${error.message}`);
+            return {
+                synced: false,
+                provider: 'kite',
+                message: error.message,
+            };
+        }
+    }
 }
 
 const marketDataService = new MarketDataService();

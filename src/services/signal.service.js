@@ -9,7 +9,7 @@ const mapSignalToCategory = (signalBody) => {
   const seg = segment ? segment.toUpperCase() : '';
 
   // 1. High Priority: Crypto Detection (USDT pairs)
-  if (sym.includes('USDT') || sym.includes('USD') && (seg === 'CRYPTO' || seg === 'BINANCE')) return 'CRYPTO';
+  if (sym.includes('USDT') || sym.includes('USD') && seg === 'CRYPTO') return 'CRYPTO';
 
   if (sym.includes('NIFTY') && !sym.includes('BANK') && !sym.includes('FIN')) return 'NIFTY_OPT';
   if (sym.includes('BANKNIFTY')) return 'BANKNIFTY_OPT';

@@ -13,7 +13,6 @@ import marketDataService from './marketData.service.js';
 import announcementService from './announcement.service.js';
 import { economicService } from './economic.service.js';
 import * as emailService from './email.service.js';
-import allTickService from './alltick.service.js';
 import technicalAnalysisService from './technicalAnalysis.service.js';
 
 
@@ -33,6 +32,5 @@ export {
     economicService,
     msg91Service,
     emailService,
-    allTickService,
     technicalAnalysisService
 };

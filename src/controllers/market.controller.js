@@ -7,7 +7,6 @@ import logger from '../config/log.js';
 
 // Seed Data (Standard Set)
 import marketDataService from '../services/marketData.service.js';
-import { mt5Service } from '../services/mt5.service.js';
 import { kiteService } from '../services/kite.service.js';
 import subscriptionService from '../services/subscription.service.js';
 import { technicalAnalysisService } from '../services/index.js';
@@ -21,14 +20,20 @@ const toNumber = (value, fallback = 0) => {
 const enrichMarketSymbols = (symbols) => {
     return symbols.map(s => {
         const fallbackLive = (s.lastPrice && s.lastPrice > 0) ? s.lastPrice : (s.prevClose && s.prevClose > 0 ? s.prevClose : 0);
-        const live = toNumber(marketDataService.currentPrices[s.symbol] ?? fallbackLive, 0);
-        const ohlc = marketDataService.currentQuotes?.[s.symbol]?.ohlc;
-        const prevCloseRaw = ohlc ? ohlc.close : (s.prevClose && s.prevClose > 0 ? s.prevClose : live);
-        const prevClose = toNumber(prevCloseRaw, live);
+        const live = toNumber(marketDataService.getBestLivePrice(s.symbol, s, fallbackLive), 0);
+        const quote = marketDataService.getBestQuote(s.symbol, s);
+        const ohlc = quote?.ohlc;
+        const close = toNumber(ohlc?.close, (s.prevClose && s.prevClose > 0 ? s.prevClose : live));
+        const high = toNumber(ohlc?.high, live);
+        const low = toNumber(ohlc?.low, live);
+        const open = toNumber(ohlc?.open, close || live);
+        const bid = toNumber(quote?.bid, 0);
+        const ask = toNumber(quote?.ask, 0);
+        const points = live - close;
         
         let change = 0;
-        if (prevClose > 0 && live > 0) {
-            change = ((live - prevClose) / prevClose) * 100;
+        if (close > 0 && live > 0) {
+            change = ((live - close) / close) * 100;
         }
 
         return {
@@ -38,7 +43,14 @@ const enrichMarketSymbols = (symbols) => {
             exchange: s.exchange,
             provider: s.provider || null,
             price: live,
-            prevClose: Number.isFinite(prevClose) ? parseFloat(prevClose.toFixed(2)) : 0,
+            prevClose: Number.isFinite(close) ? close : 0,
+            close: Number.isFinite(close) ? close : 0,
+            open: Number.isFinite(open) ? open : 0,
+            high: Number.isFinite(high) ? high : 0,
+            low: Number.isFinite(low) ? low : 0,
+            bid: Number.isFinite(bid) && bid > 0 ? bid : 0,
+            ask: Number.isFinite(ask) && ask > 0 ? ask : 0,
+            points: Number.isFinite(points) ? points : 0,
             change: Number.isFinite(change) ? parseFloat(change.toFixed(2)) : 0,
             isUp: change >= 0,
             lotSize: s.lotSize || 1,
@@ -82,7 +94,7 @@ const getTickers = catchAsync(async (req, res) => {
                  }
                  if (perms.includes('CRYPTO')) {
                     allowedSegments.push('CRYPTO');
-                    allowedExchanges.push('BINANCE', 'CRYPTO');
+                    allowedExchanges.push('CRYPTO');
                  }
             }
         } catch (e) {
@@ -117,7 +129,7 @@ const getTickers = catchAsync(async (req, res) => {
 const getUserWatchlist = catchAsync(async (req, res) => {
     const user = req.user;
     const symbols = Array.isArray(user.marketWatchlist)
-        ? user.marketWatchlist.map(sym => String(sym).toUpperCase())
+        ? user.marketWatchlist.map(sym => String(sym).trim().toUpperCase())
         : [];
 
     if (symbols.length === 0) {
@@ -131,15 +143,13 @@ const getUserWatchlist = catchAsync(async (req, res) => {
         .map(sym => map.get(sym))
         .filter(Boolean);
 
-    const mt5Symbols = ordered.filter(s => s.provider === 'mt5').map(s => s.symbol);
-    if (mt5Symbols.length > 0) {
-        mt5Service.subscribe(mt5Symbols);
-    }
+    await Promise.all(ordered.map(s => marketDataService.ensureSymbolSubscription(s.symbol, s)));
 
     const needsQuote = ordered.some(s => {
-        const live = marketDataService.currentPrices[s.symbol];
-        const fallback = (s.lastPrice && s.lastPrice > 0) || (s.prevClose && s.prevClose > 0);
-        return !Number.isFinite(Number(live)) || Number(live) <= 0 || !fallback;
+        const live = marketDataService.getBestLivePrice(s.symbol, s, 0);
+        const hasFallback = (s.lastPrice && s.lastPrice > 0) || (s.prevClose && s.prevClose > 0);
+        const hasLive = Number.isFinite(Number(live)) && Number(live) > 0;
+        return !hasLive && !hasFallback;
     });
 
     if (needsQuote) {
@@ -157,7 +167,7 @@ const addUserWatchlist = catchAsync(async (req, res) => {
         throw new Error('Symbol is required');
     }
 
-    const normalized = String(symbol).toUpperCase();
+    const normalized = String(symbol).trim().toUpperCase();
     const symbolDoc = await MasterSymbol.findOne({ symbol: normalized });
     if (!symbolDoc) {
         res.status(400);
@@ -184,8 +194,8 @@ const removeUserWatchlist = catchAsync(async (req, res) => {
         throw new Error('Symbol is required');
     }
 
-    const normalized = String(symbol).toUpperCase();
-    const symbolDoc = await MasterSymbol.findOne({ symbol: normalized }).select('provider symbol');
+    const normalized = String(symbol).trim().toUpperCase();
+    const symbolDoc = await MasterSymbol.findOne({ symbol: normalized }).select('symbol');
     const user = req.user;
     const list = Array.isArray(user.marketWatchlist) ? user.marketWatchlist : [];
     const next = list.filter(s => s !== normalized);
@@ -193,8 +203,8 @@ const removeUserWatchlist = catchAsync(async (req, res) => {
     user.marketWatchlist = next;
     await user.save();
 
-    if (symbolDoc?.provider === 'mt5') {
-        mt5Service.unsubscribe([symbolDoc.symbol]);
+    if (symbolDoc?.symbol) {
+        marketDataService.unsubscribeSymbol(symbolDoc.symbol);
     }
 
     res.send({ symbols: user.marketWatchlist });
@@ -332,9 +342,9 @@ const getSentiment = catchAsync(async (req, res) => {
 
     // 3. Market Trend Data (Percentage Change)
     const getTrend = (sym) => {
-        const live = marketDataService.currentPrices[sym] || 0;
-        const quote = marketDataService.currentQuotes[sym];
-        const open = quote?.ohlc?.open || live;
+        const live = toNumber(marketDataService.getBestLivePrice(sym, null, 0), 0);
+        const quote = marketDataService.getBestQuote(sym);
+        const open = toNumber(quote?.ohlc?.open, live);
         
         if (live === 0 || open === 0) return { direction: null, change: null, hasData: false };
         
@@ -484,7 +494,7 @@ const createSymbol = catchAsync(async (req, res) => {
         // Auto-detect Crypto
         if (sym.includes('USDT')) {
             req.body.segment = 'CRYPTO';
-            req.body.exchange = 'BINANCE';
+            req.body.exchange = 'CRYPTO';
         }
 
         const instrument = kiteInstrumentsService.getInstrumentBySymbol(req.body.symbol);
@@ -531,12 +541,13 @@ const getSymbols = catchAsync(async (req, res) => {
     
     // Inject current price from memory
         const enrichedSymbols = symbols.map(s => {
-            s.lastPrice = marketDataService.currentPrices[s.symbol] || s.lastPrice || 0;
+            s.lastPrice = marketDataService.getBestLivePrice(s.symbol, s, s.lastPrice || 0);
             s.ltp = s.lastPrice; // Alias
             
             // Inject OHLC if available (from fetchInitialQuote)
-            if (marketDataService.currentQuotes && marketDataService.currentQuotes[s.symbol]) {
-                 s.ohlc = marketDataService.currentQuotes[s.symbol].ohlc;
+            const quote = marketDataService.getBestQuote(s.symbol, s);
+            if (quote?.ohlc) {
+                 s.ohlc = quote.ohlc;
             }
             
             return s;
@@ -662,13 +673,7 @@ const getLoginUrl = catchAsync(async (req, res) => {
     if (provider === 'kite') {
         apiKey = marketDataService.config.kite_api_key;
         apiSecret = marketDataService.config.kite_api_secret;
-    } else if (provider === 'alltick') {
-        apiKey = marketDataService.config.alltick_api_key;
     }
-    
-    // Fallback or generic (if still needed)
-    if (!apiKey) apiKey = marketDataService.config.data_feed_api_key;
-    if (!apiSecret) apiSecret = marketDataService.config.data_feed_api_secret;
 
     if (!apiKey) {
         return res.status(httpStatus.BAD_REQUEST).send({ message: 'API Key not configured' });
@@ -746,7 +751,7 @@ const searchInstruments = catchAsync(async (req, res) => {
                 }
                 if (perms.includes('CRYPTO')) {
                     allowedSegments.push('CRYPTO');
-                    allowedExchanges.push('BINANCE', 'CRYPTO');
+                    allowedExchanges.push('CRYPTO');
                 }
 
                 

@@ -172,6 +172,7 @@ const subscribeToRoom = async (ws, roomName) => {
   // TICK REPLAY
   try {
     const { default: marketDataService } = await import('./marketData.service.js');
+    await marketDataService.ensureSymbolSubscription(roomName);
     // Case-insensitive lookup in currentPrices
     const prices = marketDataService.currentPrices || {};
     const exactSymbol = Object.keys(prices).find(s => s.toLowerCase() === normalized);
