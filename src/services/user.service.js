@@ -49,26 +49,11 @@ const blockUserById = async (userId) => {
     return user;
 };
 
-const liquidateUserById = async (userId) => {
-    const user = await getUserById(userId);
-    if (!user) {
-        throw new ApiError(httpStatus.NOT_FOUND, 'User not found');
-    }
-    
-    // Reset equity and set status to Liquidated
-    user.equity = 0;
-    user.status = 'Liquidated';
-    // Add logic to close all open positions here if transaction service is available
-    
-    await user.save();
-    return user;
-};
 
 export default {
   getUserById,
   updateUserById,
   queryUsers,
   deleteUserById,
-  blockUserById,
-  liquidateUserById
+  blockUserById
 };

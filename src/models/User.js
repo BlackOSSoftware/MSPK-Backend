@@ -60,7 +60,7 @@ const userSchema = new mongoose.Schema(
     },
     status: {
         type: String,
-        enum: ['Active', 'Inactive', 'Suspended', 'Blocked', 'Liquidated'], // Updated to support new actions
+        enum: ['Active', 'Inactive', 'Suspended', 'Blocked'], // Updated to support new actions
         default: 'Active'
     },
     // Signal Access Overrides

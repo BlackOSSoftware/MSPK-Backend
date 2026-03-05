@@ -26,7 +26,6 @@ router
   .delete(adminController.deleteUser);
 
 router.patch('/users/:userId/block', adminController.blockUser);
-router.patch('/users/:userId/liquidate', adminController.liquidateUser);
 
 router
   .route('/system/health')

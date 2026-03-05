@@ -59,7 +59,7 @@ const updateUser = {
           'equity', 'options', 'commodity', 'forex', 'crypto'
         )
       ).optional(),
-      status: Joi.string().valid('Active', 'Inactive', 'Suspended', 'Blocked', 'Liquidated'), // Includes new statuses
+      status: Joi.string().valid('Active', 'Inactive', 'Suspended', 'Blocked'), // Includes new statuses
   }).min(1), // Require at least 1 field to update
 };
 

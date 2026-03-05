@@ -389,20 +389,6 @@ const blockUser = catchAsync(async (req, res) => {
     res.send(user);
 });
 
-const liquidateUser = catchAsync(async (req, res) => {
-    const user = await User.findById(req.params.userId);
-    if (!user) {
-        throw new ApiError(httpStatus.NOT_FOUND, 'User not found');
-    }
-    // Logic: Reset trading stats and mark liquidated
-    user.status = 'Liquidated';
-    user.equity = 0;
-    user.marginUsed = 0;
-    user.pnl = 0;
-    await user.save();
-    
-    res.send(user);
-});
 
 const updateUser = catchAsync(async (req, res) => {
     const { userId } = req.params;
@@ -493,7 +479,6 @@ export default {
   updateUserRole,
   deleteUser,
   blockUser, 
-  liquidateUser,
   updateSignalAccess,
   getSystemHealth,
   broadcastMessage
