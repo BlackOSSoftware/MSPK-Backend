@@ -33,7 +33,7 @@ const mapSubscriptionToPreferred = (segments) => {
 
 const createUser = catchAsync(async (req, res) => {
     console.log("Create User Payload:", JSON.stringify(req.body, null, 2)); // DEBUG LOG
-    const { email, password, name, phone, role, clientId, equity, walletBalance, subBrokerId, planId, status, segments } = req.body;
+    const { email, password, name, phone, tradingViewId, role, clientId, equity, walletBalance, subBrokerId, planId, status, segments } = req.body;
 
     if (await User.findOne({ email })) {
         throw new ApiError(httpStatus.BAD_REQUEST, 'Email already taken');
@@ -47,6 +47,7 @@ const createUser = catchAsync(async (req, res) => {
         email,
         password,
         phone,
+        tradingViewId,
         role,
         clientId,
         equity,
@@ -139,6 +140,7 @@ const getUsers = catchAsync(async (req, res) => {
           name: u.name,
           email: u.email,
           phone: u.phone || '',
+          tradingViewId: u.tradingViewId || '',
           role: u.role,
           ip: u.lastLoginIp,
           
@@ -200,6 +202,7 @@ const getUser = catchAsync(async (req, res) => {
       name: user.name,
       email: user.email,
       phone: user.phone || '',
+      tradingViewId: user.tradingViewId || '',
       role: user.role,
       
       // Subscription / Plan Data

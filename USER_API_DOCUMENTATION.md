@@ -397,6 +397,41 @@ Body:
 }
 ```
 
+### 8.5 Watchlist Flow (User Side - How it works)
+
+**Step 1: Login**  
+User ko login karna hoga aur `Authorization: Bearer <token>` header lagana hoga.
+
+**Step 2: Get watchlists**  
+`GET /v1/watchlist`  
+Response me watchlist IDs milenge.  
+Example:
+```json
+[
+  { "_id": "64fd...", "name": "My Watchlist", "signals": ["65aa..."] }
+]
+```
+
+**Step 3: Add / Remove signal**  
+`PATCH /v1/watchlist/:id/toggle`  
+Body:
+```json
+{ "signalId": "<signal_object_id>" }
+```
+Behavior:
+- Agar signal watchlist me **nahi** hai → add ho jayega
+- Agar signal **already** watchlist me hai → remove ho jayega
+
+**Step 4: (Optional) Create new watchlist**  
+`POST /v1/watchlist`  
+Body:
+```json
+{ "name": "My Watchlist" }
+```
+
+**Step 5: (Optional) Delete watchlist**  
+`DELETE /v1/watchlist/:id`
+
 ## 9. Notification APIs
 
 All notification APIs are private.

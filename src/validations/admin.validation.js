@@ -13,6 +13,7 @@ const createUser = {
     password: Joi.string().required().min(6),
     name: Joi.string().required(),
     phone: Joi.string().optional().allow(''),
+    tradingViewId: Joi.string().optional().allow(''),
     role: Joi.string().required().valid('user', 'admin', 'sub-broker'),
     
     // Trading / Admin Fields
@@ -45,6 +46,7 @@ const updateUser = {
       password: Joi.string().min(6), // Optional update
       name: Joi.string(),
       phone: Joi.string().allow(''),
+      tradingViewId: Joi.string().allow(''),
       role: Joi.string().valid('user', 'admin', 'sub-broker'),
       clientId: Joi.string().allow(''),
       equity: Joi.number().min(0),

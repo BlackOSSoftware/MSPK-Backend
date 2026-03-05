@@ -46,6 +46,10 @@ const userSchema = new mongoose.Schema(
         code: { type: String, unique: true, sparse: true },
         referredBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }
     },
+    tradingViewId: {
+        type: String,
+        trim: true
+    },
     subBrokerId: { 
         type: mongoose.Schema.Types.ObjectId, 
         ref: 'User' 

@@ -15,6 +15,7 @@ const register = {
     phone: Joi.string().optional(),
     referralCode: Joi.string().optional(),
     city: Joi.string().optional().allow(''),
+    tradingViewId: Joi.string().optional().allow(''),
     segments: Joi.array().items(
       Joi.string().valid(
         'nse', 'all', 'option', 'options', 'mcx', 'forex', 'crypto',
@@ -55,6 +56,7 @@ const updateProfile = {
     body: Joi.object().keys({
         name: Joi.string(),
         phone: Joi.string(),
+        tradingViewId: Joi.string().allow(''),
         profile: Joi.object().keys({
             avatar: Joi.string().uri(),
             address: Joi.string(),
