@@ -7,14 +7,40 @@ import ApiError from '../utils/ApiError.js';
 import { redisClient } from '../services/redis.service.js';
 import transactionService from '../services/transaction.service.js';
 import { subBrokerService, announcementService } from '../services/index.js';
+import subscriptionService from '../services/subscription.service.js';
+
+const normalizeSubscriptionSegments = (segments) => {
+    if (!Array.isArray(segments)) return [];
+    const normalized = segments
+        .map((segment) => String(segment || '').trim().toUpperCase())
+        .filter(Boolean);
+    return Array.from(new Set(normalized));
+};
+
+const mapSubscriptionToPreferred = (segments) => {
+    const map = {
+        EQUITY: 'NSE',
+        OPTIONS: 'OPTIONS',
+        COMMODITY: 'MCX',
+        FOREX: 'FOREX',
+        CRYPTO: 'CRYPTO'
+    };
+    const preferred = segments
+        .map((segment) => map[segment])
+        .filter(Boolean);
+    return Array.from(new Set(preferred));
+};
 
 const createUser = catchAsync(async (req, res) => {
     console.log("Create User Payload:", JSON.stringify(req.body, null, 2)); // DEBUG LOG
-    const { email, password, name, phone, role, clientId, equity, walletBalance, subBrokerId, planId, status } = req.body;
+    const { email, password, name, phone, role, clientId, equity, walletBalance, subBrokerId, planId, status, segments } = req.body;
 
     if (await User.findOne({ email })) {
         throw new ApiError(httpStatus.BAD_REQUEST, 'Email already taken');
     }
+
+    const normalizedSegments = normalizeSubscriptionSegments(segments);
+    const preferredSegments = mapSubscriptionToPreferred(normalizedSegments);
 
     const user = await User.create({
         name,
@@ -27,8 +53,13 @@ const createUser = catchAsync(async (req, res) => {
         walletBalance,
         subBrokerId,
         status,
+        ...(preferredSegments.length > 0 ? { preferredSegments } : {}),
         isEmailVerified: true // Admin created, so verify
     });
+
+    if (normalizedSegments.length > 0) {
+        await subscriptionService.purchaseSegments(user.id, normalizedSegments, 'demo');
+    }
 
     // Handle Plan Subscription
     if (planId) {

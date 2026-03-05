@@ -1,6 +1,7 @@
 import httpStatus from 'http-status';
 import User from '../models/User.js';
 import ApiError from '../utils/ApiError.js';
+import subscriptionService from './subscription.service.js';
 
 const createUser = async (userBody) => {
   if (await User.findOne({ email: userBody.email })) {
@@ -18,15 +19,82 @@ const createUser = async (userBody) => {
       }
   }
 
-  const user = await User.create({
-      ...userBody,
-      referral: {
-          code: referralCode,
-          referredBy: referredBy
-      },
-      status: 'Active'
-  });
-  return user;
+  const preferredSegmentMap = {
+      NSE: 'NSE',
+      ALL: 'ALL',
+      OPTION: 'OPTIONS',
+      OPTIONS: 'OPTIONS',
+      MCX: 'MCX',
+      FOREX: 'FOREX',
+      CRYPTO: 'CRYPTO',
+      EQUITY: 'NSE',
+      COMMODITY: 'MCX'
+  };
+
+  const subscriptionSegmentMap = {
+      NSE: ['EQUITY'],
+      ALL: ['EQUITY', 'OPTIONS', 'COMMODITY', 'FOREX', 'CRYPTO'],
+      OPTION: ['OPTIONS'],
+      OPTIONS: ['OPTIONS'],
+      MCX: ['COMMODITY'],
+      FOREX: ['FOREX'],
+      CRYPTO: ['CRYPTO'],
+      EQUITY: ['EQUITY'],
+      COMMODITY: ['COMMODITY']
+  };
+
+  const normalizePreferredSegments = (segments) => {
+      if (!Array.isArray(segments)) return [];
+      const normalized = segments
+          .map(s => preferredSegmentMap[String(s || '').trim().toUpperCase()])
+          .filter(Boolean);
+      return Array.from(new Set(normalized));
+  };
+
+  const normalizeSubscriptionSegments = (segments) => {
+      if (!Array.isArray(segments)) return [];
+      const normalized = segments.flatMap((segment) => {
+          const key = String(segment || '').trim().toUpperCase();
+          return subscriptionSegmentMap[key] || [];
+      });
+      return Array.from(new Set(normalized));
+  };
+
+  const { city, segments, preferredSegments, ...restBody } = userBody;
+  const rawSegments = [
+      ...(Array.isArray(segments) ? segments : []),
+      ...(Array.isArray(preferredSegments) ? preferredSegments : [])
+  ];
+
+  const profile = { ...(restBody.profile || {}) };
+  if (city && !profile.city) {
+      profile.city = city;
+  }
+
+  let user;
+  try {
+      user = await User.create({
+          ...restBody,
+          profile,
+          preferredSegments: normalizePreferredSegments(rawSegments),
+          referral: {
+              code: referralCode,
+              referredBy: referredBy
+          },
+          status: 'Active'
+      });
+
+      const demoSegments = normalizeSubscriptionSegments(rawSegments);
+      if (demoSegments.length > 0) {
+          await subscriptionService.purchaseSegments(user.id, demoSegments, 'demo');
+      }
+      return user;
+  } catch (error) {
+      if (user?._id) {
+          await User.deleteOne({ _id: user._id });
+      }
+      throw error;
+  }
 };
 
 const loginUserWithEmailAndPassword = async (email, password) => {

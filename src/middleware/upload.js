@@ -1,16 +1,16 @@
 import multer from 'multer';
 import path from 'path';
-import httpStatus from 'http-status';
+import fs from 'fs';
 
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {
     let folder = 'uploads/avatars';
     if (file.fieldname === 'screenshot') folder = 'uploads/payments';
     if (file.fieldname === 'qrCode') folder = 'uploads/payments';
-    // Ensure folder exists (fs.mkdirSync logic or assume pre-created)
-    // For now assuming folder structure or letting multer handles relative. 
-    // Ideally we should use fs to mkdir, but let's stick to simple relative path 
-    // and rely on manual creation or app.js static serve.
+    if (file.fieldname === 'heroImage' || file.fieldname === 'metaImage') folder = 'uploads/blogs';
+    if (!fs.existsSync(folder)) {
+      fs.mkdirSync(folder, { recursive: true });
+    }
     cb(null, folder);
   },
   filename: function (req, file, cb) {

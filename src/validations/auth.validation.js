@@ -1,5 +1,12 @@
 import Joi from 'joi';
 
+const objectId = (value, helpers) => {
+  if (!value.match(/^[0-9a-fA-F]{24}$/)) {
+    return helpers.message('"{{#label}}" must be a valid mongo id');
+  }
+  return value;
+};
+
 const register = {
   body: Joi.object().keys({
     email: Joi.string().required().email(),
@@ -7,6 +14,22 @@ const register = {
     name: Joi.string().required(),
     phone: Joi.string().optional(),
     referralCode: Joi.string().optional(),
+    city: Joi.string().optional().allow(''),
+    segments: Joi.array().items(
+      Joi.string().valid(
+        'nse', 'all', 'option', 'options', 'mcx', 'forex', 'crypto',
+        'NSE', 'ALL', 'OPTION', 'OPTIONS', 'MCX', 'FOREX', 'CRYPTO',
+        'equity', 'commodity', 'EQUITY', 'COMMODITY'
+      )
+    ).optional(),
+    preferredSegments: Joi.array().items(
+      Joi.string().valid(
+        'nse', 'all', 'option', 'options', 'mcx', 'forex', 'crypto',
+        'NSE', 'ALL', 'OPTION', 'OPTIONS', 'MCX', 'FOREX', 'CRYPTO',
+        'equity', 'commodity', 'EQUITY', 'COMMODITY'
+      )
+    ).optional(),
+    selectedPlanId: Joi.string().optional().allow(''),
   }),
 };
 

@@ -23,6 +23,14 @@ const createUser = {
     
     // Subscription
     planId: Joi.string().custom(objectId).optional().allow(null, ''),
+
+    // Demo segments
+    segments: Joi.array().items(
+      Joi.string().valid(
+        'EQUITY', 'OPTIONS', 'COMMODITY', 'FOREX', 'CRYPTO',
+        'equity', 'options', 'commodity', 'forex', 'crypto'
+      )
+    ).optional(),
     
     status: Joi.string().valid('Active', 'Inactive', 'Suspended').default('Active'),
   }),
@@ -43,6 +51,12 @@ const updateUser = {
       walletBalance: Joi.number().min(0),
       subBrokerId: Joi.string().custom(objectId).allow(null, ''),
       planId: Joi.string().custom(objectId).allow(null, ''), // Allow switching plan
+      segments: Joi.array().items(
+        Joi.string().valid(
+          'EQUITY', 'OPTIONS', 'COMMODITY', 'FOREX', 'CRYPTO',
+          'equity', 'options', 'commodity', 'forex', 'crypto'
+        )
+      ).optional(),
       status: Joi.string().valid('Active', 'Inactive', 'Suspended', 'Blocked', 'Liquidated'), // Includes new statuses
   }).min(1), // Require at least 1 field to update
 };

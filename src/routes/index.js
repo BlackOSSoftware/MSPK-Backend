@@ -15,6 +15,7 @@ import analyticsRoute from './analytics.route.js';
 import announcementRoute from './announcement.route.js';
 import economicRoute from './economic.route.js';
 import cmsRoute from './cms.route.js';
+import blogRoute from './blog.route.js';
 
 import healthRoute from './health.route.js';
 import notificationRoute from './notification.route.js';
@@ -112,6 +113,10 @@ const defaultRoutes = [
   {
     path: '/cms',
     route: cmsRoute,
+  },
+  {
+    path: '/blogs',
+    route: blogRoute,
   },
   {
     path: '/notifications',

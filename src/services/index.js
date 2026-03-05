@@ -14,6 +14,7 @@ import announcementService from './announcement.service.js';
 import { economicService } from './economic.service.js';
 import * as emailService from './email.service.js';
 import technicalAnalysisService from './technicalAnalysis.service.js';
+import blogService from './blog.service.js';
 
 
 export { 
@@ -32,5 +33,6 @@ export {
     economicService,
     msg91Service,
     emailService,
-    technicalAnalysisService
+    technicalAnalysisService,
+    blogService
 };

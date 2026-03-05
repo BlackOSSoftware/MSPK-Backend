@@ -38,6 +38,10 @@ const userSchema = new mongoose.Schema(
         city: { type: String },
         state: { type: String }
     },
+    preferredSegments: [{
+        type: String,
+        enum: ['NSE', 'ALL', 'OPTIONS', 'MCX', 'FOREX', 'CRYPTO']
+    }],
     referral: {
         code: { type: String, unique: true, sparse: true },
         referredBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }

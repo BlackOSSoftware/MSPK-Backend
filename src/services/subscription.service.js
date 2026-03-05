@@ -32,9 +32,9 @@ const getAllSubscriptions = async () => {
  * @returns {Promise<Object>} - Subscription details
  */
 const purchaseSegments = async (userId, segmentCodes, planType = 'premium') => {
-  // 1. Validation: Maximum 1 segment for Demo
-  if (planType === 'demo' && segmentCodes.length > 1) {
-    throw new ApiError(httpStatus.BAD_REQUEST, 'Demo plan allows maximum 1 segment.');
+  // 1. Validation: segments required
+  if (!Array.isArray(segmentCodes) || segmentCodes.length === 0) {
+    throw new ApiError(httpStatus.BAD_REQUEST, 'At least one segment is required.');
   }
 
   // 2. Validate Segments & Calculate Price

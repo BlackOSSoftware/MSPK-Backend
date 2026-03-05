@@ -49,9 +49,15 @@ Body:
   "password": "secret123",
   "name": "Student",
   "phone": "9876543210",
-  "referralCode": "ABC123"
+  "referralCode": "ABC123",
+  "city": "Mumbai",
+  "segments": ["nse", "options"]
 }
 ```
+
+Notes:
+- `city` is saved as `profile.city`.
+- `segments` allowed: `nse`, `all`, `option/options`, `mcx`, `forex`, `crypto` (case-insensitive).
 
 Success (201):
 ```json
