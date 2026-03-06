@@ -18,7 +18,18 @@ const notificationSchema = mongoose.Schema(
     },
     type: {
       type: String,
-      enum: ['SYSTEM', 'SIGNAL', 'PAYMENT', 'TICKET', 'ANNOUNCEMENT'],
+      enum: [
+        'SYSTEM',
+        'SIGNAL',
+        'PAYMENT',
+        'TICKET',
+        'ANNOUNCEMENT',
+        'SUBSCRIPTION_REMINDER',
+        'SUBSCRIPTION_EXPIRY_REMINDER',
+        'SUBSCRIPTION_EXPIRED',
+        'ECONOMIC_ALERT',
+        'REMINDER'
+      ],
       default: 'SYSTEM',
     },
     isRead: {

@@ -5,6 +5,10 @@ import path from 'path';
 
 const initializeFirebase = () => {
   try {
+    if (admin.apps && admin.apps.length > 0) {
+      return;
+    }
+
     const serviceAccountPath = path.resolve(process.cwd(), 'firebase-service-account.json');
     
     if (fs.existsSync(serviceAccountPath)) {
@@ -14,17 +18,22 @@ const initializeFirebase = () => {
       });
       logger.info('Firebase Admin initialized via service account file');
     } else {
-      logger.warn('Firebase service account file not found. Push notifications will be disabled or limited.');
-      // You can also initialize with env variables if preferred:
-      /*
-      admin.initializeApp({
-        credential: admin.credential.cert({
-          projectId: process.env.FIREBASE_PROJECT_ID,
-          clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-          privateKey: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
-        })
-      });
-      */
+      const projectId = process.env.FIREBASE_PROJECT_ID;
+      const clientEmail = process.env.FIREBASE_CLIENT_EMAIL;
+      const privateKey = process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n');
+
+      if (projectId && clientEmail && privateKey) {
+        admin.initializeApp({
+          credential: admin.credential.cert({
+            projectId,
+            clientEmail,
+            privateKey,
+          })
+        });
+        logger.info('Firebase Admin initialized via environment variables');
+      } else {
+        logger.warn('Firebase service account file not found and FIREBASE_* env vars missing. Push notifications will be disabled.');
+      }
     }
   } catch (error) {
     logger.error('Firebase initialization error:', error);

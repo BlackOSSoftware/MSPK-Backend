@@ -9,6 +9,7 @@ router.use(auth());
 
 router.get('/', notificationController.getMyNotifications);
 router.post('/fcm-token', notificationController.registerFCMToken);
+router.delete('/fcm-token', notificationController.unregisterFCMToken);
 router.patch('/read-all', notificationController.markAllAsRead);
 
 router.route('/:notificationId')

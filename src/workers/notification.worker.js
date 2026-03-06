@@ -4,10 +4,14 @@ import logger from '../config/log.js';
 import User from '../models/User.js';
 import Setting from '../models/Setting.js';
 import FCMToken from '../models/FCMToken.js';
+import { initializeFirebase } from '../config/firebase.js';
 import telegramService from '../services/channels/telegram.service.js';
 import { msg91Service } from '../services/index.js'; // Use Central MSG91 Service
 import pushService from '../services/channels/push.service.js';
 import templates from '../config/notificationTemplates.js';
+
+// Ensure Firebase is initialized in worker context
+initializeFirebase();
 
 const connection = {
   host: config.redis.host,
@@ -15,7 +19,7 @@ const connection = {
 };
 
 const notificationWorker = new Worker('notifications', async (job) => {
-  const { type, signal, announcement, userId } = job.data;
+  const { type, signal, announcement, userId, notification } = job.data;
   
   try {
       // Fetch System Settings
@@ -98,6 +102,13 @@ const notificationWorker = new Worker('notifications', async (job) => {
           const rendered = renderTemplate(templateKey, announcement);
           title = rendered.title;
           message = rendered.body;
+      } else if (notification) {
+          title = notification.title || notification?.notification?.title || 'Notification';
+          message =
+            notification.message ||
+            notification.body ||
+            notification?.notification?.body ||
+            '';
       } else {
           logger.warn('Unknown notification payload');
           return;
@@ -143,16 +154,27 @@ const notificationWorker = new Worker('notifications', async (job) => {
       }
       else if (type === 'push') {
           const pushConfig = getSetting('push_config');
-          // If pushConfig exists and is enabled, we send. 
-          if (pushConfig && pushConfig.enabled) {
+          // Always allow push notifications (ignore disabled settings as requested).
+          if (true) {
               const tokenDocs = await FCMToken.find({ user: userId }).select('token platform');
               const androidTokens = tokenDocs.filter(t => t.platform === 'android').map(t => t.token);
               const webTokens = tokenDocs.filter(t => t.platform === 'web').map(t => t.token);
+
+              if (androidTokens.length === 0 && webTokens.length === 0) {
+                  logger.warn(`[PushWorker] No FCM tokens for User ${userId}. Skipping push.`);
+              }
 
               // Prepare data payload for deep-linking
               const pushData = { screen: "NOTIFICATIONS" };
               if (signal) pushData.signalId = signal._id;
               if (announcement) pushData.announcementId = announcement._id;
+              if (notification && notification.data && typeof notification.data === 'object') {
+                  Object.assign(pushData, notification.data);
+              }
+              if (notification?.link && !pushData.url) pushData.url = notification.link;
+              if (!pushData.url) pushData.url = "/dashboard/notifications";
+              if (!pushData.title) pushData.title = title;
+              if (!pushData.body) pushData.body = message;
 
               if (androidTokens.length > 0) {
                   logger.info(`[PushWorker] Sending ANDROID to User ${userId}. Tokens: ${androidTokens.length}. Title: ${title}`);
@@ -177,6 +199,8 @@ const notificationWorker = new Worker('notifications', async (job) => {
                   );
                   logger.info(`[PushWorker] WEB Result for User ${userId}: Success=${result.successCount}, Failure=${result.failureCount}`);
               }
+          } else {
+              logger.warn('[PushWorker] push_config is disabled. Skipping push send.');
           }
       }
       

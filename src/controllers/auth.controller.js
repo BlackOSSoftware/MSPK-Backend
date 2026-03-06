@@ -191,6 +191,9 @@ const logout = catchAsync(async (req, res) => {
 
     if (req.body && req.body.fcmToken) {
         await FCMToken.deleteOne({ token: req.body.fcmToken });
+    } else if (req.body && req.body.platform) {
+        const normalizedPlatform = String(req.body.platform).toLowerCase().trim();
+        await FCMToken.deleteMany({ user: req.user._id, platform: normalizedPlatform });
     }
 
     res.status(httpStatus.OK).send({ message: 'Logged out successfully.' });
