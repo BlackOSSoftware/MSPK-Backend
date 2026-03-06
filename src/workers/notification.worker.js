@@ -3,6 +3,7 @@ import config from '../config/config.js';
 import logger from '../config/log.js';
 import User from '../models/User.js';
 import Setting from '../models/Setting.js';
+import FCMToken from '../models/FCMToken.js';
 import telegramService from '../services/channels/telegram.service.js';
 import { msg91Service } from '../services/index.js'; // Use Central MSG91 Service
 import pushService from '../services/channels/push.service.js';
@@ -144,29 +145,37 @@ const notificationWorker = new Worker('notifications', async (job) => {
           const pushConfig = getSetting('push_config');
           // If pushConfig exists and is enabled, we send. 
           if (pushConfig && pushConfig.enabled) {
-              if (user.fcmTokens && user.fcmTokens.length > 0) {
-                  // Prepare data payload for deep-linking
-                  const pushData = { screen: "NOTIFICATIONS" };
-                  if (signal) pushData.signalId = signal._id;
-                  if (announcement) pushData.announcementId = announcement._id;
+              const tokenDocs = await FCMToken.find({ user: userId }).select('token platform');
+              const androidTokens = tokenDocs.filter(t => t.platform === 'android').map(t => t.token);
+              const webTokens = tokenDocs.filter(t => t.platform === 'web').map(t => t.token);
 
-                  logger.info(`[PushWorker] Sending to User ${userId}. Tokens: ${user.fcmTokens.length}. Title: ${title}`);
-                  
+              // Prepare data payload for deep-linking
+              const pushData = { screen: "NOTIFICATIONS" };
+              if (signal) pushData.signalId = signal._id;
+              if (announcement) pushData.announcementId = announcement._id;
+
+              if (androidTokens.length > 0) {
+                  logger.info(`[PushWorker] Sending ANDROID to User ${userId}. Tokens: ${androidTokens.length}. Title: ${title}`);
                   const result = await pushService.sendPushNotification(
-                      user.fcmTokens, 
+                      androidTokens, 
                       title, 
                       message,
-                      pushData
+                      pushData,
+                      'android'
                   );
-                  logger.info(`[PushWorker] Send Result for User ${userId}: Success=${result.successCount}, Failure=${result.failureCount}`);
-                  
-                  if (result.failureCount > 0 && result.results) {
-                       // Log specific error codes
-                       const errors = result.results.filter(r => r.error).map(r => r.error);
-                       if (errors.length > 0) {
-                           logger.error(`[FCM_FAIL_DETAILS] User ${userId} Errors: ${JSON.stringify(errors.map(e => ({ code: e.code, message: e.message })))}`);
-                       }
-                  }
+                  logger.info(`[PushWorker] ANDROID Result for User ${userId}: Success=${result.successCount}, Failure=${result.failureCount}`);
+              }
+
+              if (webTokens.length > 0) {
+                  logger.info(`[PushWorker] Sending WEB to User ${userId}. Tokens: ${webTokens.length}. Title: ${title}`);
+                  const result = await pushService.sendPushNotification(
+                      webTokens, 
+                      title, 
+                      message,
+                      pushData,
+                      'web'
+                  );
+                  logger.info(`[PushWorker] WEB Result for User ${userId}: Success=${result.successCount}, Failure=${result.failureCount}`);
               }
           }
       }

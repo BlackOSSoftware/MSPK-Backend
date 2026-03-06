@@ -229,7 +229,7 @@ class NotificationService {
           console.log('[DEBUG-LIVE] Target Audience:', JSON.stringify(targetAudience));
           console.log('[DEBUG-LIVE] Generated Query:', JSON.stringify(query));
 
-          const users = await User.find(query).select('_id name fcmTokens phone phoneNumber');
+          const users = await User.find(query).select('_id name phone phoneNumber');
           
           console.log(`[DEBUG-LIVE] Users Found: ${users.length}`);
 
@@ -252,13 +252,11 @@ class NotificationService {
               const jobs = [];
               
               // 1. Push Job
-              if (user.fcmTokens && user.fcmTokens.length > 0) {
-                  jobs.push(notificationQueue.add('send-push-announcement', {
-                      type: 'push',
-                      userId: user._id,
-                      announcement: announcement.toObject ? announcement.toObject() : announcement // Ensure plain object
-                  }, { removeOnComplete: true }));
-              }
+              jobs.push(notificationQueue.add('send-push-announcement', {
+                  type: 'push',
+                  userId: user._id,
+                  announcement: announcement.toObject ? announcement.toObject() : announcement // Ensure plain object
+              }, { removeOnComplete: true }));
 
               // 2. WhatsApp Job
               // Only if user has phone. In production, check consent/settings too.
@@ -307,7 +305,6 @@ class NotificationService {
           const expiryDate = new Date(subscription.endDate).toLocaleDateString('en-IN');
           
           // 1. Send Push Notification
-          if (user.fcmTokens && user.fcmTokens.length > 0) {
               await notificationQueue.add('send-push-reminder', {
                   type: 'push',
                   userId: user._id,
@@ -323,7 +320,6 @@ class NotificationService {
                       }
                   }
               }, { removeOnComplete: true });
-          }
 
           // 2. Send Email Notification
           await notificationQueue.add('send-email', {
@@ -368,7 +364,6 @@ class NotificationService {
           const planName = subscription.plan?.name || 'Subscription';
           
           // 1. Send Push Notification
-          if (user.fcmTokens && user.fcmTokens.length > 0) {
               await notificationQueue.add('send-push-reminder', {
                   type: 'push',
                   userId: user._id,
@@ -382,7 +377,6 @@ class NotificationService {
                       }
                   }
               }, { removeOnComplete: true });
-          }
 
           // 2. Send Email Notification
           await notificationQueue.add('send-email', {
@@ -443,7 +437,7 @@ class NotificationService {
           const activeUsers = await User.find({
               _id: { $in: userIds },
               status: 'Active' // Double check user is valid
-          }).select('_id name email fcmTokens');
+          }).select('_id name email');
 
           // Format event time
           const eventDate = new Date(economicEvent.date);

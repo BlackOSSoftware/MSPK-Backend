@@ -24,7 +24,7 @@ export default {
   },
   jwt: {
     secret: process.env.JWT_SECRET,
-    expiresIn: process.env.JWT_EXPIRES_IN || '1d',
+    expiresIn: process.env.JWT_EXPIRES_IN || '10d',
   },
   fmpApiKey: process.env.FMP_API_KEY,
   useMockBroker: process.env.USE_MOCK_BROKER === 'true', 

@@ -3,6 +3,7 @@ import httpStatus from 'http-status';
 import catchAsync from '../utils/catchAsync.js';
 import ApiError from '../utils/ApiError.js';
 import Notification from '../models/Notification.js';
+import FCMToken from '../models/FCMToken.js';
 
 const getMyNotifications = catchAsync(async (req, res) => {
   const notifications = await Notification.find({ user: req.user.id })
@@ -35,16 +36,29 @@ const markAllAsRead = catchAsync(async (req, res) => {
 });
 
 const registerFCMToken = catchAsync(async (req, res) => {
-  const { token } = req.body;
-  console.log('NotifController: Registering FCM Token:', token, 'for User:', req.user._id);
-  if (!token) {
-    return res.status(httpStatus.BAD_REQUEST).send({ message: 'Token is required' });
+  const { token, platform } = req.body;
+  console.log('NotifController: Registering FCM Token:', token, 'platform:', platform, 'for User:', req.user._id);
+  if (!token || !platform) {
+    return res.status(httpStatus.BAD_REQUEST).send({ message: 'Token and platform are required' });
   }
 
-  // Update user with unique token (avoid duplicates)
-  await req.user.updateOne({
-    $addToSet: { fcmTokens: token }
-  });
+  const normalizedPlatform = String(platform).toLowerCase().trim();
+  if (!['android', 'web', 'ios'].includes(normalizedPlatform)) {
+    return res.status(httpStatus.BAD_REQUEST).send({ message: 'Invalid platform. Use android, web, or ios' });
+  }
+
+  await FCMToken.findOneAndUpdate(
+    { token },
+    {
+      $set: {
+        user: req.user._id,
+        platform: normalizedPlatform,
+        updatedAt: new Date(),
+      },
+      $setOnInsert: { createdAt: new Date() },
+    },
+    { upsert: true, new: true, setDefaultsOnInsert: true }
+  );
 
   res.status(httpStatus.OK).send({ message: 'Token registered successfully' });
 });

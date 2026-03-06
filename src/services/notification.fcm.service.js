@@ -1,6 +1,6 @@
 import { admin } from '../config/firebase.js';
-import User from '../models/User.js';
 import logger from '../config/log.js';
+import FCMToken from '../models/FCMToken.js';
 
 /**
  * Send push notification to specific users
@@ -9,8 +9,8 @@ import logger from '../config/log.js';
  */
 const sendToUsers = async (userIds, payload) => {
   try {
-    const users = await User.find({ _id: { $in: userIds } }).select('fcmTokens');
-    const allTokens = users.flatMap(user => user.fcmTokens || []);
+    const tokens = await FCMToken.find({ user: { $in: userIds } }).select('token');
+    const allTokens = tokens.map(t => t.token);
 
     if (allTokens.length === 0) return;
 

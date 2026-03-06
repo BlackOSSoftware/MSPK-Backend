@@ -3,6 +3,7 @@ import catchAsync from '../utils/catchAsync.js';
 import { authService, tokenService, userService, msg91Service, emailService } from '../services/index.js';
 import { redisClient } from '../services/redis.service.js'; // Direct client access for Email OTP
 import User from '../models/User.js';
+import FCMToken from '../models/FCMToken.js';
 
 const register = catchAsync(async (req, res) => {
   // Check if phone/email is verified before creating account
@@ -155,7 +156,7 @@ const login = catchAsync(async (req, res) => {
       ...planDetails
   };
 
-  res.send({ user: responseUser, token: tokens.access.token });
+  res.send({ user: responseUser, token: tokens.access.token, expiresIn: 864000 });
 });
 
 const getMe = catchAsync(async (req, res) => {
@@ -187,6 +188,10 @@ const logout = catchAsync(async (req, res) => {
     req.user.tokenVersion = (req.user.tokenVersion || 0) + 1;
     req.user.currentDeviceId = null;
     await req.user.save();
+
+    if (req.body && req.body.fcmToken) {
+        await FCMToken.deleteOne({ token: req.body.fcmToken });
+    }
 
     res.status(httpStatus.OK).send({ message: 'Logged out successfully.' });
 });
