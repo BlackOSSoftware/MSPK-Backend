@@ -10,7 +10,10 @@ const ticketSchema = new mongoose.Schema(
     user: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
-      required: true,
+    },
+    contactName: {
+      type: String,
+      trim: true,
     },
     subject: {
       type: String,
@@ -39,6 +42,11 @@ const ticketSchema = new mongoose.Schema(
       type: String,
       enum: ['pending', 'resolved', 'rejected'],
       default: 'pending',
+    },
+    source: {
+      type: String,
+      enum: ['user_ticket', 'dashboard_ticket', 'web_enquiry'],
+      default: 'user_ticket',
     }
   },
   {

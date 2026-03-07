@@ -7,6 +7,7 @@ import Subscription from '../models/Subscription.js';
  * Get Admin Dashboard Stats
  */
 const getAdminStats = async () => {
+  const supportTicketFilter = { source: { $ne: 'web_enquiry' } };
   const today = new Date();
   const lastMonth = new Date(today.getFullYear(), today.getMonth() - 1, today.getDate());
 
@@ -34,10 +35,10 @@ const getAdminStats = async () => {
       { $match: { status: 'success', purpose: { $in: ['SUBSCRIPTION', 'WALLET_TOPUP'] }, createdAt: { $gte: lastMonth } } },
       { $group: { _id: null, total: { $sum: '$amount' } } },
     ]),
-    Ticket.countDocuments({ status: 'pending' }),
+    Ticket.countDocuments({ ...supportTicketFilter, status: 'pending' }),
     Transaction.find().sort({ createdAt: -1 }).limit(10).populate('user', 'name'),
     User.find({ role: 'user' }).sort({ createdAt: -1 }).limit(5),
-    Ticket.find().sort({ createdAt: -1 }).limit(5).populate('user', 'name'),
+    Ticket.find(supportTicketFilter).sort({ createdAt: -1 }).limit(5).populate('user', 'name'),
   ]);
 
   const revenueTotal = totalRevenue[0]?.total || 0;
@@ -123,12 +124,14 @@ const createTicket = async (ticketBody, user) => {
   const ticket = await Ticket.create({
     ticketId: `TK-${nextId}`,
     user: userId,
+    contactName: ticketBody.contactName || user?.name || '',
     subject: ticketBody.subject,
     ticketType: ticketBody.ticketType,
     description: ticketBody.description,
     contactEmail: ticketBody.contactEmail,
     contactNumber: ticketBody.contactNumber,
     status: 'pending',
+    source: 'dashboard_ticket',
   });
 
   return ticket;

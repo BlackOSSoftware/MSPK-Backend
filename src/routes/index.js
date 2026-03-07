@@ -11,6 +11,7 @@ import subBrokerRoute from './subBroker.route.js';
 import settingRoute from './setting.route.js';
 import marketRoute from './market.route.js';
 import ticketRoute from './ticket.route.js';
+import enquiryRoute from './enquiry.route.js';
 import analyticsRoute from './analytics.route.js';
 import announcementRoute from './announcement.route.js';
 import economicRoute from './economic.route.js';
@@ -97,6 +98,10 @@ const defaultRoutes = [
   {
     path: '/tickets',
     route: ticketRoute,
+  },
+  {
+    path: '/enquiries',
+    route: enquiryRoute,
   },
   {
     path: '/analytics',

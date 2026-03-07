@@ -2,6 +2,7 @@ import Joi from 'joi';
 
 const createTicket = {
   body: Joi.object().keys({
+    contactName: Joi.string().allow('', null),
     subject: Joi.string().required(),
     ticketType: Joi.string().required(),
     description: Joi.string().required(),
