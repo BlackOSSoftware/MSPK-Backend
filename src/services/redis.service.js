@@ -50,15 +50,98 @@ const logRedisSubscriberError = createRateLimitedLogger('Redis Subscriber Error'
 redisClient.on('error', logRedisClientError);
 redisClient.on('connect', () => logger.info('Redis Client Connected'));
 redisSubscriber.on('error', logRedisSubscriberError);
+redisSubscriber.on('connect', () => logger.info('Redis Subscriber Connected'));
+
+let connectPromise = null;
+
+const waitForReady = (client, label) =>
+  new Promise((resolve, reject) => {
+    if (client.status === 'ready') {
+      resolve();
+      return;
+    }
+
+    const cleanup = () => {
+      client.off('ready', handleReady);
+      client.off('error', handleError);
+      client.off('end', handleEnd);
+      client.off('close', handleClose);
+    };
+
+    const handleReady = () => {
+      cleanup();
+      resolve();
+    };
+
+    const handleError = (error) => {
+      cleanup();
+      reject(error);
+    };
+
+    const handleEnd = () => {
+      cleanup();
+      reject(new Error(`${label} connection ended before ready`));
+    };
+
+    const handleClose = () => {
+      if (client.status === 'ready') {
+        cleanup();
+        resolve();
+      }
+    };
+
+    client.once('ready', handleReady);
+    client.once('error', handleError);
+    client.once('end', handleEnd);
+    client.once('close', handleClose);
+
+    if (client.status === 'ready') {
+      handleReady();
+    }
+  });
+
+const ensureRedisConnection = async (client, label) => {
+  if (client.status === 'ready') {
+    return;
+  }
+
+  if (client.status === 'wait') {
+    await client.connect();
+    return;
+  }
+
+  if (['connecting', 'connect', 'reconnecting'].includes(client.status)) {
+    await waitForReady(client, label);
+    return;
+  }
+
+  if (['close', 'end'].includes(client.status)) {
+    await client.connect();
+    return;
+  }
+};
 
 const connectRedis = async () => {
-  try {
-    await Promise.all([redisClient.connect(), redisSubscriber.connect()]);
-    return true;
-  } catch (err) {
-    logger.error('Redis Initial Connection Error', err);
-    return false;
+  if (connectPromise) {
+    return connectPromise;
   }
+
+  connectPromise = (async () => {
+    try {
+      await Promise.all([
+        ensureRedisConnection(redisClient, 'Redis Client'),
+        ensureRedisConnection(redisSubscriber, 'Redis Subscriber'),
+      ]);
+      return true;
+    } catch (err) {
+      logger.error('Redis Initial Connection Error', err);
+      return false;
+    } finally {
+      connectPromise = null;
+    }
+  })();
+
+  return connectPromise;
 };
 
 export {
