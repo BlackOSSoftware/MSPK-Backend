@@ -7,8 +7,12 @@ const entrySignalSchema = Joi.object()
     uniqueId: Joi.string().trim().min(1),
     uniqe_id: Joi.string().trim().min(1),
     uniq_id: Joi.string().trim().min(1),
-    symbol: Joi.string().trim().min(1).required(),
-    segment: Joi.string().trim().min(1).required(),
+    symbol: Joi.string().trim().min(1),
+    symbolId: Joi.string().trim().min(1),
+    symbol_id: Joi.string().trim().min(1),
+    masterSymbolId: Joi.string().trim().min(1),
+    master_symbol_id: Joi.string().trim().min(1),
+    segment: Joi.string().trim().min(1),
     trade_type: Joi.string().valid('BUY', 'SELL').required(),
     timeframe: Joi.string().trim().min(1).required(),
     entry_price: Joi.number().required(),
@@ -22,6 +26,7 @@ const entrySignalSchema = Joi.object()
     stop_loss: Joi.number().required(),
     signal_time: Joi.date().iso().required(),
   })
+  .or('symbol', 'symbolId', 'symbol_id', 'masterSymbolId', 'master_symbol_id')
   .xor('unique_id', 'uniqueId', 'uniqe_id', 'uniq_id')
   .unknown(true);
 
@@ -32,13 +37,18 @@ const exitSignalSchema = Joi.object()
     uniqueId: Joi.string().trim().min(1),
     uniqe_id: Joi.string().trim().min(1),
     uniq_id: Joi.string().trim().min(1),
-    symbol: Joi.string().trim().min(1).required(),
-    segment: Joi.string().trim().min(1).required(),
+    symbol: Joi.string().trim().min(1),
+    symbolId: Joi.string().trim().min(1),
+    symbol_id: Joi.string().trim().min(1),
+    masterSymbolId: Joi.string().trim().min(1),
+    master_symbol_id: Joi.string().trim().min(1),
+    segment: Joi.string().trim().min(1),
     exit_price: Joi.number().required(),
     total_points: Joi.number().required(),
     exit_reason: Joi.string().trim().min(1).required(),
     exit_time: Joi.date().iso().required(),
   })
+  .or('symbol', 'symbolId', 'symbol_id', 'masterSymbolId', 'master_symbol_id')
   .xor('unique_id', 'uniqueId', 'uniqe_id', 'uniq_id')
   .unknown(true);
 

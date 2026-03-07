@@ -114,8 +114,7 @@ Use this token in all admin APIs:
       "amount": "INR 1999",
       "status": "active"
     }
-  ],
-  "signals": []
+  ]
 }
 ```
 
@@ -151,35 +150,7 @@ Use this token in all admin APIs:
 - Request Body: `No body`
 - Response: `204 No Content`
 
-### 1.6 Update user signal access
-- Method: `PATCH`
-- URL: `http://localhost:4000/v1/admin/users/:userId/signals`
-- Auth: Admin required
-- Request Body (JSON):
-```json
-{
-  "category": "NIFTY_OPT",
-  "access": true,
-  "expiry": "2026-12-31T23:59:59.000Z"
-}
-```
-- Response (200 example):
-```json
-{
-  "message": "Signal access updated",
-  "signals": [
-    {
-      "category": "Nifty 50 Options",
-      "key": "NIFTY_OPT",
-      "access": true,
-      "expiry": "2026-12-31T23:59:59.000Z",
-      "source": "override"
-    }
-  ]
-}
-```
-
-### 1.7 Block or Unblock user
+### 1.6 Block or Unblock user
 - Method: `PATCH`
 - URL: `http://localhost:4000/v1/admin/users/:userId/block`
 - Auth: Admin required
@@ -192,7 +163,7 @@ Use this token in all admin APIs:
 }
 ```
 
-### 1.8 Liquidate user
+### 1.7 Liquidate user
 - Method: `PATCH`
 - URL: `http://localhost:4000/v1/admin/users/:userId/liquidate`
 - Auth: Admin required
@@ -208,7 +179,7 @@ Use this token in all admin APIs:
 }
 ```
 
-### 1.9 Admin system health
+### 1.8 Admin system health
 - Method: `GET`
 - URL: `http://localhost:4000/v1/admin/system/health`
 - Auth: Admin required
@@ -228,7 +199,7 @@ Use this token in all admin APIs:
 }
 ```
 
-### 1.10 Broadcast announcement
+### 1.9 Broadcast announcement
 - Method: `POST`
 - URL: `http://localhost:4000/v1/admin/broadcast`
 - Auth: Admin required

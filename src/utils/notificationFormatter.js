@@ -1,0 +1,124 @@
+const numberFormatter = new Intl.NumberFormat('en-IN', {
+  maximumFractionDigits: 2,
+});
+
+export const toFiniteNumber = (value) => {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string') {
+    const normalized = value.replace(/,/g, '').trim();
+    if (!normalized) return undefined;
+    const parsed = Number(normalized);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return undefined;
+};
+
+export const formatNotificationNumber = (value) => {
+  const parsed = toFiniteNumber(value);
+  if (typeof parsed !== 'number') return '-';
+  return numberFormatter.format(parsed);
+};
+
+export const formatPointsLabel = (value) => {
+  const parsed = toFiniteNumber(value);
+  if (typeof parsed !== 'number') return '-';
+  if (parsed === 0) return '0';
+  const absolute = numberFormatter.format(Math.abs(parsed));
+  return parsed > 0 ? `+${absolute}` : `-${absolute}`;
+};
+
+export const getSignalTemplateKey = (signal) => signal?.subType || 'SIGNAL_NEW';
+
+export const buildSignalTemplateData = (signal = {}) => {
+  const entryPrice = toFiniteNumber(signal.entryPrice);
+  const stopLoss = toFiniteNumber(signal.stopLoss);
+  const target1 = toFiniteNumber(signal.targets?.target1);
+  const target2 = toFiniteNumber(signal.targets?.target2);
+  const target3 = toFiniteNumber(signal.targets?.target3);
+  const exitPrice = toFiniteNumber(signal.exitPrice ?? signal.currentPrice);
+  const storedPoints = toFiniteNumber(signal.totalPoints);
+  const signalType = String(signal.type || 'BUY').trim().toUpperCase();
+  const derivedPoints =
+    typeof entryPrice === 'number' && typeof exitPrice === 'number'
+      ? signalType === 'SELL'
+        ? entryPrice - exitPrice
+        : exitPrice - entryPrice
+      : undefined;
+  const totalPoints =
+    typeof storedPoints === 'number' && (Math.abs(storedPoints) > 0 || typeof derivedPoints !== 'number')
+      ? storedPoints
+      : derivedPoints;
+
+  return {
+    symbol: signal.symbol || '-',
+    type: signal.type || '-',
+    entryPrice: formatNotificationNumber(entryPrice),
+    stopLoss: formatNotificationNumber(stopLoss),
+    target1: formatNotificationNumber(target1),
+    target2: formatNotificationNumber(target2),
+    target3: formatNotificationNumber(target3),
+    notes: signal.notes || '',
+    updateMessage: signal.updateMessage || '',
+    targetLevel: signal.targetLevel || 'TP1',
+    currentPrice: formatNotificationNumber(signal.currentPrice ?? exitPrice ?? entryPrice),
+    exitPrice: formatNotificationNumber(exitPrice),
+    totalPoints: typeof totalPoints === 'number' ? String(Math.round(totalPoints * 100) / 100) : '-',
+    pointsLabel: formatPointsLabel(totalPoints),
+    outcomeLabel: signal.status || signal.exitReason || '',
+  };
+};
+
+const ensureSignalSummaryPlaceholders = (templateKey, template) => {
+  if (!template || typeof template !== 'object') {
+    return { title: '', body: '' };
+  }
+
+  const normalizedTemplate = {
+    title: template.title || '',
+    body: template.body || '',
+  };
+
+  const next = { ...normalizedTemplate };
+  const signalTemplateKeys = [
+    'SIGNAL_NEW',
+    'SIGNAL_UPDATE',
+    'SIGNAL_TARGET',
+    'SIGNAL_STOPLOSS',
+    'SIGNAL_PARTIAL_PROFIT',
+  ];
+
+  if (signalTemplateKeys.includes(templateKey) && !next.body.includes('{{symbol}}')) {
+    next.body = `Symbol: {{symbol}}${next.body ? `\n${next.body}` : ''}`;
+  }
+
+  if (!['SIGNAL_TARGET', 'SIGNAL_STOPLOSS', 'SIGNAL_PARTIAL_PROFIT'].includes(templateKey)) {
+    return next;
+  }
+
+  if (!next.body.includes('{{exitPrice}}')) {
+    next.body = `${next.body}\nExit: {{exitPrice}}`;
+  }
+  if (!next.body.includes('{{pointsLabel}}')) {
+    next.body = `${next.body}\nPoints: {{pointsLabel}}`;
+  }
+
+  return next;
+};
+
+export const renderNotificationTemplate = (templates, templateKey, data) => {
+  const fallbackTemplate = templates?.ANNOUNCEMENT || { title: '{{title}}', body: '{{message}}' };
+  const rawTemplate = templates?.[templateKey] || fallbackTemplate;
+  const template = ensureSignalSummaryPlaceholders(templateKey, rawTemplate);
+
+  let title = template.title;
+  let body = template.body;
+
+  Object.keys(data || {}).forEach((key) => {
+    const regex = new RegExp(`{{${key}}}`, 'g');
+    const value = data[key] !== undefined && data[key] !== null ? String(data[key]) : '';
+    title = title.replace(regex, value);
+    body = body.replace(regex, value);
+  });
+
+  return { title, body };
+};

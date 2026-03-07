@@ -183,6 +183,10 @@ class Msg91Service {
         
         try {
             const url = "https://control.msg91.com/api/v5/email/send";
+            const rawBody = typeof body === 'string' ? body : JSON.stringify(body);
+            const emailBody = /<\/?[a-z][\s\S]*>/i.test(rawBody)
+                ? rawBody
+                : `<pre style="font-family:Arial,sans-serif;white-space:pre-wrap;">${rawBody}</pre>`;
             const payload = {
                 to: [{ email: to }],
                 from: { 
@@ -191,14 +195,11 @@ class Msg91Service {
                 },
                 domain: process.env.MSG91_EMAIL_DOMAIN, 
                 mail_type_id: "1", 
-                // For generic email, we try to send subject/body directly. 
-                // MSG91 v5 allows generic emails associated with verified domain without mandatory template_id if configured, 
-                // OR we can use a generic template.
-                // If the user set MSG91_EMAIL_TEMPLATE_ID to an OTP template, WE MUST NOT USE IT HERE.
-                // Thus, we strip template_id from here unless strictly passed for generic use-cases.
-                // Assuming simple subject/body sending is allowed for verified domains.
                 subject: subject,
-                body: body
+                body: {
+                    type: "text/html",
+                    data: emailBody
+                }
             };
 
             const headers = {
@@ -206,7 +207,7 @@ class Msg91Service {
                 "content-type": "application/json"
             };
 
-            const response = await axios.post(url, payload, { headers });
+            const response = await axios.post(url, payload, { headers, timeout: 15000 });
             logger.info(`MSG91: Email sent to ${to}`);
             return true;
 
@@ -255,7 +256,7 @@ class Msg91Service {
                 "content-type": "application/json"
             };
 
-            const response = await axios.post(url, payload, { headers });
+            const response = await axios.post(url, payload, { headers, timeout: 15000 });
             logger.info(`MSG91: Email OTP sent to ${to}`);
             return true;
 

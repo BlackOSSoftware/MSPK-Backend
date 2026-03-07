@@ -155,7 +155,7 @@ const getSignalPerformance = async (range) => {
         { 
             $match: { 
                 createdAt: { $gte: start, $lte: end },
-                status: { $in: ['Target Hit', 'Stoploss Hit', 'Closed'] } // Only closed/finished signals
+                status: { $in: ['Target Hit', 'Partial Profit Book', 'Stoploss Hit', 'Closed'] } // Only closed/finished signals
             } 
         },
         {
@@ -164,7 +164,7 @@ const getSignalPerformance = async (range) => {
                 totalSignals: { $sum: 1 },
                 wins: { 
                     $sum: { 
-                        $cond: [{ $eq: ["$status", "Target Hit"] }, 1, 0]
+                        $cond: [{ $in: ["$status", ["Target Hit", "Partial Profit Book"]] }, 1, 0]
                     }
                 }
             }
@@ -179,7 +179,7 @@ const getSignalPerformance = async (range) => {
     // 2. Loss Streak (Mock or Simple check of last N)
     // Fetch last 10 closed signals desc
     const lastSignals = await Signal.find({ 
-        status: { $in: ['Target Hit', 'Stoploss Hit', 'Closed'] } 
+        status: { $in: ['Target Hit', 'Partial Profit Book', 'Stoploss Hit', 'Closed'] } 
     }).sort({ createdAt: -1 }).limit(10);
 
     let currentLossStreak = 0;
@@ -196,7 +196,7 @@ const getSignalPerformance = async (range) => {
         {
             $match: {
                 createdAt: { $gte: start, $lte: end },
-                status: { $in: ['Target Hit', 'Stoploss Hit', 'Closed'] }
+                status: { $in: ['Target Hit', 'Partial Profit Book', 'Stoploss Hit', 'Closed'] }
             }
         },
         {
@@ -205,7 +205,7 @@ const getSignalPerformance = async (range) => {
                 volume: { $sum: 1 },
                 wins: { 
                     $sum: { 
-                        $cond: [{ $eq: ["$status", "Target Hit"] }, 1, 0]
+                        $cond: [{ $in: ["$status", ["Target Hit", "Partial Profit Book"]] }, 1, 0]
                     }
                 }
             }

@@ -66,6 +66,7 @@ class MarketDataService extends EventEmitter {
         this.currentPrices = {};
         this.currentQuotes = {};
         this._lastPersistedAt = {};
+        this._persistBlockedUntil = 0;
 
         this.config = {};
         this.adapter = null;
@@ -793,6 +794,8 @@ class MarketDataService extends EventEmitter {
     _persistSymbolPrice(symbol) {
         try {
             const now = Date.now();
+            if (this._persistBlockedUntil && now < this._persistBlockedUntil) return;
+
             const lastAt = this._lastPersistedAt[symbol] || 0;
             if (now - lastAt < 60000) return;
 
@@ -811,6 +814,10 @@ class MarketDataService extends EventEmitter {
                 },
                 { new: false }
             ).catch((error) => {
+                if (/ECONNRESET|Mongo|buffering timed out|disconnected|topology/i.test(String(error?.message || ''))) {
+                    this._persistBlockedUntil = Date.now() + 60000;
+                    logger.warn(`MARKET_DATA: Pausing DB price persistence for 60s after ${symbol} persist failure`);
+                }
                 logger.error(`MARKET_DATA: Failed persisting ${symbol}: ${error.message}`);
             });
         } catch (error) {
@@ -952,6 +959,7 @@ class MarketDataService extends EventEmitter {
             latency: mt5Service.isConnected ? `${toNumber(this.marketDataLatency, 0)}ms` : 'Disconnected',
             tickCount: this.marketDataTickCount,
             subscribedSymbols: mt5Service.subscriptionCount || 0,
+            diagnostics: mt5Service.getDiagnostics(),
         };
 
         const stats = {
@@ -966,6 +974,7 @@ class MarketDataService extends EventEmitter {
             },
             marketData: marketDataStats,
             mt5: marketDataStats,
+            alltick: marketDataStats,
             prices: this.currentPrices || {},
         };
 

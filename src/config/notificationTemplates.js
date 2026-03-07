@@ -6,7 +6,7 @@ export default {
     // Signal Alerts
     SIGNAL_NEW: {
         title: "🚀 New Signal: {{symbol}}",
-        body: "Action: {{type}}\nEntry: {{entryPrice}}\nSL: {{stopLoss}}\nTP1: {{target1}}\nTP2: {{target2}}\nTP3: {{target3}}"
+        body: "Symbol: {{symbol}}\nAction: {{type}}\nEntry: {{entryPrice}}\nSL: {{stopLoss}}\nTP1: {{target1}}\nTP2: {{target2}}\nTP3: {{target3}}"
     },
     SIGNAL_UPDATE: {
         title: "⚠️ Signal Update: {{symbol}}",
@@ -14,11 +14,15 @@ export default {
     },
     SIGNAL_TARGET: {
         title: "🎯 Target Hit: {{symbol}}",
-        body: "Target {{targetLevel}} Hit for {{symbol}}!\nProfit Booked. 💰"
+        body: "Target {{targetLevel}} hit for {{symbol}}.\nExit: {{exitPrice}}\nPoints: {{pointsLabel}}"
+    },
+    SIGNAL_PARTIAL_PROFIT: {
+        title: "💸 Partial Profit Booked: {{symbol}}",
+        body: "Partial profit booked in {{symbol}}.\nExit: {{exitPrice}}\nPoints: {{pointsLabel}}"
     },
     SIGNAL_STOPLOSS: {
         title: "🛑 Stop Loss Hit: {{symbol}}",
-        body: "SL Hit for {{symbol}}. Exit Position."
+        body: "SL hit for {{symbol}}.\nExit: {{exitPrice}}\nPoints: {{pointsLabel}}"
     },
 
     // Announcements

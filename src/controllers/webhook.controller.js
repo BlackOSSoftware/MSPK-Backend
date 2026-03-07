@@ -1,84 +1,16 @@
 import httpStatus from 'http-status';
 import mongoose from 'mongoose';
 import Signal from '../models/Signal.js';
+import MasterSymbol from '../models/MasterSymbol.js';
 import catchAsync from '../utils/catchAsync.js';
 import { signalService } from '../services/index.js';
-import config from '../config/config.js';
+import {
+  buildWebhookSignalId,
+  normalizeSignalSegment,
+  normalizeSignalSymbol,
+} from '../utils/signalRouting.js';
 
-const normalizeSymbol = (symbol) => String(symbol || '').trim().toUpperCase();
-
-const stripDerivativeSuffix = (symbol) => normalizeSymbol(symbol).replace(/(\.P|PERP)$/i, '');
-
-const isCryptoLikeSymbol = (symbol) => {
-  const sym = stripDerivativeSuffix(symbol);
-  if (!sym) return false;
-
-  // Common stable/crypto quotes
-  if (sym.includes('USDT') || sym.includes('USDC') || sym.includes('BUSD')) return true;
-
-  // Heuristic: <BASE>USD where BASE is not a fiat/commodity code
-  if (sym.endsWith('USD') && sym.length > 3) {
-    const base = sym.slice(0, -3);
-    const fiatBases = new Set([
-      'USD',
-      'EUR',
-      'GBP',
-      'JPY',
-      'AUD',
-      'CAD',
-      'CHF',
-      'NZD',
-      'INR',
-      'SGD',
-      'HKD',
-      'CNY',
-      'CNH',
-      'SEK',
-      'NOK',
-      'DKK',
-      'ZAR',
-      'RUB',
-      'TRY',
-      'MXN',
-      'BRL',
-      'KRW',
-      'PLN',
-      'THB',
-      'IDR',
-      'MYR',
-      'PHP',
-      'VND',
-      'TWD',
-      'SAR',
-      'AED',
-      'QAR',
-      'KWD',
-      'BHD',
-      'OMR',
-      'ILS',
-    ]);
-    const nonCryptoCommodities = new Set(['XAU', 'XAG', 'XTI', 'XBR']);
-
-    if (fiatBases.has(base) || nonCryptoCommodities.has(base)) return false;
-    return base.length >= 2 && base.length <= 10;
-  }
-
-  return false;
-};
-
-const normalizeSegment = (segment) => {
-  if (!segment) return segment;
-  const seg = String(segment).trim().toUpperCase();
-
-  // Keep exchange codes as-is (NSE/NFO/MCX/CDS/BCD etc).
-  // Only normalize a few common aliases to their canonical exchange code.
-  if (['FO', 'FNO', 'NSEFO', 'NSE_FO', 'NSE-FNO', 'NSE-F&O'].includes(seg)) return 'NFO';
-  if (seg === 'CM') return 'NSE';
-  if (seg === 'CUR') return 'CURRENCY';
-  if (seg === 'BINANCE') return 'CRYPTO';
-
-  return seg;
-};
+const escapeRegex = (value = '') => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 const normalizeTimeframe = (timeframe) => {
   if (timeframe === null || timeframe === undefined) return timeframe;
@@ -104,32 +36,133 @@ const parseBoolean = (value) => {
   return undefined;
 };
 
-const buildEntryUniqueId = ({ webhookId, symbol, tradeType, timeframe, entryPrice, signalTime }) => {
-  const idParts = [
-    'ENTRY',
-    webhookId ? String(webhookId).trim() : '',
-    normalizeSymbol(symbol),
-    String(tradeType || '').trim().toUpperCase(),
-    String(timeframe || '').trim(),
-    entryPrice !== undefined && entryPrice !== null ? String(entryPrice) : '',
-    String(signalTime || '').trim(),
+const toFiniteNumber = (value) => {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string') {
+    const normalized = value.replace(/,/g, '').trim();
+    if (!normalized) return undefined;
+    const parsed = Number(normalized);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return undefined;
+};
+
+const roundSignalValue = (value) => Math.round(value * 100) / 100;
+
+const getSignalClosedStatuses = () => ['Closed', 'Target Hit', 'Partial Profit Book', 'Stoploss Hit'];
+
+const deriveExitPoints = ({ signal, exitPrice, totalPoints }) => {
+  const resolvedTotalPoints = toFiniteNumber(totalPoints);
+  const entryPrice = toFiniteNumber(signal?.entryPrice);
+  const resolvedExitPrice = toFiniteNumber(exitPrice);
+  const signalType = String(signal?.type || 'BUY').trim().toUpperCase();
+  const derivedPoints =
+    typeof entryPrice === 'number' && typeof resolvedExitPrice === 'number'
+      ? roundSignalValue(signalType === 'SELL' ? entryPrice - resolvedExitPrice : resolvedExitPrice - entryPrice)
+      : undefined;
+
+  if (
+    typeof resolvedTotalPoints === 'number' &&
+    (Math.abs(resolvedTotalPoints) > 0 || typeof derivedPoints !== 'number')
+  ) {
+    return roundSignalValue(resolvedTotalPoints);
+  }
+
+  return derivedPoints;
+};
+
+const deriveExitStatus = ({ signal, exitReason, exitPrice, totalPoints }) => {
+  const reason = String(exitReason || '').trim().toUpperCase();
+  const points = deriveExitPoints({ signal, exitPrice, totalPoints });
+
+  if (reason.includes('PARTIAL') || reason.includes('PROFIT')) {
+    return 'Partial Profit Book';
+  }
+
+  if (reason.includes('TARGET')) {
+    return 'Target Hit';
+  }
+
+  if (reason.includes('STOP') || reason.includes('SL')) {
+    if (typeof points === 'number' && points > 0) {
+      return 'Partial Profit Book';
+    }
+
+    return 'Stoploss Hit';
+  }
+
+  if (typeof points === 'number' && points > 0) {
+    return 'Partial Profit Book';
+  }
+
+  return 'Closed';
+};
+
+const getWebhookSymbolInput = (body = {}) =>
+  String(
+    body.symbol_id ||
+      body.symbolId ||
+      body.master_symbol_id ||
+      body.masterSymbolId ||
+      body.symbol ||
+      ''
+  ).trim();
+
+const looksLikeMasterSymbolId = (value) => /-[a-f0-9]{24}$/i.test(String(value || '').trim());
+
+const resolveMasterSymbol = async (input) => {
+  const rawInput = String(input || '').trim();
+  if (!rawInput) return null;
+
+  const normalizedSymbol = normalizeSignalSymbol(rawInput);
+  const filters = [
+    { symbolId: new RegExp(`^${escapeRegex(rawInput)}$`, 'i') },
+    { symbol: normalizedSymbol },
   ];
 
-  return idParts.join('|');
+  if (mongoose.Types.ObjectId.isValid(rawInput)) {
+    filters.unshift({ _id: rawInput });
+  }
+
+  return MasterSymbol.findOne({ $or: filters }).lean();
 };
 
 const receiveSignal = catchAsync(async (req, res) => {
   const event = String(req.body.event || '').trim().toUpperCase();
-  const webhookId = req.body.uniq_id || req.body.unique_id || req.body.uniqueId || req.body.uniqe_id;
-  const symbol = normalizeSymbol(req.body.symbol);
-  const incomingSegment = normalizeSegment(req.body.segment);
-  const segment = isCryptoLikeSymbol(symbol) ? 'CRYPTO' : incomingSegment;
+  const webhookId = String(
+    req.body.uniq_id || req.body.unique_id || req.body.uniqueId || req.body.uniqe_id || ''
+  ).trim();
+  const symbolInput = getWebhookSymbolInput(req.body);
+  const resolvedMasterSymbol = await resolveMasterSymbol(symbolInput);
+  const symbolIdRequested =
+    Boolean(req.body.symbol_id || req.body.symbolId || req.body.master_symbol_id || req.body.masterSymbolId) ||
+    looksLikeMasterSymbolId(symbolInput);
+  const symbol = resolvedMasterSymbol
+    ? normalizeSignalSymbol(resolvedMasterSymbol.symbol)
+    : normalizeSignalSymbol(req.body.symbol || symbolInput);
+  const segment = resolvedMasterSymbol
+    ? normalizeSignalSegment(resolvedMasterSymbol.segment, resolvedMasterSymbol.symbol)
+    : normalizeSignalSegment(req.body.segment, symbol);
   const isFreeFromPayload = parseBoolean(req.body.is_free ?? req.body.isFree ?? req.body.free);
-  const isFree = isFreeFromPayload ?? config.env === 'development';
+  const isFree = isFreeFromPayload ?? false;
+
+  if (symbolIdRequested && symbolInput && !resolvedMasterSymbol) {
+    return res
+      .status(httpStatus.BAD_REQUEST)
+      .send({ message: 'Provided symbol ID does not match any master symbol.', symbolId: symbolInput });
+  }
+
+  if (!symbol || !segment) {
+    return res.status(httpStatus.BAD_REQUEST).send({
+      message: 'Valid symbol and segment are required to process webhook.',
+      symbol: symbolInput || req.body.symbol || '',
+    });
+  }
 
   const findSignalByWebhookId = async (webhookId) => {
     if (!webhookId) return null;
     const id = String(webhookId).trim();
+    const baseFilter = symbol ? { symbol, segment } : { segment };
 
     // 1) If webhook sends our MongoDB _id
     if (mongoose.Types.ObjectId.isValid(id)) {
@@ -137,34 +170,44 @@ const receiveSignal = catchAsync(async (req, res) => {
       if (byId) return byId;
     }
 
-    // 2) Find latest non-closed signal for this webhookId+symbol
-    if (symbol) {
-      const byWebhook = await Signal.findOne({
-        webhookId: id,
-        symbol,
-        status: { $nin: ['Closed', 'Target Hit', 'Stoploss Hit'] },
-      }).sort({ createdAt: -1 });
-      if (byWebhook) return byWebhook;
+    // 2) Match by the caller-provided ID first.
+    const byExternalId = await Signal.findOne({
+      ...baseFilter,
+      $or: [{ uniqueId: id }, { webhookId: id }],
+      status: { $nin: getSignalClosedStatuses() },
+    }).sort({ createdAt: -1 });
+    if (byExternalId) return byExternalId;
 
-      // 3) If already closed (idempotent EXIT), match on exit_time
-      if (req.body.exit_time) {
-        const byClosed = await Signal.findOne({
-          webhookId: id,
+    if (symbol) {
+        const byLegacySymbolOnly = await Signal.findOne({
           symbol,
-          exitTime: new Date(req.body.exit_time),
+          $or: [{ uniqueId: id }, { webhookId: id }],
+          status: { $nin: getSignalClosedStatuses() },
         }).sort({ createdAt: -1 });
-        if (byClosed) return byClosed;
+      if (byLegacySymbolOnly) return byLegacySymbolOnly;
+    }
+
+    // 3) If already closed (idempotent EXIT), match on exit_time too.
+    if (req.body.exit_time) {
+      const exitTime = new Date(req.body.exit_time);
+      const byClosed = await Signal.findOne({
+        ...baseFilter,
+        $or: [{ uniqueId: id }, { webhookId: id }],
+        exitTime,
+      }).sort({ createdAt: -1 });
+      if (byClosed) return byClosed;
+
+      if (symbol) {
+        const byLegacyClosed = await Signal.findOne({
+          symbol,
+          $or: [{ uniqueId: id }, { webhookId: id }],
+          exitTime,
+        }).sort({ createdAt: -1 });
+        if (byLegacyClosed) return byLegacyClosed;
       }
     }
 
     return null;
-  };
-
-  const mapExitReasonToStatus = (reason) => {
-    const r = String(reason || '').trim().toUpperCase();
-    if (r.includes('TARGET')) return 'Target Hit';
-    if (r.includes('STOP') || r.includes('SL')) return 'Stoploss Hit';
-    return 'Closed';
   };
 
   if (event === 'EXIT') {
@@ -173,19 +216,32 @@ const receiveSignal = catchAsync(async (req, res) => {
       return res.status(httpStatus.OK).send({ status: 'not_found', uniq_id: webhookId, symbol });
     }
 
-    const desiredStatus = mapExitReasonToStatus(req.body.exit_reason);
+    const desiredStatus = deriveExitStatus({
+      signal: existing,
+      exitReason: req.body.exit_reason,
+      exitPrice: req.body.exit_price,
+      totalPoints: req.body.total_points,
+    });
     const incomingExitTime = new Date(req.body.exit_time);
+    const incomingExitPrice = toFiniteNumber(req.body.exit_price);
+    const resolvedTotalPoints = deriveExitPoints({
+      signal: existing,
+      exitPrice: incomingExitPrice,
+      totalPoints: req.body.total_points,
+    });
     const isNumberClose = (a, b, eps = 1e-6) => {
       if (typeof a !== 'number' || typeof b !== 'number') return false;
       return Math.abs(a - b) <= eps;
     };
 
+    const resolvedExitReason = desiredStatus === 'Partial Profit Book' ? 'Partial Profit Book' : req.body.exit_reason;
+
     const alreadyApplied =
       existing.exitTime &&
       existing.status === desiredStatus &&
-      existing.exitReason === req.body.exit_reason &&
-      isNumberClose(existing.exitPrice, req.body.exit_price) &&
-      isNumberClose(existing.totalPoints, req.body.total_points) &&
+      existing.exitReason === resolvedExitReason &&
+      isNumberClose(existing.exitPrice, incomingExitPrice) &&
+      isNumberClose(existing.totalPoints, resolvedTotalPoints) &&
       new Date(existing.exitTime).getTime() === incomingExitTime.getTime();
 
     if (alreadyApplied) {
@@ -193,9 +249,9 @@ const receiveSignal = catchAsync(async (req, res) => {
     }
 
     const updateBody = {
-      exitPrice: req.body.exit_price,
-      totalPoints: req.body.total_points,
-      exitReason: req.body.exit_reason,
+      exitPrice: incomingExitPrice,
+      totalPoints: resolvedTotalPoints,
+      exitReason: resolvedExitReason,
       exitTime: req.body.exit_time,
       status: desiredStatus,
     };
@@ -204,20 +260,24 @@ const receiveSignal = catchAsync(async (req, res) => {
     return res.status(httpStatus.OK).send({ status: 'ok', signal: updated });
   }
 
+  const normalizedTimeframe = normalizeTimeframe(req.body.timeframe);
+  const normalizedType = String(req.body.trade_type || '').trim().toUpperCase();
+
   const signalBody = {
-    uniqueId: buildEntryUniqueId({
+    uniqueId: buildWebhookSignalId({
       webhookId,
       symbol,
-      tradeType: req.body.trade_type,
-      timeframe: normalizeTimeframe(req.body.timeframe),
+      segment,
+      tradeType: normalizedType,
+      timeframe: normalizedTimeframe,
       entryPrice: req.body.entry_price,
       signalTime: req.body.signal_time,
     }),
-    webhookId,
+    webhookId: webhookId || undefined,
     symbol,
     segment,
-    type: req.body.trade_type,
-    timeframe: normalizeTimeframe(req.body.timeframe),
+    type: normalizedType,
+    timeframe: normalizedTimeframe,
     entryPrice: req.body.entry_price,
     stopLoss: req.body.stop_loss,
     targets: {
@@ -247,8 +307,13 @@ const receiveSignal = catchAsync(async (req, res) => {
       isFree: signalBody.isFree,
     };
 
-    const updated = await signalService.updateSignalById(existingByUniqueId.id, updateBody);
-    return res.status(httpStatus.OK).send({ status: 'ok', signal: updated, updatedExisting: true });
+    const existingStatus = String(existingByUniqueId.status || '').trim().toUpperCase();
+    const isClosedSignal = ['CLOSED', 'TARGET HIT', 'PARTIAL PROFIT BOOK', 'STOPLOSS HIT'].includes(existingStatus);
+
+    if (!isClosedSignal) {
+      const updated = await signalService.updateSignalById(existingByUniqueId.id, updateBody);
+      return res.status(httpStatus.OK).send({ status: 'ok', signal: updated, updatedExisting: true });
+    }
   }
 
   const created = await signalService.createSignal(signalBody, null);

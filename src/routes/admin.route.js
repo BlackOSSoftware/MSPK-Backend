@@ -16,8 +16,8 @@ router
   .post(validate(adminValidation.createUser), adminController.createUser);
 
 router
-  .route('/users/:userId/signals')
-  .patch(adminController.updateSignalAccess);
+  .route('/users/:userId/signal-deliveries')
+  .get(adminController.getUserSignalDeliveries);
 
 router
   .route('/users/:userId')

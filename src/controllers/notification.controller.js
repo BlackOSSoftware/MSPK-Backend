@@ -1,10 +1,20 @@
-
 import httpStatus from 'http-status';
+import crypto from 'crypto';
 import catchAsync from '../utils/catchAsync.js';
 import ApiError from '../utils/ApiError.js';
 import Notification from '../models/Notification.js';
 import FCMToken from '../models/FCMToken.js';
 import User from '../models/User.js';
+import telegramService from '../services/channels/telegram.service.js';
+import logger from '../config/log.js';
+
+const buildTelegramConnectionPayload = (user) => ({
+  connected: Boolean(user?.telegramChatId),
+  chatId: user?.telegramChatId || null,
+  username: user?.telegramUsername || null,
+  connectedAt: user?.telegramConnectedAt || null,
+  botUsername: telegramService.getTelegramConfig().botUsername || null,
+});
 
 const getMyNotifications = catchAsync(async (req, res) => {
   res.set({
@@ -129,6 +139,112 @@ const deleteNotification = catchAsync(async (req, res) => {
     res.status(httpStatus.NO_CONTENT).send();
 });
 
+const getTelegramConnectLink = catchAsync(async (req, res) => {
+  const linkToken = crypto.randomBytes(18).toString('hex');
+  const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
+
+  req.user.telegramLinkToken = linkToken;
+  req.user.telegramLinkTokenExpiresAt = expiresAt;
+  await req.user.save();
+
+  const connectUrl = telegramService.buildTelegramConnectUrl(linkToken);
+  if (!connectUrl) {
+    throw new ApiError(httpStatus.INTERNAL_SERVER_ERROR, 'Telegram bot username is not configured');
+  }
+
+  res.send({
+    connectUrl,
+    expiresAt,
+    telegram: buildTelegramConnectionPayload(req.user),
+  });
+});
+
+const disconnectTelegram = catchAsync(async (req, res) => {
+  req.user.telegramChatId = null;
+  req.user.telegramUsername = null;
+  req.user.telegramConnectedAt = null;
+  req.user.telegramLinkToken = null;
+  req.user.telegramLinkTokenExpiresAt = null;
+  await req.user.save();
+
+  res.send({
+    message: 'Telegram disconnected',
+    telegram: buildTelegramConnectionPayload(req.user),
+  });
+});
+
+const handleTelegramWebhook = catchAsync(async (req, res) => {
+  const expectedSecret = telegramService.getTelegramConfig().webhookSecret;
+  if (!expectedSecret || req.params.secret !== expectedSecret) {
+    return res.status(httpStatus.FORBIDDEN).send({ message: 'Invalid Telegram webhook secret' });
+  }
+
+  const message = req.body?.message;
+  const text = String(message?.text || '').trim();
+  const chatId = message?.chat?.id ? String(message.chat.id) : null;
+  const username = message?.from?.username || message?.chat?.username || null;
+
+  if (!chatId || !text.startsWith('/start')) {
+    return res.status(httpStatus.OK).send({ ok: true });
+  }
+
+  const payload = text.replace(/^\/start\s*/i, '').trim();
+  if (!payload.startsWith('tg_')) {
+    await telegramService.sendTelegramMessage({}, 'Signal alerts connect karne ke liye app se naya Telegram link use karo.', {
+      chatId,
+    });
+    return res.status(httpStatus.OK).send({ ok: true });
+  }
+
+  const linkToken = payload.slice(3).trim();
+  if (!linkToken) {
+    return res.status(httpStatus.OK).send({ ok: true });
+  }
+
+  const now = new Date();
+  const user = await User.findOne({
+    telegramLinkToken: linkToken,
+    telegramLinkTokenExpiresAt: { $gt: now },
+  });
+
+  if (!user) {
+    await telegramService.sendTelegramMessage({}, 'Yeh Telegram link expire ho chuka hai. App me jaake dobara Connect Telegram karo.', {
+      chatId,
+    });
+    return res.status(httpStatus.OK).send({ ok: true });
+  }
+
+  await User.updateMany(
+    {
+      _id: { $ne: user._id },
+      telegramChatId: chatId,
+    },
+    {
+      $set: {
+        telegramChatId: null,
+        telegramUsername: null,
+        telegramConnectedAt: null,
+        telegramLinkToken: null,
+        telegramLinkTokenExpiresAt: null,
+      },
+    }
+  );
+
+  user.telegramChatId = chatId;
+  user.telegramUsername = username;
+  user.telegramConnectedAt = now;
+  user.telegramLinkToken = null;
+  user.telegramLinkTokenExpiresAt = null;
+  await user.save();
+
+  await telegramService.sendTelegramMessage({}, `Telegram alerts connected for ${user.name}. Ab paid/demo signals direct yahin milenge.`, {
+    chatId,
+  });
+
+  logger.info(`Telegram connected for user ${user._id}`);
+  return res.status(httpStatus.OK).send({ ok: true });
+});
+
 export default {
   getMyNotifications,
   markAsRead,
@@ -136,5 +252,8 @@ export default {
   registerFCMToken,
   unregisterFCMToken,
   getNotification,
-  deleteNotification
+  deleteNotification,
+  disconnectTelegram,
+  getTelegramConnectLink,
+  handleTelegramWebhook,
 };

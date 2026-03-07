@@ -4,6 +4,34 @@ import { authService, tokenService, userService, msg91Service, emailService } fr
 import { redisClient } from '../services/redis.service.js'; // Direct client access for Email OTP
 import User from '../models/User.js';
 import FCMToken from '../models/FCMToken.js';
+import telegramService from '../services/channels/telegram.service.js';
+
+const buildTelegramPayload = (userObject) => ({
+  connected: Boolean(userObject?.telegramChatId),
+  chatId: userObject?.telegramChatId || null,
+  username: userObject?.telegramUsername || null,
+  connectedAt: userObject?.telegramConnectedAt || null,
+  botUsername: telegramService.getTelegramConfig().botUsername || null,
+});
+
+const serializeUser = (user, planDetails = {}) => {
+  const userObject = user?.toObject ? user.toObject() : { ...user };
+
+  delete userObject.password;
+  delete userObject.telegramLinkToken;
+  delete userObject.telegramLinkTokenExpiresAt;
+
+  const telegram = buildTelegramPayload(userObject);
+  delete userObject.telegramChatId;
+  delete userObject.telegramUsername;
+  delete userObject.telegramConnectedAt;
+
+  return {
+    ...userObject,
+    telegram,
+    ...planDetails,
+  };
+};
 
 const register = catchAsync(async (req, res) => {
   // Check if phone/email is verified before creating account
@@ -20,7 +48,7 @@ const register = catchAsync(async (req, res) => {
   
   const user = await authService.createUser(req.body);
   const tokens = await tokenService.generateAuthTokens(user);
-  res.status(201).send({ user, token: tokens.access.token });
+  res.status(201).send({ user: serializeUser(user), token: tokens.access.token });
 });
 
 const sendOtp = catchAsync(async (req, res) => {
@@ -151,20 +179,14 @@ const login = catchAsync(async (req, res) => {
   const tokens = await tokenService.generateAuthTokens(user);
   
   // Merge User + Plan Details for Frontend
-  const responseUser = {
-      ...user.toObject(),
-      ...planDetails
-  };
+  const responseUser = serializeUser(user, planDetails);
 
   res.send({ user: responseUser, token: tokens.access.token, expiresIn: 864000 });
 });
 
 const getMe = catchAsync(async (req, res) => {
     const planDetails = await authService.getUserActivePlan(req.user);
-    const responseUser = {
-        ...req.user.toObject(),
-        ...planDetails
-    };
+    const responseUser = serializeUser(req.user, planDetails);
     res.send(responseUser);
 });
 
@@ -180,7 +202,8 @@ const updateMe = catchAsync(async (req, res) => {
         updateBody.profile.avatar = req.file.path.replace(/\\/g, "/"); // Normalize path
     }
     const user = await userService.updateUserById(req.user.id, updateBody);
-    res.send(user);
+    const planDetails = await authService.getUserActivePlan(user);
+    res.send(serializeUser(user, planDetails));
 });
 
 const logout = catchAsync(async (req, res) => {

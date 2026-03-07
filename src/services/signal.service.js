@@ -1,7 +1,10 @@
 import Signal from '../models/Signal.js';
 import announcementService from './announcement.service.js';
 import logger from '../config/log.js';
-import { broadcastToAll } from './websocket.service.js';
+import { broadcastToRoles } from './websocket.service.js';
+import { getSignalAudienceGroups } from '../utils/signalRouting.js';
+
+const CLOSED_SIGNAL_STATUSES = ['Closed', 'Target Hit', 'Partial Profit Book', 'Stoploss Hit'];
 
 const mapSignalToCategory = (signalBody) => {
   const { symbol, segment } = signalBody;
@@ -91,7 +94,7 @@ const createSignal = async (signalBody, user) => {
 
   // Realtime broadcast (for admin panel / live users)
   try {
-    broadcastToAll({ type: 'new_signal', payload: signal });
+    broadcastToRoles(['admin', 'sub-broker'], { type: 'new_signal', payload: signal });
   } catch (e) {
     // Passive fail (WS may not be initialized in some environments)
   }
@@ -109,8 +112,9 @@ const createSignal = async (signalBody, user) => {
           message: `Entry: ${signal.entryPrice}\n${tpDetails}\nSL: ${signal.stopLoss}`,
           type: 'SIGNAL',
           priority: 'NORMAL',
-          targetAudience: { role: 'all', planValues: [] },
-          isActive: true
+          targetAudience: { role: 'user', planValues: [], segments: getSignalAudienceGroups(signal) },
+          isActive: false,
+          isNotificationSent: true
       });
   } catch (e) {
       logger.error('Failed to create announcement for signal', e);
@@ -176,12 +180,17 @@ const getSignalStats = async (filter = {}) => {
       },
       closedSignals: {
         $sum: {
-          $cond: [{ $eq: ["$status", "Closed"] }, 1, 0]
+          $cond: [{ $in: ["$status", CLOSED_SIGNAL_STATUSES] }, 1, 0]
         }
       },
       targetHit: {
         $sum: {
           $cond: [{ $eq: ["$status", "Target Hit"] }, 1, 0]
+        }
+      },
+      partialProfit: {
+        $sum: {
+          $cond: [{ $eq: ["$status", "Partial Profit Book"] }, 1, 0]
         }
       },
       stoplossHit: {
@@ -194,12 +203,11 @@ const getSignalStats = async (filter = {}) => {
 
   const stats = await Signal.aggregate(pipeline);
 
-  const data = stats[0] || { totalSignals: 0, activeSignals: 0, closedSignals: 0, targetHit: 0, stoplossHit: 0 };
+  const data = stats[0] || { totalSignals: 0, activeSignals: 0, closedSignals: 0, targetHit: 0, partialProfit: 0, stoplossHit: 0 };
   
-  // Success Rate = (Target Hit) / (Target Hit + Stoploss Hit) * 100
-  // Or (Target Hit) / (Total Closed) ? Usually Target vs SL.
-  const outcomes = data.targetHit + data.stoplossHit;
-  const successRate = outcomes > 0 ? Math.round((data.targetHit / outcomes) * 100) : 0;
+  const positiveOutcomes = data.targetHit + data.partialProfit;
+  const outcomes = positiveOutcomes + data.stoplossHit;
+  const successRate = outcomes > 0 ? Math.round((positiveOutcomes / outcomes) * 100) : 0;
 
   return {
     ...data,
@@ -227,7 +235,7 @@ const updateSignalById = async (signalId, updateBody) => {
   // Status update broadcast
   if (updateBody.status || updateBody.notes) {
        try {
-           broadcastToAll({ type: 'update_signal', payload: signal });
+           broadcastToRoles(['admin', 'sub-broker'], { type: 'update_signal', payload: signal });
 
           // Notification Logic
           const { redisClient } = await import('./redis.service.js');
@@ -237,6 +245,9 @@ const updateSignalById = async (signalId, updateBody) => {
           if (updateBody.status === 'Target Hit') {
               subType = 'SIGNAL_TARGET';
               notificationData.targetLevel = 'TP1'; // Logic to detect which target? usually TP1
+          } else if (updateBody.status === 'Partial Profit Book') {
+              subType = 'SIGNAL_PARTIAL_PROFIT';
+              notificationData.currentPrice = signal.exitPrice ?? signal.entryPrice;
           } else if (updateBody.status === 'Stoploss Hit') {
               subType = 'SIGNAL_STOPLOSS';
           } else if (updateBody.notes || updateBody.status) {

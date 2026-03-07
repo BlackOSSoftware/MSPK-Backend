@@ -22,7 +22,7 @@ const updateSignal = {
         signalId: Joi.string().required()
     }),
     body: Joi.object().keys({
-        status: Joi.string().valid('Active', 'Target Hit', 'Stoploss Hit', 'Closed'),
+        status: Joi.string().valid('Active', 'Target Hit', 'Partial Profit Book', 'Stoploss Hit', 'Closed'),
         notes: Joi.string()
     }).min(1)
 };

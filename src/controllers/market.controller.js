@@ -1,9 +1,11 @@
 import httpStatus from 'http-status';
+import mongoose from 'mongoose';
 import catchAsync from '../utils/catchAsync.js';
 import MasterSegment from '../models/MasterSegment.js';
 import MasterSymbol from '../models/MasterSymbol.js';
 import config from '../config/config.js';
 import logger from '../config/log.js';
+import { buildMasterSymbolId } from '../utils/masterSymbolId.js';
 
 // Seed Data (Standard Set)
 import marketDataService from '../services/marketData.service.js';
@@ -15,6 +17,123 @@ import fmpService from '../services/fmp.service.js';
 const toNumber = (value, fallback = 0) => {
     const num = Number(value);
     return Number.isFinite(num) ? num : fallback;
+};
+
+const parseBooleanQuery = (value) => {
+    if (value === undefined || value === null || value === '') return undefined;
+    if (typeof value === 'boolean') return value;
+
+    const normalized = String(value).trim().toLowerCase();
+    if (['true', '1', 'yes', 'y', 'active', 'with_id', 'withid'].includes(normalized)) return true;
+    if (['false', '0', 'no', 'n', 'inactive', 'missing_id', 'missingid'].includes(normalized)) return false;
+    return undefined;
+};
+
+const parseIntegerQuery = (value, fallback, min, max) => {
+    const parsed = Number.parseInt(value, 10);
+    if (!Number.isFinite(parsed)) return fallback;
+    return Math.min(Math.max(parsed, min), max);
+};
+
+const escapeRegex = (value = '') => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+const buildSymbolFilter = (query = {}) => {
+    const clauses = [];
+    const search = String(query.search || '').trim();
+    const segment = String(query.segment || '').trim();
+    const watchlist = parseBooleanQuery(query.watchlist);
+    const isActive = parseBooleanQuery(query.isActive);
+    const hasSymbolId = parseBooleanQuery(
+        query.hasSymbolId ?? (
+            query.idStatus === 'with_id' || query.idStatus === 'withId'
+                ? 'true'
+                : query.idStatus === 'missing_id' || query.idStatus === 'missingId'
+                    ? 'false'
+                    : undefined
+        )
+    );
+
+    if (segment) clauses.push({ segment });
+    if (watchlist !== undefined) clauses.push({ isWatchlist: watchlist });
+    if (isActive !== undefined) clauses.push({ isActive });
+
+    if (hasSymbolId === true) {
+        clauses.push({ symbolId: { $exists: true, $ne: '' } });
+    } else if (hasSymbolId === false) {
+        clauses.push({
+            $or: [
+                { symbolId: { $exists: false } },
+                { symbolId: null },
+                { symbolId: '' }
+            ]
+        });
+    }
+
+    if (search) {
+        const regex = new RegExp(escapeRegex(search), 'i');
+        const searchClauses = [
+            { symbol: regex },
+            { name: regex },
+            { symbolId: regex }
+        ];
+
+        if (mongoose.Types.ObjectId.isValid(search)) {
+            searchClauses.push({ _id: new mongoose.Types.ObjectId(search) });
+        }
+
+        clauses.push({ $or: searchClauses });
+    }
+
+    if (clauses.length === 0) return {};
+    if (clauses.length === 1) return clauses[0];
+    return { $and: clauses };
+};
+
+const enrichSymbol = (symbolLike) => {
+    const symbol = typeof symbolLike?.toObject === 'function' ? symbolLike.toObject() : { ...symbolLike };
+    symbol.lastPrice = marketDataService.getBestLivePrice(symbol.symbol, symbol, symbol.lastPrice || 0);
+    symbol.ltp = symbol.lastPrice;
+
+    const quote = marketDataService.getBestQuote(symbol.symbol, symbol);
+    if (quote?.ohlc) {
+        symbol.ohlc = quote.ohlc;
+    }
+
+    return symbol;
+};
+
+const hydrateInstrumentToken = (payload = {}, previousSymbol = '') => {
+    if (!payload?.symbol) return;
+
+    const nextSymbol = String(payload.symbol).trim().toUpperCase();
+    payload.symbol = nextSymbol;
+
+    if (nextSymbol.includes('USDT')) {
+        payload.segment = 'CRYPTO';
+        payload.exchange = 'CRYPTO';
+    }
+
+    const shouldRefreshInstrumentToken =
+        !payload.instrumentToken ||
+        (previousSymbol && previousSymbol !== nextSymbol);
+
+    if (!shouldRefreshInstrumentToken) return;
+
+    payload.instrumentToken = undefined;
+
+    const instrument = kiteInstrumentsService.getInstrumentBySymbol(nextSymbol);
+    if (instrument) {
+        payload.instrumentToken = String(instrument.instrument_token);
+        return;
+    }
+
+    if (nextSymbol.endsWith('-EQ')) {
+        const raw = nextSymbol.replace('-EQ', '');
+        const fallbackInstrument = kiteInstrumentsService.getInstrumentBySymbol(raw);
+        if (fallbackInstrument) {
+            payload.instrumentToken = String(fallbackInstrument.instrument_token);
+        }
+    }
 };
 
 const enrichMarketSymbols = (symbols) => {
@@ -487,41 +606,53 @@ const updateSegment = catchAsync(async (req, res) => {
 import kiteInstrumentsService from '../services/kiteInstruments.service.js';
 
 const createSymbol = catchAsync(async (req, res) => {
-    // Auto-populate instrumentToken from Kite Instruments Memory
-    if (!req.body.instrumentToken && req.body.symbol) {
-        const sym = req.body.symbol.toUpperCase();
-        
-        // Auto-detect Crypto
-        if (sym.includes('USDT')) {
-            req.body.segment = 'CRYPTO';
-            req.body.exchange = 'CRYPTO';
-        }
+    hydrateInstrumentToken(req.body);
 
-        const instrument = kiteInstrumentsService.getInstrumentBySymbol(req.body.symbol);
-        if (instrument) {
-            req.body.instrumentToken = String(instrument.instrument_token);
-        } else {
-             // Try removing -EQ suffix for NSE
-             if (req.body.symbol.endsWith('-EQ')) {
-                 const raw = req.body.symbol.replace('-EQ', '');
-                 const inst2 = kiteInstrumentsService.getInstrumentBySymbol(raw);
-                 if (inst2) req.body.instrumentToken = String(inst2.instrument_token);
-             }
-        }
-    }
-
-    const symbol = await MasterSymbol.create(req.body);
+    const symbol = new MasterSymbol(req.body);
+    symbol.symbolId = buildMasterSymbolId(symbol);
+    await symbol.save();
     
     // Real-time update: Add to running memory and subscribe
     await marketDataService.addSymbol(symbol);
 
-    res.status(httpStatus.CREATED).send(symbol);
+    res.status(httpStatus.CREATED).send(enrichSymbol(symbol));
 });
 
 const updateSymbol = catchAsync(async (req, res) => {
     const { id } = req.params;
-    const symbol = await MasterSymbol.findByIdAndUpdate(id, req.body, { new: true });
-    res.send(symbol);
+    const symbol = await MasterSymbol.findById(id);
+
+    if (!symbol) {
+        return res.status(httpStatus.NOT_FOUND).send({ message: 'Symbol not found' });
+    }
+
+    const previousSymbol = symbol.symbol;
+    Object.assign(symbol, req.body);
+    hydrateInstrumentToken(symbol, previousSymbol);
+    symbol.symbolId = buildMasterSymbolId(symbol);
+    await symbol.save();
+
+    if (previousSymbol && previousSymbol !== symbol.symbol) {
+        marketDataService.unsubscribeSymbol(previousSymbol);
+    }
+
+    await marketDataService.addSymbol(symbol);
+
+    res.send(enrichSymbol(symbol));
+});
+
+const generateSymbolId = catchAsync(async (req, res) => {
+    const { id } = req.params;
+    const symbol = await MasterSymbol.findById(id);
+
+    if (!symbol) {
+        return res.status(httpStatus.NOT_FOUND).send({ message: 'Symbol not found' });
+    }
+
+    symbol.symbolId = buildMasterSymbolId(symbol);
+    await symbol.save();
+
+    res.send(enrichSymbol(symbol));
 });
 
 const getSegments = catchAsync(async (req, res) => {
@@ -530,30 +661,56 @@ const getSegments = catchAsync(async (req, res) => {
 });
 
 const getSymbols = catchAsync(async (req, res) => {
-    const { segment, watchlist } = req.query;
-    const filter = {};
-    if (segment) filter.segment = segment;
-    if (watchlist === 'true') filter.isWatchlist = true;
-    
-    // Sort by symbol name
-    // Use .lean() to get plain objects we can modify
-    const symbols = await MasterSymbol.find(filter).sort({ symbol: 1 }).lean();
-    
-    // Inject current price from memory
-        const enrichedSymbols = symbols.map(s => {
-            s.lastPrice = marketDataService.getBestLivePrice(s.symbol, s, s.lastPrice || 0);
-            s.ltp = s.lastPrice; // Alias
-            
-            // Inject OHLC if available (from fetchInitialQuote)
-            const quote = marketDataService.getBestQuote(s.symbol, s);
-            if (quote?.ohlc) {
-                 s.ohlc = quote.ohlc;
-            }
-            
-            return s;
-        });
+    const filter = buildSymbolFilter(req.query);
+    const sort = { isActive: -1, segment: 1, symbol: 1 };
+    const paginated = String(req.query.paginated || '').trim().toLowerCase() === 'true';
 
-    res.send(enrichedSymbols);
+    if (!paginated) {
+        const symbols = await MasterSymbol.find(filter).sort(sort).lean();
+        return res.send(symbols.map(enrichSymbol));
+    }
+
+    const requestedPage = parseIntegerQuery(req.query.page, 1, 1, 100000);
+    const limit = parseIntegerQuery(req.query.limit, 20, 1, 200);
+    const [total, overallTotal, activeTotal, inactiveTotal, withSymbolIdTotal, withoutSymbolIdTotal] = await Promise.all([
+        MasterSymbol.countDocuments(filter),
+        MasterSymbol.countDocuments(),
+        MasterSymbol.countDocuments({ isActive: true }),
+        MasterSymbol.countDocuments({ isActive: false }),
+        MasterSymbol.countDocuments({ symbolId: { $exists: true, $ne: '' } }),
+        MasterSymbol.countDocuments({
+            $or: [
+                { symbolId: { $exists: false } },
+                { symbolId: null },
+                { symbolId: '' }
+            ]
+        })
+    ]);
+
+    const totalPages = Math.max(Math.ceil(total / limit), 1);
+    const page = Math.min(requestedPage, totalPages);
+    const skip = (page - 1) * limit;
+    const symbols = await MasterSymbol.find(filter).sort(sort).skip(skip).limit(limit).lean();
+
+    res.send({
+        results: symbols.map(enrichSymbol),
+        pagination: {
+            page,
+            limit,
+            total,
+            totalPages,
+            hasPrevPage: page > 1,
+            hasNextPage: page < totalPages,
+        },
+        summary: {
+            total: overallTotal,
+            active: activeTotal,
+            inactive: inactiveTotal,
+            withSymbolId: withSymbolIdTotal,
+            withoutSymbolId: withoutSymbolIdTotal,
+            matched: total,
+        },
+    });
 });
 
 import Signal from '../models/Signal.js'; // Import Signal Model
@@ -801,6 +958,7 @@ export default {
     getSymbols,
     createSymbol,
     updateSymbol,
+    generateSymbolId,
     deleteSymbol,
     handleLogin,
     handleLoginCallback,

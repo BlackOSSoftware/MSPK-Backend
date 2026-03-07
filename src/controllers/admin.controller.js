@@ -3,6 +3,8 @@ import catchAsync from '../utils/catchAsync.js';
 import User from '../models/User.js';
 import Subscription from '../models/Subscription.js';
 import Plan from '../models/Plan.js';
+import Notification from '../models/Notification.js';
+import Signal from '../models/Signal.js';
 import ApiError from '../utils/ApiError.js';
 import { redisClient } from '../services/redis.service.js';
 import transactionService from '../services/transaction.service.js';
@@ -204,6 +206,16 @@ const getUser = catchAsync(async (req, res) => {
       phone: user.phone || '',
       tradingViewId: user.tradingViewId || '',
       role: user.role,
+      ip: user.lastLoginIp || '',
+      currentDeviceId: user.currentDeviceId || '',
+      isEmailVerified: Boolean(user.isEmailVerified),
+      isPhoneVerified: Boolean(user.isPhoneVerified),
+      preferredSegments: Array.isArray(user.preferredSegments) ? user.preferredSegments : [],
+      profile: {
+          city: user.profile?.city || '',
+          state: user.profile?.state || '',
+          address: user.profile?.address || ''
+      },
       
       // Subscription / Plan Data
       plan: planNames.length > 0 ? planNames.join(', ') : 'Free', 
@@ -235,100 +247,107 @@ const getUser = catchAsync(async (req, res) => {
           date: h.createdAt,
           status: h.status,
           expiry: h.endDate
-      })),
-
-      // Computed Signals (Default List + Overrides)
-      // Pass the *latest* expiring sub for signal calculation base, or modify getComputedSignals to handle array.
-      // For now, let's pass the one with max expiry as reference 'activeSub'
-      signals: getComputedSignals(user, activeSubs.length > 0 ? activeSubs.sort((a,b) => new Date(b.endDate) - new Date(a.endDate))[0] : null)
+      }))
   };
 
   res.send(enrichedUser);
 });
 
-// Helper to compute signals based on Plan and User Overrides
-const getComputedSignals = (user, activeSub) => {
-    // Defines all available signal categories in the system
-    const systemSignals = [
-        { key: 'NIFTY_OPT', label: 'Nifty 50 Options', keywords: ['Nifty', 'Options', 'FNO'] },
-        { key: 'BANKNIFTY_OPT', label: 'BankNifty Options', keywords: ['BankNifty', 'Options', 'FNO'] },
-        { key: 'STOCKS_INTRA', label: 'Stocks Intraday', keywords: ['Equity', 'Stocks', 'Intraday', 'Cash'] },
-        { key: 'COMMODITY', label: 'Commodity (MCX)', keywords: ['Commodity', 'Gold', 'Silver', 'Crude', 'MCX'] },
-        { key: 'FOREX', label: 'Forex Signals', keywords: ['Forex', 'Currency', 'Pairs'] }
-    ];
+const getUserSignalDeliveries = catchAsync(async (req, res) => {
+    const { userId } = req.params;
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 10, 1), 100);
+    const skip = (page - 1) * limit;
 
-    return systemSignals.map(sig => {
-        // 1. Check for specific user override first
-        const override = user.signalAccess?.find(s => s.category === sig.key);
-        if (override) {
-            return {
-                category: sig.label,
-                key: sig.key,
-                access: override.access,
-                expiry: override.expiry ? override.expiry : (activeSub ? activeSub.endDate : null),
-                source: 'override'
-            };
-        }
-
-        // 2. Smart Plan Mapping
-        let planHasAccess = false;
-        
-        if (activeSub && activeSub.status === 'active' && activeSub.plan && activeSub.plan.features) {
-            // Check if any plan feature contains any of the signal keywords
-            // logic: Does plan.features (array of strings) have any string that includes a keyword?
-            const planFeatures = activeSub.plan.features.map(f => f.toLowerCase());
-            
-            // Check segment match (stronger check)
-            if (activeSub.plan.segment) {
-                const seg = activeSub.plan.segment; // NEVER check toLowerCase here if enum is CONSTANT, but safe to do so
-                if (seg === 'FNO' && (sig.key === 'NIFTY_OPT' || sig.key === 'BANKNIFTY_OPT')) planHasAccess = true;
-                if (seg === 'EQUITY' && sig.key === 'STOCKS_INTRA') planHasAccess = true;
-                if (seg === 'COMMODITY' && sig.key === 'COMMODITY') planHasAccess = true;
-                if (seg === 'CURRENCY' && sig.key === 'FOREX') planHasAccess = true;
-            }
-
-            // Keyword fallback check
-            if (!planHasAccess) {
-                const keywords = sig.keywords.map(k => k.toLowerCase());
-                const matchesKeyword = planFeatures.some(feature => 
-                    keywords.some(keyword => feature.includes(keyword))
-                );
-                if (matchesKeyword) planHasAccess = true;
-            }
-        }
-
-        return {
-            category: sig.label,
-            key: sig.key,
-            access: planHasAccess,
-            expiry: activeSub ? activeSub.endDate : null,
-            source: 'plan'
-        };
-    });
-};
-
-const updateSignalAccess = catchAsync(async (req, res) => {
-    const user = await User.findById(req.params.userId);
+    const user = await User.findById(userId).select('_id');
     if (!user) {
         throw new ApiError(httpStatus.NOT_FOUND, 'User not found');
     }
 
-    const { category, access, expiry } = req.body;
+    const baseFilter = {
+        user: userId,
+        type: 'SIGNAL'
+    };
 
-    // Check if override exists
-    const existingIndex = user.signalAccess.findIndex(s => s.category === category);
+    const [totalResults, unreadDeliveries, notifications] = await Promise.all([
+        Notification.countDocuments(baseFilter),
+        Notification.countDocuments({ ...baseFilter, isRead: false }),
+        Notification.find(baseFilter)
+            .sort({ createdAt: -1 })
+            .skip(skip)
+            .limit(limit)
+            .lean()
+    ]);
 
-    if (existingIndex > -1) {
-        // Update existing
-        user.signalAccess[existingIndex].access = access;
-        if (expiry) user.signalAccess[existingIndex].expiry = expiry;
-    } else {
-        // Add new override
-        user.signalAccess.push({ category, access, expiry });
-    }
+    const signalIds = Array.from(
+        new Set(
+            notifications
+                .map((notification) => notification?.data?.signalId)
+                .filter(Boolean)
+                .map((id) => String(id))
+        )
+    );
 
-    await user.save();
-    res.send({ message: 'Signal access updated', signals: getComputedSignals(user, null) }); // Return updated list (approximation)
+    const signalDocs = signalIds.length > 0
+        ? await Signal.find({ _id: { $in: signalIds } })
+            .select('_id uniqueId webhookId symbol segment category type entryPrice stopLoss targets status signalTime exitPrice totalPoints exitReason exitTime timeframe createdAt isFree')
+            .lean()
+        : [];
+
+    const signalMap = new Map(signalDocs.map((signal) => [String(signal._id), signal]));
+
+    const results = notifications.map((notification) => {
+        const signalId = notification?.data?.signalId ? String(notification.data.signalId) : null;
+        const signal = signalId ? signalMap.get(signalId) : null;
+
+        return {
+            id: notification._id,
+            title: notification.title,
+            message: notification.message,
+            type: notification.type,
+            isRead: notification.isRead,
+            link: notification.link,
+            notifiedAt: notification.createdAt,
+            signal: signal
+                ? {
+                    id: signal._id,
+                    uniqueId: signal.uniqueId,
+                    webhookId: signal.webhookId,
+                    symbol: signal.symbol,
+                    segment: signal.segment,
+                    category: signal.category,
+                    type: signal.type,
+                    entry: signal.entryPrice,
+                    stoploss: signal.stopLoss,
+                    targets: signal.targets,
+                    status: signal.status,
+                    signalTime: signal.signalTime,
+                    exitPrice: signal.exitPrice,
+                    totalPoints: signal.totalPoints,
+                    exitReason: signal.exitReason,
+                    exitTime: signal.exitTime,
+                    timeframe: signal.timeframe,
+                    createdAt: signal.createdAt,
+                    isFree: signal.isFree
+                }
+                : null
+        };
+    });
+
+    res.send({
+        results,
+        pagination: {
+            page,
+            limit,
+            totalPages: Math.max(Math.ceil(totalResults / limit), 1),
+            totalResults
+        },
+        stats: {
+            totalDeliveries: totalResults,
+            unreadDeliveries,
+            readDeliveries: Math.max(totalResults - unreadDeliveries, 0)
+        }
+    });
 });
 
 const updateUserRole = catchAsync(async (req, res) => {
@@ -475,11 +494,11 @@ export default {
   getUsers,
   createUser,
   getUser,
+  getUserSignalDeliveries,
   updateUser,
   updateUserRole,
   deleteUser,
   blockUser, 
-  updateSignalAccess,
   getSystemHealth,
   broadcastMessage
 };

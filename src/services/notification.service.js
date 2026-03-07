@@ -5,6 +5,19 @@ import { redisSubscriber } from './redis.service.js';
 import Notification from '../models/Notification.js';
 import User from '../models/User.js';
 import Setting from '../models/Setting.js'; // Import Setting model
+import {
+  getSignalAudienceGroups,
+  hasAudienceOverlap,
+  mapPreferredSegmentsToAudienceGroups,
+  mapUserSubscriptionSegmentsToAudienceGroups,
+} from '../utils/signalRouting.js';
+import templates from '../config/notificationTemplates.js';
+import {
+  buildSignalTemplateData,
+  getSignalTemplateKey,
+  renderNotificationTemplate,
+} from '../utils/notificationFormatter.js';
+import { sendToUser } from './websocket.service.js';
 
 const connection = {
   host: config.redis.host,
@@ -12,6 +25,28 @@ const connection = {
 };
 
 const notificationQueue = new Queue('notifications', { connection });
+
+const serializeRealtimeNotification = (notification) => ({
+  _id: notification._id,
+  title: notification.title,
+  message: notification.message,
+  type: notification.type,
+  isRead: notification.isRead,
+  data: notification.data || {},
+  link: notification.link || null,
+  createdAt: notification.createdAt,
+  updatedAt: notification.updatedAt,
+});
+
+const emitRealtimeNotifications = (notificationDocs = []) => {
+  notificationDocs.forEach((notification) => {
+    if (!notification?.user) return;
+    sendToUser(String(notification.user), {
+      type: 'notification:new',
+      payload: serializeRealtimeNotification(notification),
+    });
+  });
+};
 
 class NotificationService {
   constructor() {
@@ -42,25 +77,9 @@ class NotificationService {
 
   async scheduleNotifications(signal) {
       try {
-          const getSignalSegmentGroup = (sig) => {
-              const segment = (sig?.segment || '').toString().trim().toUpperCase();
-              const category = (sig?.category || '').toString().trim().toUpperCase();
-
-              if (category === 'CRYPTO' || segment === 'CRYPTO') return 'CRYPTO';
-              if (['MCX', 'COMMODITY'].includes(segment)) return 'COMMODITY';
-              if (['CDS', 'BCD', 'CURRENCY'].includes(segment)) return 'CURRENCY';
-              if (['NFO', 'FNO', 'FO', 'INDICES'].includes(segment)) return 'FNO';
-              if (['NSE', 'BSE', 'EQ', 'EQUITY'].includes(segment)) return 'EQUITY';
-
-              // Category fallback (options)
-              if (['NIFTY_OPT', 'BANKNIFTY_OPT', 'FINNIFTY_OPT', 'STOCK_OPT'].includes(category)) return 'FNO';
-
-              return null;
-          };
-
           // Fetch Global Notification Settings
           const settings = await Setting.find({ 
-              key: { $in: ['telegram_config', 'whatsapp_config', 'push_config'] } 
+              key: { $in: ['telegram_config', 'whatsapp_config', 'push_config', 'email_config', 'notification_templates'] } 
           });
           const getSetting = (key) => {
               const s = settings.find(s => s.key === key);
@@ -70,21 +89,15 @@ class NotificationService {
           const teleConfig = getSetting('telegram_config');
           const waConfig = getSetting('whatsapp_config');
           const pushConfig = getSetting('push_config');
+          const emailConfig = getSetting('email_config');
+          const activeTemplates = { ...templates, ...(getSetting('notification_templates') || {}) };
 
-          // 1. TELEGRAM BROADCAST (System Level)
-          if (teleConfig && teleConfig.enabled) {
-              await notificationQueue.add('send-telegram-broadcast', {
-                  type: 'telegram',
-                  signal,
-                  userId: 'system' 
-              }, { removeOnComplete: true });
-          }
-
-          // 2. TARGETED NOTIFICATIONS (WhatsApp / Push)
+          // 1. TARGETED NOTIFICATIONS (Telegram / WhatsApp / Push)
           // Find users with Active Subscriptions matching this Segment
           
           // Step A: Find Plans that cover this segment (segment groups derived from plan permissions)
           const { default: Subscription } = await import('../models/Subscription.js');
+          const { default: UserSubscription } = await import('../models/UserSubscription.js');
           const { default: authService } = await import('./auth.service.js');
 
           // Find active subscriptions
@@ -94,10 +107,15 @@ class NotificationService {
               endDate: { $gt: now }
           }).populate('plan');
 
-          const signalSegmentGroup = getSignalSegmentGroup(signal);
+          const activeSegmentSubs = await UserSubscription.find({
+              status: 'active',
+              is_active: true,
+              end_date: { $gt: now }
+          }).select('user_id segments');
+          const signalAudienceGroups = getSignalAudienceGroups(signal);
 
           // Filter for segment match
-          const eligibleUserIds = new Set();
+          const candidateUserIds = new Set();
           
           activeSubs.forEach(sub => {
               if (sub.plan && sub.user) {
@@ -109,28 +127,70 @@ class NotificationService {
                       ? planSegmentsFromPerms
                       : (sub.plan.segment ? [sub.plan.segment] : []);
 
-                  // Segment group match (preferred)
-                  if (signalSegmentGroup && planSegmentGroups.includes(signalSegmentGroup)) {
-                      eligibleUserIds.add(sub.user.toString());
-                  }
-
-                  // Fallback: if group not detected, fall back to exact match
-                  if (!signalSegmentGroup && sub.plan.segment && sub.plan.segment === signal.segment) {
-                      eligibleUserIds.add(sub.user.toString());
+                  if (
+                      signalAudienceGroups.length === 0 ||
+                      hasAudienceOverlap(planSegmentGroups, signalAudienceGroups)
+                  ) {
+                      candidateUserIds.add(sub.user.toString());
                   }
               }
           });
 
-          // Also include the Creator for verification (if not already included)
-          if (signal.createdBy) eligibleUserIds.add(signal.createdBy.toString());
+          activeSegmentSubs.forEach((sub) => {
+              if (!sub.user_id) return;
+              const subscriptionGroups = mapUserSubscriptionSegmentsToAudienceGroups(sub.segments);
+              if (
+                  signalAudienceGroups.length === 0 ||
+                  hasAudienceOverlap(subscriptionGroups, signalAudienceGroups)
+              ) {
+                  candidateUserIds.add(sub.user_id.toString());
+              }
+          });
 
-          logger.info(`Found ${eligibleUserIds.size} eligible users for Signal ${signal.symbol}`);
+          // Also include the Creator for verification (if not already included)
+          const createdById = signal.createdBy ? signal.createdBy.toString() : null;
+          if (createdById) candidateUserIds.add(createdById);
+
+          const candidateIds = Array.from(candidateUserIds);
+          const users = candidateIds.length > 0
+              ? await User.find({
+                    _id: { $in: candidateIds },
+                    status: 'Active'
+                }).select('_id name email fcmTokens phone phoneNumber preferredSegments isNotificationEnabled isWhatsAppEnabled isEmailAlertEnabled telegramChatId telegramUsername')
+              : [];
+
+          const eligibleUsers = users.filter((user) => {
+              if (createdById && user._id.toString() === createdById) return true;
+              if (signalAudienceGroups.length === 0) return true;
+
+              const preferredGroups = mapPreferredSegmentsToAudienceGroups(user.preferredSegments);
+              if (preferredGroups.length === 0) return true;
+
+              return hasAudienceOverlap(preferredGroups, signalAudienceGroups);
+          });
+
+          const emailEnabled = emailConfig ? emailConfig.enabled !== false : true;
+
+          logger.info(`Found ${eligibleUsers.length} eligible users for Signal ${signal.symbol}`);
 
           // Step B: Schedule Jobs for each user
-          const promises = Array.from(eligibleUserIds).map(userId => {
+          const promises = eligibleUsers.map((user) => {
               const jobs = [];
+              const userId = user._id.toString();
 
-              if (pushConfig && pushConfig.enabled) {
+              if (
+                  (teleConfig ? teleConfig.enabled !== false : Boolean(process.env.TELEGRAM_BOT_TOKEN)) &&
+                  user.isNotificationEnabled !== false &&
+                  user.telegramChatId
+              ) {
+                  jobs.push(notificationQueue.add('send-telegram', {
+                      type: 'telegram',
+                      userId,
+                      signal
+                  }, { removeOnComplete: true }));
+              }
+
+              if (pushConfig && pushConfig.enabled && user.isNotificationEnabled !== false) {
                   jobs.push(notificationQueue.add('send-push', {
                       type: 'push',
                       userId,
@@ -138,10 +198,24 @@ class NotificationService {
                   }, { removeOnComplete: true }));
               }
 
-              if (waConfig && waConfig.enabled) {
+              if (
+                  waConfig &&
+                  waConfig.enabled &&
+                  user.isWhatsAppEnabled !== false &&
+                  (user.phoneNumber || user.phone)
+              ) {
                   jobs.push(notificationQueue.add('send-whatsapp', {
                       type: 'whatsapp',
                       userId,
+                      signal
+                  }, { removeOnComplete: true }));
+              }
+
+              if (emailEnabled && user.isEmailAlertEnabled !== false && user.email) {
+                  jobs.push(notificationQueue.add('send-email-signal', {
+                      type: 'email',
+                      userId,
+                      email: user.email,
                       signal
                   }, { removeOnComplete: true }));
               }
@@ -154,27 +228,30 @@ class NotificationService {
 
           // Step C: Create In-App Notifications (DB)
           // In-app notifications should not depend on push settings.
-          const tpDetails = [
-              signal.targets?.target1 ? `TP1: ${signal.targets.target1}` : null,
-              signal.targets?.target2 ? `TP2: ${signal.targets.target2}` : null,
-              signal.targets?.target3 ? `TP3: ${signal.targets.target3}` : null
-          ].filter(t => t).join(' | ');
+          const signalTemplateKey = getSignalTemplateKey(signal);
+          const signalTemplateData = buildSignalTemplateData(signal);
+          const renderedSignalNotification = renderNotificationTemplate(
+              activeTemplates,
+              signalTemplateKey,
+              signalTemplateData
+          );
 
-          const notificationDocs = Array.from(eligibleUserIds).map(userId => ({
-              user: userId,
-              title: `New Signal: ${signal.symbol}`,
-              message: `Action: ${signal.type} | Entry: ${signal.entryPrice}\n${tpDetails}\nSL: ${signal.stopLoss}`,
+          const notificationDocs = eligibleUsers.map((user) => ({
+              user: user._id,
+              title: renderedSignalNotification.title,
+              message: renderedSignalNotification.body,
               type: 'SIGNAL',
               data: { signalId: signal._id },
               link: `/signals` 
           }));
 
           if (notificationDocs.length > 0) {
-              await Notification.insertMany(notificationDocs);
+              const createdNotifications = await Notification.insertMany(notificationDocs);
+              emitRealtimeNotifications(createdNotifications);
           }
 
 
-          logger.info(`Scheduled notifications for Signal ${signal._id} to ${eligibleUserIds.size} users`);
+          logger.info(`Scheduled notifications for Signal ${signal._id} to ${eligibleUsers.length} users`);
 
       } catch (error) {
           logger.error('Failed to schedule notifications', error);
@@ -284,7 +361,8 @@ class NotificationService {
           }));
 
           if (notificationDocs.length > 0) {
-              await Notification.insertMany(notificationDocs);
+              const createdNotifications = await Notification.insertMany(notificationDocs);
+              emitRealtimeNotifications(createdNotifications);
           }
 
           logger.info(`Broadcasted announcement ${announcement._id} to ${users.length} potential users`);
@@ -338,7 +416,7 @@ class NotificationService {
           }, { removeOnComplete: true });
 
           // 3. Create In-App Notification
-          await Notification.create({
+          const notification = await Notification.create({
               user: user._id,
               title: '⏰ Subscription Expiring Soon',
               message: `Your ${planName} plan expires in ${daysLeft} days. Renew now!`,
@@ -346,6 +424,7 @@ class NotificationService {
               data: { subscriptionId: subscription._id },
               link: '/subscription'
           });
+          emitRealtimeNotifications([notification]);
 
           logger.info(`Pre-expiry reminder sent to user ${user._id} for subscription ${subscription._id}`);
 
@@ -393,7 +472,7 @@ class NotificationService {
           }, { removeOnComplete: true });
 
           // 3. Create In-App Notification
-          await Notification.create({
+          const notification = await Notification.create({
               user: user._id,
               title: '🔒 Subscription Expired',
               message: `Your ${planName} plan has expired. Renew to regain access.`,
@@ -401,6 +480,7 @@ class NotificationService {
               data: { subscriptionId: subscription._id },
               link: '/subscription'
           });
+          emitRealtimeNotifications([notification]);
 
           logger.info(`Expiry notification sent to user ${user._id} for subscription ${subscription._id}`);
 
@@ -496,7 +576,7 @@ class NotificationService {
                   }, { removeOnComplete: true });
 
                   // 2. Create In-App Notification
-                  await Notification.create({
+                  const notification = await Notification.create({
                       user: user._id,
                       title,
                       message,
@@ -504,6 +584,7 @@ class NotificationService {
                       data: notificationData,
                       link: '/announcements/calendar'
                   });
+                  emitRealtimeNotifications([notification]);
 
               } catch (userError) {
                   logger.error(`Failed to send alert to user ${user._id}:`, userError.message);

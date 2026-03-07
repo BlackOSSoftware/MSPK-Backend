@@ -8,6 +8,17 @@ import pipeline from '../utils/pipeline/DataPipeline.js';
 let wss;
 const rooms = new Map(); // Map<string, Set<WebSocket>>
 
+const normalizeWsToken = (value) => {
+  const token = String(value || '')
+    .trim()
+    .replace(/^Bearer\s+/i, '')
+    .replace(/^"+|"+$/g, '');
+
+  if (!token) return '';
+  if (['null', 'undefined'].includes(token.toLowerCase())) return '';
+  return token;
+};
+
 const initWebSocket = (server) => {
   wss = new WebSocketServer({ server });
 
@@ -16,7 +27,7 @@ const initWebSocket = (server) => {
 
     // Handle authentication
     const url = new URL(req.url, `http://${req.headers.host}`);
-    const token = url.searchParams.get('token');
+    const token = normalizeWsToken(url.searchParams.get('token'));
 
     if (token) {
       jwt.verify(token, config.jwt.secret, async (err, decoded) => {
@@ -74,6 +85,8 @@ const initWebSocket = (server) => {
           logger.error('WS: Plan logic error during connection:', authErr.message);
         }
       });
+    } else {
+      logger.debug('WebSocket connection opened without auth token');
     }
 
     ws.isAlive = true;
@@ -251,6 +264,25 @@ const broadcastToAll = (data) => {
   });
 };
 
+const broadcastToRoles = (roles = [], data) => {
+  if (!wss) return;
+
+  const allowedRoles = new Set(
+    (Array.isArray(roles) ? roles : [roles])
+      .map((role) => String(role || '').trim().toLowerCase())
+      .filter(Boolean)
+  );
+  if (allowedRoles.size === 0) return;
+
+  const message = JSON.stringify(data);
+  wss.clients.forEach((client) => {
+    const clientRole = String(client?.decoded?.role || '').trim().toLowerCase();
+    if (client.readyState === WebSocket.OPEN && allowedRoles.has(clientRole)) {
+      client.send(message);
+    }
+  });
+};
+
 const getWss = () => {
   if (!wss) {
     throw new Error('WebSocket Server not initialized!');
@@ -284,6 +316,7 @@ export {
   getWss,
   broadcastToRoom,
   broadcastToAll,
+  broadcastToRoles,
   broadcastLog,
   sendToUser
 };

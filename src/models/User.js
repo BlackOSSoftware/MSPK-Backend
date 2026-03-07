@@ -63,12 +63,6 @@ const userSchema = new mongoose.Schema(
         enum: ['Active', 'Inactive', 'Suspended', 'Blocked'], // Updated to support new actions
         default: 'Active'
     },
-    // Signal Access Overrides
-    signalAccess: [{
-        category: { type: String, required: true }, // e.g. 'NIFTY_OPT', 'BANKNIFTY_OPT', 'STOCKS_INTRA', 'COMMODITY', 'FOREX'
-        access: { type: Boolean, default: true },
-        expiry: { type: Date }
-    }],
     // Trading Stats (Mock/Snapshot)
     clientId: { type: String, unique: true, sparse: true }, // e.g. MS-1001
     equity: { type: Number, default: 0 },
@@ -88,6 +82,10 @@ const userSchema = new mongoose.Schema(
       default: true,
     },
     isNotificationEnabled: {
+      type: Boolean,
+      default: true,
+    },
+    isEmailAlertEnabled: {
       type: Boolean,
       default: true,
     },
@@ -115,6 +113,33 @@ const userSchema = new mongoose.Schema(
     currentDeviceId: {
       type: String,
       default: null
+    },
+    telegramChatId: {
+      type: String,
+      trim: true,
+      unique: true,
+      sparse: true,
+      default: null,
+    },
+    telegramUsername: {
+      type: String,
+      trim: true,
+      default: null,
+    },
+    telegramConnectedAt: {
+      type: Date,
+      default: null,
+    },
+    telegramLinkToken: {
+      type: String,
+      trim: true,
+      unique: true,
+      sparse: true,
+      default: null,
+    },
+    telegramLinkTokenExpiresAt: {
+      type: Date,
+      default: null,
     },
     marketWatchlist: {
       type: [String],

@@ -42,4 +42,11 @@ export default {
     apiSecret: process.env.UPSTOX_API_SECRET,
     redirectUri: process.env.UPSTOX_REDIRECT_URI || 'http://localhost:3000/market/login/upstox',
   },
+  telegram: {
+    botToken: process.env.TELEGRAM_BOT_TOKEN || '',
+    botUsername: process.env.TELEGRAM_BOT_USERNAME || '',
+    channelId: process.env.TELEGRAM_CHANNEL_ID || '',
+    webhookBaseUrl: process.env.TELEGRAM_WEBHOOK_BASE_URL || '',
+    webhookSecret: process.env.TELEGRAM_WEBHOOK_SECRET || '',
+  },
 };

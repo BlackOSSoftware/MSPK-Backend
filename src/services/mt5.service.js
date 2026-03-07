@@ -3,6 +3,7 @@ import logger from '../config/log.js';
 
 const RECONNECT_BASE_MS = 3000;
 const RECONNECT_MAX_MS = 30000;
+const DEFAULT_CONNECT_TIMEOUT_MS = 8000;
 
 const toArray = (value) => {
     if (Array.isArray(value)) return value;
@@ -16,6 +17,7 @@ class Mt5Service {
         this.url = null;
         this.apiKey = '';
         this.intervalMs = 300;
+        this.connectTimeoutMs = DEFAULT_CONNECT_TIMEOUT_MS;
 
         this.marketDataService = null;
 
@@ -26,6 +28,16 @@ class Mt5Service {
         this._reconnectTimer = null;
         this._reconnectAttempt = 0;
         this._manualClose = false;
+        this._connectTimer = null;
+
+        this.lastConnectAttemptAt = null;
+        this.lastConnectedAt = null;
+        this.lastMessageAt = null;
+        this.lastDisconnectAt = null;
+        this.lastDisconnectCode = null;
+        this.lastDisconnectReason = '';
+        this.lastError = '';
+        this.lastControlError = '';
     }
 
     get subscriptionCount() {
@@ -51,6 +63,13 @@ class Mt5Service {
 
         const parsedInterval = Number.parseInt(options.intervalMs, 10);
         this.intervalMs = Number.isFinite(parsedInterval) && parsedInterval >= 0 ? parsedInterval : 300;
+        const parsedTimeout = Number.parseInt(
+            options.connectTimeoutMs ?? process.env.MARKET_DATA_CONNECT_TIMEOUT_MS,
+            10
+        );
+        this.connectTimeoutMs = Number.isFinite(parsedTimeout) && parsedTimeout >= 1000
+            ? parsedTimeout
+            : DEFAULT_CONNECT_TIMEOUT_MS;
 
         if (options.marketDataService) {
             this.marketDataService = options.marketDataService;
@@ -78,6 +97,8 @@ class Mt5Service {
             this._reconnectTimer = null;
         }
 
+        this._clearConnectTimer();
+
         try {
             this.ws?.close();
         } catch (error) {
@@ -101,45 +122,78 @@ class Mt5Service {
         if (!this.url || this._manualClose || this._isConnecting) return;
 
         this._isConnecting = true;
+        this.lastConnectAttemptAt = new Date();
+        this.lastError = '';
+        this.lastDisconnectReason = '';
+        this.lastDisconnectCode = null;
 
         try {
             const wsUrl = this._buildConnectionUrl();
-            this.ws = new WebSocket(wsUrl);
+            const headers = this.apiKey ? { 'x-api-key': this.apiKey } : undefined;
+            this.ws = new WebSocket(wsUrl, {
+                handshakeTimeout: this.connectTimeoutMs,
+                headers,
+            });
+
+            this._connectTimer = setTimeout(() => {
+                if (this.ws && this.ws.readyState !== WebSocket.OPEN) {
+                    this.lastError = `connect_timeout_${this.connectTimeoutMs}ms`;
+                    logger.error(`[MARKET_DATA_WS] Connection timeout after ${this.connectTimeoutMs}ms`);
+                    try {
+                        this.ws.terminate();
+                    } catch (error) {
+                        logger.debug(`[MARKET_DATA_WS] Terminate after timeout failed: ${error.message}`);
+                    }
+                }
+            }, this.connectTimeoutMs + 250);
 
             this.ws.on('open', () => {
+                this._clearConnectTimer();
                 this._isConnecting = false;
                 this.isConnected = true;
                 this._reconnectAttempt = 0;
+                this.lastConnectedAt = new Date();
+                this.lastError = '';
 
                 logger.info('[MARKET_DATA_WS] Connected');
 
                 this._send({ action: 'set_interval', interval_ms: this.intervalMs });
                 this._send({ action: 'set_symbols', symbols: Array.from(this.subscriptions) });
+                this._send({ action: 'get_state' });
             });
 
             this.ws.on('message', (rawData) => {
+                this.lastMessageAt = new Date();
                 this._handleMessage(rawData);
             });
 
             this.ws.on('close', (code, reasonBuffer) => {
                 const reason = reasonBuffer ? reasonBuffer.toString() : '';
+                this._clearConnectTimer();
                 this.isConnected = false;
                 this._isConnecting = false;
+                this.lastDisconnectAt = new Date();
+                this.lastDisconnectCode = code;
+                this.lastDisconnectReason = reason || this.lastError || '';
 
                 logger.warn(`[MARKET_DATA_WS] Disconnected (code=${code}${reason ? `, reason=${reason}` : ''})`);
                 this._scheduleReconnect();
             });
 
             this.ws.on('error', (error) => {
+                this._clearConnectTimer();
                 this.isConnected = false;
                 this._isConnecting = false;
+                this.lastError = error.message;
 
                 logger.error(`[MARKET_DATA_WS] Error: ${error.message}`);
                 this._scheduleReconnect();
             });
         } catch (error) {
+            this._clearConnectTimer();
             this.isConnected = false;
             this._isConnecting = false;
+            this.lastError = error.message;
 
             logger.error(`[MARKET_DATA_WS] Connection failed: ${error.message}`);
             this._scheduleReconnect();
@@ -151,8 +205,13 @@ class Mt5Service {
             const message = JSON.parse(rawData.toString());
 
             if (message?.type === 'control_error') {
+                this.lastControlError = `${message.error || 'unknown_error'} ${message.message || ''}`.trim();
                 logger.warn(`[MARKET_DATA_WS] Control error: ${message.error || 'unknown_error'} ${message.message || ''}`.trim());
                 return;
+            }
+
+            if (message?.type === 'subscription_state' || message?.type === 'subscription_updated' || message?.type === 'interval_updated') {
+                this.lastControlError = '';
             }
 
             if (message?.type !== 'market_data' || !Array.isArray(message.data)) {
@@ -226,6 +285,13 @@ class Mt5Service {
         }
     }
 
+    _clearConnectTimer() {
+        if (this._connectTimer) {
+            clearTimeout(this._connectTimer);
+            this._connectTimer = null;
+        }
+    }
+
     _scheduleReconnect() {
         if (this._manualClose || this._reconnectTimer) return;
 
@@ -290,6 +356,25 @@ class Mt5Service {
         if (this.isConnected) {
             this._send({ action: 'set_interval', interval_ms: parsed });
         }
+    }
+
+    getDiagnostics() {
+        return {
+            url: this.url || null,
+            isConnecting: this._isConnecting,
+            isConnected: this.isConnected,
+            subscriptionCount: this.subscriptionCount,
+            reconnectAttempt: this._reconnectAttempt,
+            connectTimeoutMs: this.connectTimeoutMs,
+            lastConnectAttemptAt: this.lastConnectAttemptAt,
+            lastConnectedAt: this.lastConnectedAt,
+            lastMessageAt: this.lastMessageAt,
+            lastDisconnectAt: this.lastDisconnectAt,
+            lastDisconnectCode: this.lastDisconnectCode,
+            lastDisconnectReason: this.lastDisconnectReason || null,
+            lastError: this.lastError || null,
+            lastControlError: this.lastControlError || null,
+        };
     }
 }
 

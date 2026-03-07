@@ -3,6 +3,93 @@ import catchAsync from '../utils/catchAsync.js';
 import ApiError from '../utils/ApiError.js';
 import { signalService, technicalAnalysisService, marketDataService } from '../services/index.js';
 
+const toFiniteNumber = (value) => {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string') {
+    const normalized = value.replace(/,/g, '').trim();
+    if (!normalized) return undefined;
+    const parsed = Number(normalized);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return undefined;
+};
+
+const roundSignalValue = (value) => Math.round(value * 100) / 100;
+const CLOSED_SIGNAL_STATUSES = ['Closed', 'Target Hit', 'Partial Profit Book', 'Stoploss Hit'];
+
+const getResolvedSignalExitPrice = (signal) => {
+  const exitPrice = toFiniteNumber(signal?.exitPrice);
+  const stopLoss = toFiniteNumber(signal?.stopLoss);
+  const entryPrice = toFiniteNumber(signal?.entryPrice);
+  const status = String(signal?.status || '').trim().toLowerCase();
+
+  if (typeof exitPrice !== 'number') {
+    if (status.includes('stop') && typeof stopLoss === 'number') return stopLoss;
+    return undefined;
+  }
+
+  if (status.includes('stop') && typeof stopLoss === 'number' && typeof entryPrice === 'number') {
+    const derivedFromExit = Math.abs(exitPrice - entryPrice);
+    const derivedFromStop = Math.abs(stopLoss - entryPrice);
+    const maxReasonableMove = Math.max(10, derivedFromStop * 5);
+
+    if (derivedFromStop > 0 && derivedFromExit > maxReasonableMove) {
+      return stopLoss;
+    }
+  }
+
+  return exitPrice;
+};
+
+const getResolvedSignalPoints = (signal) => {
+  const storedPoints = toFiniteNumber(signal?.totalPoints);
+  const entryPrice = toFiniteNumber(signal?.entryPrice);
+  const exitPrice = getResolvedSignalExitPrice(signal);
+  const signalType = String(signal?.type || 'BUY').toUpperCase();
+
+  if (
+    typeof storedPoints === 'number' &&
+    (Math.abs(storedPoints) > 0 || typeof entryPrice !== 'number' || typeof exitPrice !== 'number')
+  ) {
+    return roundSignalValue(storedPoints);
+  }
+
+  if (typeof entryPrice === 'number' && typeof exitPrice === 'number') {
+    const derivedPoints = signalType === 'SELL' ? entryPrice - exitPrice : exitPrice - entryPrice;
+    return roundSignalValue(derivedPoints);
+  }
+
+  if (typeof storedPoints === 'number') return roundSignalValue(storedPoints);
+  return undefined;
+};
+
+const formatSignalResponse = (signal) => ({
+  id: signal._id,
+  uniqueId: signal.uniqueId,
+  webhookId: signal.webhookId,
+  symbol: signal.symbol,
+  type: signal.type,
+  entry: signal.entryPrice,
+  stoploss: signal.stopLoss,
+  status: signal.status,
+  timestamp: signal.createdAt,
+  createdAt: signal.createdAt,
+  signalTime: signal.signalTime,
+  exitPrice: getResolvedSignalExitPrice(signal),
+  totalPoints: getResolvedSignalPoints(signal),
+  exitReason: signal.exitReason,
+  exitTime: signal.exitTime,
+  segment: signal.segment,
+  category: signal.category,
+  targets: signal.targets,
+  isFree: signal.isFree,
+  notes: signal.notes,
+  strategyId: signal.strategyId,
+  strategyName: signal.strategyName,
+  timeframe: signal.timeframe,
+  metrics: signal.metrics,
+});
+
 const getAllowedAccessFromPermissions = (permissions = []) => {
   const perms = Array.isArray(permissions) ? permissions : [];
   const allowedSegments = [];
@@ -156,7 +243,7 @@ const getSignal = catchAsync(async (req, res) => {
   const access = await getSignalAccessContext(req);
   assertSignalAccess(access, signal);
 
-  res.send(signal);
+  res.send(formatSignalResponse(signal));
 });
 
 const createManualSignal = catchAsync(async (req, res) => {
@@ -224,9 +311,9 @@ const getSignals = catchAsync(async (req, res) => {
 
   if (status && status !== 'All') {
       if (status === '!Closed') {
-          conditions.push({ status: { $ne: 'Closed' } });
+          conditions.push({ status: { $nin: CLOSED_SIGNAL_STATUSES } });
       } else if (status === 'History') {
-          conditions.push({ status: { $in: ['Closed', 'Target Hit', 'Stoploss Hit'] } });
+          conditions.push({ status: { $in: CLOSED_SIGNAL_STATUSES } });
       } else {
           conditions.push({ status: status });
       }
@@ -257,32 +344,7 @@ const getSignals = catchAsync(async (req, res) => {
   // 4. Get Visible Stats (based on access scope)
   const stats = await signalService.getSignalStats(baseFilter);
 
-  const formattedResults = signalsData.results.map(s => ({
-      id: s._id,
-      uniqueId: s.uniqueId,
-      webhookId: s.webhookId,
-      symbol: s.symbol,
-      type: s.type,
-      entry: s.entryPrice,
-      stoploss: s.stopLoss,
-      status: s.status,
-      timestamp: s.createdAt,
-      createdAt: s.createdAt,
-      signalTime: s.signalTime,
-      exitPrice: s.exitPrice,
-      totalPoints: s.totalPoints,
-      exitReason: s.exitReason,
-      exitTime: s.exitTime,
-      segment: s.segment,
-      category: s.category,
-      targets: s.targets,
-      isFree: s.isFree,
-      notes: s.notes,
-      strategyId: s.strategyId,
-      strategyName: s.strategyName,
-      timeframe: s.timeframe,
-      metrics: s.metrics
-  }));
+  const formattedResults = signalsData.results.map((signal) => formatSignalResponse(signal));
 
   res.send({
       access: {

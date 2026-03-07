@@ -5,6 +5,7 @@ import morgan from 'morgan';
 import { metricsMiddleware } from './middleware/metrics.js';
 import config from './config/config.js';
 import routes from './routes/index.js';
+import webhookRoute from './routes/webhook.route.js';
 
 const app = express();
 
@@ -15,6 +16,10 @@ app.use(cors({
 }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+app.use(
+  ['/webhook', '/webhooks', '/v1/webhook', '/v1/webhooks'],
+  express.text({ type: ['text/plain', 'text/*'] })
+);
 app.use('/uploads', express.static('uploads')); // Serve uploaded files
 // app.use(helmet()); // Temporarily disabled to debug 308 Redirects
 // app.use(cors()); // Moved to top
@@ -27,6 +32,8 @@ if (config.env === 'development') {
 // Direct Route for Fyers Login Callback to match User's App Config (No /v1)
 import marketController from './controllers/market.controller.js';
 app.get('/market/login/fyers', marketController.handleLoginCallback);
+app.use('/webhook', webhookRoute);
+app.use('/webhooks', webhookRoute);
 
 app.use(metricsMiddleware);
 

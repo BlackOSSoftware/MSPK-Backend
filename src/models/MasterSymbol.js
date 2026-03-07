@@ -8,6 +8,12 @@ const masterSymbolSchema = new mongoose.Schema(
       unique: true,
       uppercase: true, // e.g., "NIFTY 50", "RELIANCE"
     },
+    symbolId: {
+      type: String,
+      unique: true,
+      sparse: true,
+      trim: true,
+    },
     name: {
         type: String,
         required: true, // e.g., "Nifty 50 Index"

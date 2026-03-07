@@ -58,7 +58,7 @@ const signalSchema = new mongoose.Schema(
     },
     status: {
       type: String,
-      enum: ['Active', 'Target Hit', 'Stoploss Hit', 'Closed'], // Matched Frontend Mock
+      enum: ['Active', 'Target Hit', 'Partial Profit Book', 'Stoploss Hit', 'Closed'],
       default: 'Active',
     },
     isFree: {

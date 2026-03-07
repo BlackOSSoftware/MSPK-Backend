@@ -131,6 +131,10 @@ const defaultRoutes = [
       route: metricsRoute
   },
   {
+    path: '/webhook',
+    route: webhookRoute,
+  },
+  {
     path: '/webhooks',
     route: webhookRoute,
   }

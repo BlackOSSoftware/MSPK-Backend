@@ -16,6 +16,7 @@ router.delete('/segments/:id', marketController.deleteSegment);
 // Symbols
 router.get('/symbols', marketController.getSymbols);
 router.post('/symbols', marketController.createSymbol);
+router.post('/symbols/:id/generate-id', marketController.generateSymbolId);
 router.patch('/symbols/:id', marketController.updateSymbol);
 router.delete('/symbols/:id', marketController.deleteSymbol);
 

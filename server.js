@@ -10,6 +10,7 @@ import marketDataService from './src/services/marketData.service.js';
 import subscriptionCron from './src/jobs/subscriptionCron.js';
 import { economicService } from './src/services/economic.service.js';
 import './src/workers/notification.worker.js'; // Start Notification Worker
+import telegramService from './src/services/channels/telegram.service.js';
 
 // The 'kiteconnect' library aggressively calls process.exit(1) on connection failures.
 // We intercept this to prevent the entire server from crashing due to a localized ticker error.
@@ -59,6 +60,7 @@ const startServer = async () => {
     const server = app.listen(config.port, '0.0.0.0', () => {
       logger.info(`Server running in ${config.env} mode on port ${config.port}`);
     });
+    telegramService.ensureTelegramWebhook();
 
     // 4. Initialize Background Services
     marketDataService.init(); 
