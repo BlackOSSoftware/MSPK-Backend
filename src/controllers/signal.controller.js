@@ -1,7 +1,14 @@
 import httpStatus from 'http-status';
 import catchAsync from '../utils/catchAsync.js';
 import ApiError from '../utils/ApiError.js';
+import MasterSymbol from '../models/MasterSymbol.js';
 import { signalService, technicalAnalysisService, marketDataService } from '../services/index.js';
+import {
+  buildSelectedSignalFilter,
+  buildSelectedSymbolDocsMap,
+  getUserSelectedSymbols,
+  hasSelectedSignalSymbol,
+} from '../utils/userSignalSelection.js';
 
 const toFiniteNumber = (value) => {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
@@ -141,6 +148,8 @@ const getSignalAccessContext = async (req) => {
       permissions: [],
       allowedSegments: [],
       allowedCategories: [],
+      selectedSymbols: [],
+      selectedSymbolCount: 0,
       scope: 'free_only',
       message: 'Guest mode: only free signals are visible. Login to view premium signals.'
     };
@@ -156,6 +165,8 @@ const getSignalAccessContext = async (req) => {
       permissions: [],
       allowedSegments: [],
       allowedCategories: [],
+      selectedSymbols: [],
+      selectedSymbolCount: 0,
       scope: 'all',
       message: null
     };
@@ -173,6 +184,15 @@ const getSignalAccessContext = async (req) => {
 
   const { allowedSegments, allowedCategories } =
     planStatus === 'active' ? getAllowedAccessFromPermissions(permissions) : { allowedSegments: [], allowedCategories: [] };
+  const rawSelectedSymbols = getUserSelectedSymbols(req.user);
+  const selectedSymbolDocs = rawSelectedSymbols.length > 0
+    ? await MasterSymbol.find({ symbol: { $in: rawSelectedSymbols } }).select('symbol segment exchange').lean()
+    : [];
+  const selectedSymbols = getUserSelectedSymbols(req.user, buildSelectedSymbolDocsMap(selectedSymbolDocs));
+  const requiresSelection = planStatus === 'active';
+  const selectionMessage = requiresSelection && selectedSymbols.length === 0
+    ? 'Select scripts in your watchlist to receive signals. Signals are unlimited for selected scripts, but you can add only 10 scripts per segment.'
+    : null;
 
   return {
     mode: 'user',
@@ -183,33 +203,47 @@ const getSignalAccessContext = async (req) => {
     permissions,
     allowedSegments,
     allowedCategories,
+    selectedSymbols,
+    selectedSymbolCount: selectedSymbols.length,
     scope: allowedSegments.length > 0 || allowedCategories.length > 0 ? 'free_and_subscribed' : 'free_only',
     message:
       planStatus === 'active'
-        ? null
+        ? selectionMessage
         : 'Plan expired: only free signals are visible. Renew to view premium signals.'
   };
 };
 
 const buildBaseFilterForAccess = (access) => {
   if (access.mode === 'admin') return {};
-  if (!access.allowedSegments?.length && !access.allowedCategories?.length) return { isFree: true };
 
-  return {
-    $or: [
-      { isFree: true },
-      {
+  const selectedSymbolFilter =
+    access.mode === 'user' ? buildSelectedSignalFilter(access.selectedSymbols) : null;
+  let accessFilter = !access.allowedSegments?.length && !access.allowedCategories?.length
+    ? { isFree: true }
+    : {
         $or: [
-          { segment: { $in: access.allowedSegments } },
-          { category: { $in: access.allowedCategories } }
+          { isFree: true },
+          {
+            $or: [
+              { segment: { $in: access.allowedSegments } },
+              { category: { $in: access.allowedCategories } }
+            ]
+          }
         ]
-      }
-    ]
-  };
+      };
+
+  if (selectedSymbolFilter) {
+    accessFilter = { $and: [accessFilter, selectedSymbolFilter] };
+  }
+
+  return accessFilter;
 };
 
 const assertSignalAccess = (access, signal) => {
   if (access.mode === 'admin') return;
+  if (access.mode === 'user' && !hasSelectedSignalSymbol(access.selectedSymbols, signal.symbol)) {
+    throw new ApiError(httpStatus.FORBIDDEN, 'You only receive signals for scripts selected in your watchlist.');
+  }
   if (signal.isFree) return;
 
   if (access.mode === 'guest') {
@@ -350,11 +384,12 @@ const getSignals = catchAsync(async (req, res) => {
       access: {
           mode: access.mode,
           scope: access.scope,
-          tokenProvided: access.tokenProvided,
-          planStatus: access.planStatus,
-          planName: access.planName,
-          planExpiry: access.planExpiry,
-          message: access.message
+      tokenProvided: access.tokenProvided,
+      planStatus: access.planStatus,
+      planName: access.planName,
+      planExpiry: access.planExpiry,
+      selectedSymbolCount: access.selectedSymbolCount,
+      message: access.message
       },
       results: formattedResults,
       pagination: {

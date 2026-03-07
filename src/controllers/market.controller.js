@@ -1,11 +1,18 @@
 import httpStatus from 'http-status';
 import mongoose from 'mongoose';
 import catchAsync from '../utils/catchAsync.js';
+import ApiError from '../utils/ApiError.js';
 import MasterSegment from '../models/MasterSegment.js';
 import MasterSymbol from '../models/MasterSymbol.js';
 import config from '../config/config.js';
 import logger from '../config/log.js';
 import { buildMasterSymbolId } from '../utils/masterSymbolId.js';
+import {
+    MAX_SELECTED_SYMBOLS_PER_SEGMENT,
+    buildSelectedSymbolDocsMap,
+    limitSelectedSymbolsPerSegment,
+    normalizeSelectedSymbols,
+} from '../utils/userSignalSelection.js';
 
 // Seed Data (Standard Set)
 import marketDataService from '../services/marketData.service.js';
@@ -178,6 +185,28 @@ const enrichMarketSymbols = (symbols) => {
     });
 };
 
+const getEnforcedUserWatchlist = async (user) => {
+    const normalizedSymbols = normalizeSelectedSymbols(user?.marketWatchlist);
+    if (normalizedSymbols.length === 0) {
+        return {
+            normalizedSymbols,
+            enforcedSymbols: [],
+        };
+    }
+
+    const symbolDocs = await MasterSymbol.find({ symbol: { $in: normalizedSymbols } })
+        .select('symbol segment exchange')
+        .lean();
+
+    return {
+        normalizedSymbols,
+        enforcedSymbols: limitSelectedSymbolsPerSegment(
+            normalizedSymbols,
+            buildSelectedSymbolDocsMap(symbolDocs),
+            MAX_SELECTED_SYMBOLS_PER_SEGMENT
+        ),
+    };
+};
 
 // Get Subscription-Based Tickers (Watchlist)
 const getTickers = catchAsync(async (req, res) => {
@@ -247,9 +276,13 @@ const getTickers = catchAsync(async (req, res) => {
 // Get User Market Watchlist (Symbols)
 const getUserWatchlist = catchAsync(async (req, res) => {
     const user = req.user;
-    const symbols = Array.isArray(user.marketWatchlist)
-        ? user.marketWatchlist.map(sym => String(sym).trim().toUpperCase())
-        : [];
+    const { normalizedSymbols, enforcedSymbols } = await getEnforcedUserWatchlist(user);
+    const symbols = enforcedSymbols;
+
+    if (normalizedSymbols.length !== enforcedSymbols.length) {
+        user.marketWatchlist = enforcedSymbols;
+        await user.save();
+    }
 
     if (symbols.length === 0) {
         return res.send([]);
@@ -282,20 +315,44 @@ const getUserWatchlist = catchAsync(async (req, res) => {
 const addUserWatchlist = catchAsync(async (req, res) => {
     const { symbol } = req.body;
     if (!symbol) {
-        res.status(400);
-        throw new Error('Symbol is required');
+        throw new ApiError(httpStatus.BAD_REQUEST, 'Symbol is required');
     }
 
     const normalized = String(symbol).trim().toUpperCase();
     const symbolDoc = await MasterSymbol.findOne({ symbol: normalized });
     if (!symbolDoc) {
-        res.status(400);
-        throw new Error('Symbol not found');
+        throw new ApiError(httpStatus.BAD_REQUEST, 'Symbol not found');
     }
 
     const user = req.user;
-    const list = Array.isArray(user.marketWatchlist) ? user.marketWatchlist : [];
-    if (!list.includes(normalized)) list.push(normalized);
+    const { normalizedSymbols, enforcedSymbols } = await getEnforcedUserWatchlist(user);
+    const list = [...enforcedSymbols];
+    if (normalizedSymbols.length !== enforcedSymbols.length) {
+        user.marketWatchlist = enforcedSymbols;
+    }
+    if (!list.includes(normalized)) {
+        const segmentKey = String(symbolDoc.segment || symbolDoc.exchange || 'OTHER').trim().toUpperCase();
+        const segmentFilter = symbolDoc.segment
+            ? { segment: symbolDoc.segment }
+            : symbolDoc.exchange
+                ? { exchange: symbolDoc.exchange }
+                : null;
+        const existingSymbolsInSegment = list.length > 0
+            ? await MasterSymbol.countDocuments({
+                symbol: { $in: list },
+                ...(segmentFilter || {}),
+            })
+            : 0;
+
+        if (existingSymbolsInSegment >= MAX_SELECTED_SYMBOLS_PER_SEGMENT) {
+            throw new ApiError(
+                httpStatus.BAD_REQUEST,
+                `You can add only ${MAX_SELECTED_SYMBOLS_PER_SEGMENT} scripts in the ${segmentKey} segment. Signals for selected scripts are not limited.`
+            );
+        }
+
+        list.push(normalized);
+    }
 
     user.marketWatchlist = list;
     await user.save();
@@ -309,14 +366,14 @@ const addUserWatchlist = catchAsync(async (req, res) => {
 const removeUserWatchlist = catchAsync(async (req, res) => {
     const { symbol } = req.body;
     if (!symbol) {
-        res.status(400);
-        throw new Error('Symbol is required');
+        throw new ApiError(httpStatus.BAD_REQUEST, 'Symbol is required');
     }
 
     const normalized = String(symbol).trim().toUpperCase();
     const symbolDoc = await MasterSymbol.findOne({ symbol: normalized }).select('symbol');
     const user = req.user;
-    const list = Array.isArray(user.marketWatchlist) ? user.marketWatchlist : [];
+    const { enforcedSymbols } = await getEnforcedUserWatchlist(user);
+    const list = enforcedSymbols;
     const next = list.filter(s => s !== normalized);
 
     user.marketWatchlist = next;

@@ -4,6 +4,7 @@ import logger from '../config/log.js';
 import { redisSubscriber } from './redis.service.js';
 import Notification from '../models/Notification.js';
 import User from '../models/User.js';
+import MasterSymbol from '../models/MasterSymbol.js';
 import Setting from '../models/Setting.js'; // Import Setting model
 import {
   getSignalAudienceGroups,
@@ -12,11 +13,17 @@ import {
   mapUserSubscriptionSegmentsToAudienceGroups,
 } from '../utils/signalRouting.js';
 import templates from '../config/notificationTemplates.js';
+import whatsappChannelService from './channels/whatsapp.service.js';
 import {
   buildSignalTemplateData,
   getSignalTemplateKey,
   renderNotificationTemplate,
 } from '../utils/notificationFormatter.js';
+import {
+  buildSelectedSymbolDocsMap,
+  getUserSelectedSymbols,
+  hasSelectedSignalSymbol,
+} from '../utils/userSignalSelection.js';
 import { sendToUser } from './websocket.service.js';
 
 const connection = {
@@ -91,6 +98,7 @@ class NotificationService {
           const pushConfig = getSetting('push_config');
           const emailConfig = getSetting('email_config');
           const activeTemplates = { ...templates, ...(getSetting('notification_templates') || {}) };
+          const whatsappEnabled = whatsappChannelService.isConfigured(waConfig);
 
           // 1. TARGETED NOTIFICATIONS (Telegram / WhatsApp / Push)
           // Find users with Active Subscriptions matching this Segment
@@ -156,11 +164,27 @@ class NotificationService {
               ? await User.find({
                     _id: { $in: candidateIds },
                     status: 'Active'
-                }).select('_id name email fcmTokens phone phoneNumber preferredSegments isNotificationEnabled isWhatsAppEnabled isEmailAlertEnabled telegramChatId telegramUsername')
+                }).select('_id name email role fcmTokens phone phoneNumber preferredSegments marketWatchlist isNotificationEnabled isWhatsAppEnabled isEmailAlertEnabled telegramChatId telegramUsername')
               : [];
+          const allSelectedSymbols = users.flatMap((user) => getUserSelectedSymbols(user));
+          const selectedSymbolDocs = allSelectedSymbols.length > 0
+              ? await MasterSymbol.find({ symbol: { $in: allSelectedSymbols } }).select('symbol segment exchange').lean()
+              : [];
+          const selectedSymbolDocsMap = buildSelectedSymbolDocsMap(selectedSymbolDocs);
 
           const eligibleUsers = users.filter((user) => {
-              if (createdById && user._id.toString() === createdById) return true;
+              const isPrivilegedCreator =
+                  createdById &&
+                  user._id.toString() === createdById &&
+                  user.role !== 'user';
+
+              if (!isPrivilegedCreator) {
+                  const selectedSymbols = getUserSelectedSymbols(user, selectedSymbolDocsMap);
+                  if (!hasSelectedSignalSymbol(selectedSymbols, signal.symbol)) {
+                      return false;
+                  }
+              }
+
               if (signalAudienceGroups.length === 0) return true;
 
               const preferredGroups = mapPreferredSegmentsToAudienceGroups(user.preferredSegments);
@@ -199,8 +223,7 @@ class NotificationService {
               }
 
               if (
-                  waConfig &&
-                  waConfig.enabled &&
+                  whatsappEnabled &&
                   user.isWhatsAppEnabled !== false &&
                   (user.phoneNumber || user.phone)
               ) {
@@ -262,6 +285,8 @@ class NotificationService {
       try {
           const { targetAudience, title, message } = announcement;
           const query = { status: 'Active' };
+          const waSetting = await Setting.findOne({ key: 'whatsapp_config' }).lean();
+          const whatsappEnabled = whatsappChannelService.isConfigured(waSetting?.value || null);
 
           // 1. Audience Filtering by Role
           if (targetAudience && targetAudience.role !== 'all') {
@@ -338,7 +363,7 @@ class NotificationService {
               // 2. WhatsApp Job
               // Only if user has phone. In production, check consent/settings too.
               // Note: This can generate A LOT of jobs. Bulk APIs are preferred but per-user job is safer for rate limiting in worker.
-              if (user.phone || user.phoneNumber) { // Check schema field
+              if (whatsappEnabled && (user.phone || user.phoneNumber)) { // Check schema field
                    jobs.push(notificationQueue.add('send-whatsapp-announcement', {
                       type: 'whatsapp',
                       userId: user._id, // Worker will fetch user to get phone

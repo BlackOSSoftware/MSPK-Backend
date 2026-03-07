@@ -57,6 +57,7 @@ const updateProfile = {
         name: Joi.string(),
         phone: Joi.string(),
         tradingViewId: Joi.string().allow(''),
+        isWhatsAppEnabled: Joi.boolean(),
         isEmailAlertEnabled: Joi.boolean(),
         profile: Joi.object().keys({
             avatar: Joi.string().uri(),

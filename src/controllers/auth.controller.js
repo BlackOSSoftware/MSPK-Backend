@@ -194,7 +194,6 @@ const updateMe = catchAsync(async (req, res) => {
     console.log('UpdateMe Hit. Body:', req.body);
     console.log('UpdateMe File:', req.file);
     const updateBody = req.body;
-    delete updateBody.isWhatsAppEnabled;
     delete updateBody.isNotificationEnabled;
 
     if (req.file) {

@@ -15,6 +15,7 @@ router.delete('/fcm-token', notificationController.unregisterFCMToken);
 router.patch('/read-all', notificationController.markAllAsRead);
 router.get('/telegram/connect-link', notificationController.getTelegramConnectLink);
 router.post('/telegram/disconnect', notificationController.disconnectTelegram);
+router.post('/whatsapp/test', notificationController.sendWhatsAppTestMessage);
 
 router.route('/:notificationId')
   .get(notificationController.getNotification)

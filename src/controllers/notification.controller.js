@@ -4,8 +4,10 @@ import catchAsync from '../utils/catchAsync.js';
 import ApiError from '../utils/ApiError.js';
 import Notification from '../models/Notification.js';
 import FCMToken from '../models/FCMToken.js';
+import Setting from '../models/Setting.js';
 import User from '../models/User.js';
 import telegramService from '../services/channels/telegram.service.js';
+import whatsappChannelService from '../services/channels/whatsapp.service.js';
 import logger from '../config/log.js';
 
 const buildTelegramConnectionPayload = (user) => ({
@@ -173,6 +175,45 @@ const disconnectTelegram = catchAsync(async (req, res) => {
   });
 });
 
+const sendWhatsAppTestMessage = catchAsync(async (req, res) => {
+  const phone = String(req.user.phoneNumber || req.user.phone || '').trim();
+  if (!phone) {
+    throw new ApiError(httpStatus.BAD_REQUEST, 'Phone number is missing in your profile. Update it first.');
+  }
+
+  const waSetting = await Setting.findOne({ key: 'whatsapp_config' }).lean();
+  const waConfig = waSetting?.value || null;
+
+  if (!whatsappChannelService.isConfigured(waConfig)) {
+    throw new ApiError(httpStatus.INTERNAL_SERVER_ERROR, 'WhatsApp channel is not configured on the server.');
+  }
+
+  const now = new Date();
+  const defaultMessage = [
+    'MSPK Trade Solutions',
+    'WhatsApp test message',
+    `User: ${req.user.name || req.user.email || 'Trader'}`,
+    `Time: ${now.toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' })}`,
+    'If you received this message, your WhatsApp alert delivery is working.',
+  ].join('\n');
+
+  const message = String(req.body?.message || '').trim() || defaultMessage;
+  const result = await whatsappChannelService.sendText(waConfig, {
+    to: phone,
+    text: message,
+  });
+
+  logger.info(`WhatsApp test message sent for user ${req.user._id} via ${result.provider}`);
+
+  res.send({
+    message: 'WhatsApp test message sent successfully',
+    provider: result.provider,
+    to: result.to,
+    queued: result.queued || false,
+    externalMessageId: result.messageId || null,
+  });
+});
+
 const handleTelegramWebhook = catchAsync(async (req, res) => {
   const expectedSecret = telegramService.getTelegramConfig().webhookSecret;
   if (!expectedSecret || req.params.secret !== expectedSecret) {
@@ -255,5 +296,6 @@ export default {
   deleteNotification,
   disconnectTelegram,
   getTelegramConnectLink,
+  sendWhatsAppTestMessage,
   handleTelegramWebhook,
 };

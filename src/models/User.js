@@ -153,9 +153,13 @@ const userSchema = new mongoose.Schema(
 
 // Encrypt password using bcrypt
 userSchema.pre('save', async function () {
-  // Keep these feature flags always enabled and non-editable.
-  this.isWhatsAppEnabled = true;
-  this.isNotificationEnabled = true;
+  // Default these flags on for new/legacy users, but allow user-controlled opt-out later.
+  if (typeof this.isWhatsAppEnabled !== 'boolean') {
+    this.isWhatsAppEnabled = true;
+  }
+  if (typeof this.isNotificationEnabled !== 'boolean') {
+    this.isNotificationEnabled = true;
+  }
 
   if (!this.isModified('password')) {
     return;

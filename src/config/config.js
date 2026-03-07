@@ -49,4 +49,21 @@ export default {
     webhookBaseUrl: process.env.TELEGRAM_WEBHOOK_BASE_URL || '',
     webhookSecret: process.env.TELEGRAM_WEBHOOK_SECRET || '',
   },
+  whatsapp: {
+    provider: process.env.WHATSAPP_PROVIDER || '',
+    defaultCountryCode:
+      process.env.WHATSAPP_DEFAULT_COUNTRY_CODE ||
+      process.env.ULTRAMSG_DEFAULT_COUNTRY_CODE ||
+      '91',
+    ultramsg: {
+      baseUrl: process.env.ULTRAMSG_BASE_URL || 'https://api.ultramsg.com',
+      instanceId: process.env.ULTRAMSG_INSTANCE_ID || '',
+      token: process.env.ULTRAMSG_TOKEN || '',
+      priority: process.env.ULTRAMSG_PRIORITY || 10,
+    },
+    meta: {
+      accessToken: process.env.WHATSAPP_ACCESS_TOKEN || '',
+      phoneNumberId: process.env.WHATSAPP_PHONE_NUMBER_ID || '',
+    },
+  },
 };

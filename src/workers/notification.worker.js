@@ -6,7 +6,8 @@ import Setting from '../models/Setting.js';
 import FCMToken from '../models/FCMToken.js';
 import { initializeFirebase } from '../config/firebase.js';
 import telegramService from '../services/channels/telegram.service.js';
-import { emailService, msg91Service } from '../services/index.js'; // Use central service exports
+import whatsappChannelService from '../services/channels/whatsapp.service.js';
+import { emailService } from '../services/index.js'; // Use central service exports
 import pushService from '../services/channels/push.service.js';
 import templates from '../config/notificationTemplates.js';
 import {
@@ -206,32 +207,20 @@ const notificationWorker = new Worker('notifications', async (job) => {
       } 
        else if (type === 'whatsapp') {
            const waConfig = getSetting('whatsapp_config');
-           // Strict Check: WhatsApp must be enabled in Admin Settings
-           if (waConfig && waConfig.enabled) {
-               // MSG91 WhatsApp requires Template + Components
-               if (user.phoneNumber || user.phone) {
-                   const phone = user.phoneNumber || user.phone;
-                   let templateName = 'signal_alert';
-                   let components = {};
-    
-                   if (signal) {
-                       components = {
-                           "1": signal.symbol,
-                           "2": signal.type,
-                           "3": signal.entryPrice,
-                           "4": signal.stopLoss,
-                           "5": signal.targets?.target1 || '-'
-                       };
-                   } else if (announcement) {
-                       templateName = 'announcement_alert';
-                       components = {
-                           "1": announcement.title,
-                           "2": announcement.message
-                       };
-                   }
-    
-                   await msg91Service.sendWhatsapp(phone, templateName, components);
-               }
+           if (
+             whatsappChannelService.isConfigured(waConfig) &&
+             user &&
+             (user.phoneNumber || user.phone) &&
+             user.isWhatsAppEnabled !== false
+           ) {
+               const phone = user.phoneNumber || user.phone;
+               await whatsappChannelService.sendNotification(waConfig, {
+                   to: phone,
+                   title,
+                   message,
+                   signal,
+                   announcement,
+               });
            } else {
                logger.debug(`Skipping WhatsApp for User ${userId} - Channel Disabled in Settings`);
            }
