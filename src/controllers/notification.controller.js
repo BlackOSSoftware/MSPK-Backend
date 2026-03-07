@@ -162,11 +162,11 @@ const getTelegramConnectLink = catchAsync(async (req, res) => {
 });
 
 const disconnectTelegram = catchAsync(async (req, res) => {
-  req.user.telegramChatId = null;
-  req.user.telegramUsername = null;
-  req.user.telegramConnectedAt = null;
-  req.user.telegramLinkToken = null;
-  req.user.telegramLinkTokenExpiresAt = null;
+  req.user.telegramChatId = undefined;
+  req.user.telegramUsername = undefined;
+  req.user.telegramConnectedAt = undefined;
+  req.user.telegramLinkToken = undefined;
+  req.user.telegramLinkTokenExpiresAt = undefined;
   await req.user.save();
 
   res.send({
@@ -261,12 +261,12 @@ const handleTelegramWebhook = catchAsync(async (req, res) => {
       telegramChatId: chatId,
     },
     {
-      $set: {
-        telegramChatId: null,
-        telegramUsername: null,
-        telegramConnectedAt: null,
-        telegramLinkToken: null,
-        telegramLinkTokenExpiresAt: null,
+      $unset: {
+        telegramChatId: 1,
+        telegramUsername: 1,
+        telegramConnectedAt: 1,
+        telegramLinkToken: 1,
+        telegramLinkTokenExpiresAt: 1,
       },
     }
   );
@@ -274,8 +274,8 @@ const handleTelegramWebhook = catchAsync(async (req, res) => {
   user.telegramChatId = chatId;
   user.telegramUsername = username;
   user.telegramConnectedAt = now;
-  user.telegramLinkToken = null;
-  user.telegramLinkTokenExpiresAt = null;
+  user.telegramLinkToken = undefined;
+  user.telegramLinkTokenExpiresAt = undefined;
   await user.save();
 
   await telegramService.sendTelegramMessage({}, `Telegram alerts connected for ${user.name}. Ab paid/demo signals direct yahin milenge.`, {

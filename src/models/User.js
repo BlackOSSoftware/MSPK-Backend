@@ -1,6 +1,15 @@
 import mongoose from 'mongoose';
 import bcrypt from 'bcryptjs';
 
+const emptyStringToUndefined = (value) => {
+  if (typeof value !== 'string') {
+    return value;
+  }
+
+  const normalized = value.trim();
+  return normalized ? normalized : undefined;
+};
+
 const userSchema = new mongoose.Schema(
   {
     name: {
@@ -117,29 +126,23 @@ const userSchema = new mongoose.Schema(
     telegramChatId: {
       type: String,
       trim: true,
-      unique: true,
-      sparse: true,
-      default: null,
+      set: emptyStringToUndefined,
     },
     telegramUsername: {
       type: String,
       trim: true,
-      default: null,
+      set: emptyStringToUndefined,
     },
     telegramConnectedAt: {
       type: Date,
-      default: null,
     },
     telegramLinkToken: {
       type: String,
       trim: true,
-      unique: true,
-      sparse: true,
-      default: null,
+      set: emptyStringToUndefined,
     },
     telegramLinkTokenExpiresAt: {
       type: Date,
-      default: null,
     },
     marketWatchlist: {
       type: [String],
@@ -148,6 +151,30 @@ const userSchema = new mongoose.Schema(
   },
   {
     timestamps: true,
+  }
+);
+
+userSchema.index(
+  { telegramChatId: 1 },
+  {
+    unique: true,
+    partialFilterExpression: {
+      telegramChatId: {
+        $type: 'string',
+      },
+    },
+  }
+);
+
+userSchema.index(
+  { telegramLinkToken: 1 },
+  {
+    unique: true,
+    partialFilterExpression: {
+      telegramLinkToken: {
+        $type: 'string',
+      },
+    },
   }
 );
 
