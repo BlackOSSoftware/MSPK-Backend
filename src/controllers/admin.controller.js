@@ -176,7 +176,8 @@ const assignCustomPlan = catchAsync(async (req, res) => {
         features,
         permissions: resolvedPermissions,
         isActive: typeof isActive === 'boolean' ? isActive : true,
-        isDemo: typeof isDemo === 'boolean' ? isDemo : false
+        isDemo: typeof isDemo === 'boolean' ? isDemo : false,
+        isCustom: true
     });
 
     const currentSub = await Subscription.findOne({ user: user.id, status: 'active' });

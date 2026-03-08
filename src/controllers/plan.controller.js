@@ -9,10 +9,13 @@ const createPlan = catchAsync(async (req, res) => {
 });
 
 const getPlans = catchAsync(async (req, res) => {
-  const filter = { isActive: true };
+  const filter = { isActive: true, isCustom: { $ne: true } };
   // Check if user is admin (req.user is set by auth middleware)
   if (req.user && req.user.role === 'admin') {
       delete filter.isActive;
+  }
+  if (String(req.query.includeCustom || '').toLowerCase() === 'true') {
+      delete filter.isCustom;
   }
   const plans = await planService.queryPlans(filter);
   res.send(plans);

@@ -9,13 +9,15 @@ const createPlan = {
     durationDays: Joi.number().integer().required(),
     features: Joi.array().items(Joi.string()),
     isActive: Joi.boolean(),
-    isDemo: Joi.boolean()
+    isDemo: Joi.boolean(),
+    isCustom: Joi.boolean()
   }),
 };
 
 const getPlans = {
   query: Joi.object().keys({
     role: Joi.string(), // To filter inactive if needed manually
+    includeCustom: Joi.boolean(),
   }),
 };
 
@@ -38,7 +40,8 @@ const updatePlan = {
       durationDays: Joi.number().integer(),
       features: Joi.array().items(Joi.string()),
       isActive: Joi.boolean(),
-      isDemo: Joi.boolean()
+      isDemo: Joi.boolean(),
+      isCustom: Joi.boolean()
     })
     .min(1),
 };

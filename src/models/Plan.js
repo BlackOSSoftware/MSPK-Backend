@@ -52,6 +52,10 @@ const planSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    isCustom: {
+      type: Boolean,
+      default: false,
+    },
   },
   {
     timestamps: true,
