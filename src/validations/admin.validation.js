@@ -63,7 +63,31 @@ const updateUser = {
   }).min(1), // Require at least 1 field to update
 };
 
+const assignCustomPlan = {
+  params: Joi.object().keys({
+      userId: Joi.required().custom(objectId),
+  }),
+  body: Joi.object().keys({
+      name: Joi.string().required(),
+      description: Joi.string().allow(''),
+      segment: Joi.string().valid('EQUITY', 'FNO', 'COMMODITY', 'CURRENCY').optional().allow(''),
+      segments: Joi.array().items(
+        Joi.string().valid(
+          'EQUITY', 'FNO', 'COMMODITY', 'CURRENCY', 'CRYPTO', 'FOREX', 'OPTIONS',
+          'equity', 'fno', 'commodity', 'currency', 'crypto', 'forex', 'options'
+        )
+      ).optional(),
+      price: Joi.number().min(0).required(),
+      durationDays: Joi.number().min(1).required(),
+      features: Joi.array().items(Joi.string()).optional(),
+      permissions: Joi.array().items(Joi.string()).optional(),
+      isActive: Joi.boolean().optional(),
+      isDemo: Joi.boolean().optional(),
+  }),
+};
+
 export default {
   createUser,
-  updateUser
+  updateUser,
+  assignCustomPlan
 };

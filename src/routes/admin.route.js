@@ -25,6 +25,12 @@ router
   .patch(validate(adminValidation.updateUser), adminController.updateUser)
   .delete(adminController.deleteUser);
 
+router.post(
+  '/users/:userId/custom-plan',
+  validate(adminValidation.assignCustomPlan),
+  adminController.assignCustomPlan
+);
+
 router.patch('/users/:userId/block', adminController.blockUser);
 
 router

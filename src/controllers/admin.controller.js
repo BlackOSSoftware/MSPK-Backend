@@ -10,6 +10,7 @@ import { redisClient } from '../services/redis.service.js';
 import transactionService from '../services/transaction.service.js';
 import { subBrokerService, announcementService } from '../services/index.js';
 import subscriptionService from '../services/subscription.service.js';
+import planService from '../services/plan.service.js';
 
 const normalizeSubscriptionSegments = (segments) => {
     if (!Array.isArray(segments)) return [];
@@ -31,6 +32,42 @@ const mapSubscriptionToPreferred = (segments) => {
         .map((segment) => map[segment])
         .filter(Boolean);
     return Array.from(new Set(preferred));
+};
+
+const mapSegmentsToPermissions = (segments) => {
+    const permissions = new Set();
+    segments.forEach((segRaw) => {
+        const seg = String(segRaw || '').trim().toUpperCase();
+        if (seg === 'EQUITY') {
+            permissions.add('EQUITY_INTRA');
+            permissions.add('EQUITY_DELIVERY');
+        }
+        if (seg === 'FNO' || seg === 'OPTIONS') {
+            permissions.add('NIFTY_OPT');
+            permissions.add('BANKNIFTY_OPT');
+            permissions.add('FINNIFTY_OPT');
+            permissions.add('STOCK_OPT');
+        }
+        if (seg === 'COMMODITY') {
+            permissions.add('MCX_FUT');
+        }
+        if (seg === 'CURRENCY' || seg === 'FOREX') {
+            permissions.add('CURRENCY');
+        }
+        if (seg === 'CRYPTO') {
+            permissions.add('CRYPTO');
+        }
+    });
+    return Array.from(permissions);
+};
+
+const inferPrimarySegment = (segments) => {
+    const set = new Set(segments.map(s => String(s || '').trim().toUpperCase()));
+    if (set.has('EQUITY')) return 'EQUITY';
+    if (set.has('FNO') || set.has('OPTIONS')) return 'FNO';
+    if (set.has('COMMODITY')) return 'COMMODITY';
+    if (set.has('CURRENCY') || set.has('FOREX')) return 'CURRENCY';
+    return undefined;
 };
 
 const createUser = catchAsync(async (req, res) => {
@@ -110,6 +147,75 @@ const createUser = catchAsync(async (req, res) => {
     }
 
     res.status(httpStatus.CREATED).send(user);
+});
+
+const assignCustomPlan = catchAsync(async (req, res) => {
+    const { userId } = req.params;
+    const { name, description, segment, segments, price, durationDays, features, permissions, isActive, isDemo } = req.body;
+
+    const user = await User.findById(userId);
+    if (!user) {
+        throw new ApiError(httpStatus.NOT_FOUND, 'User not found');
+    }
+
+    const normalizedSegments = normalizeSubscriptionSegments(segments);
+
+    let resolvedPermissions = permissions;
+    if ((!resolvedPermissions || resolvedPermissions.length === 0) && (!features || features.length === 0) && normalizedSegments.length > 0) {
+        resolvedPermissions = mapSegmentsToPermissions(normalizedSegments);
+    }
+
+    const resolvedSegment = segment || inferPrimarySegment(normalizedSegments);
+
+    const plan = await planService.createPlan({
+        name,
+        description,
+        segment: resolvedSegment,
+        price,
+        durationDays,
+        features,
+        permissions: resolvedPermissions,
+        isActive: typeof isActive === 'boolean' ? isActive : true,
+        isDemo: typeof isDemo === 'boolean' ? isDemo : false
+    });
+
+    const currentSub = await Subscription.findOne({ user: user.id, status: 'active' });
+    if (currentSub) {
+        currentSub.status = 'expired';
+        currentSub.endDate = new Date();
+        await currentSub.save();
+    }
+
+    const startDate = new Date();
+    const endDate = new Date();
+    endDate.setDate(endDate.getDate() + (plan.durationDays || 30));
+
+    const subscription = await Subscription.create({
+        user: user.id,
+        plan: plan.id,
+        status: 'active',
+        startDate,
+        endDate,
+        transaction: null
+    });
+
+    res.status(httpStatus.CREATED).send({
+        message: 'Custom plan assigned successfully',
+        plan: {
+            id: plan.id,
+            name: plan.name,
+            price: plan.price,
+            durationDays: plan.durationDays,
+            segment: plan.segment || null,
+            permissions: plan.permissions || [],
+            features: plan.features || []
+        },
+        subscription: {
+            id: subscription.id,
+            startDate: subscription.startDate,
+            endDate: subscription.endDate
+        }
+    });
 });
 
 const getUsers = catchAsync(async (req, res) => {
@@ -496,6 +602,7 @@ export default {
   getUser,
   getUserSignalDeliveries,
   updateUser,
+  assignCustomPlan,
   updateUserRole,
   deleteUser,
   blockUser, 

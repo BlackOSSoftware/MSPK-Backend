@@ -143,14 +143,55 @@ Use this token in all admin APIs:
 }
 ```
 
-### 1.5 Delete user
+### 1.5 Assign custom plan directly to user
+- Method: `POST`
+- URL: `http://localhost:4000/v1/admin/users/:userId/custom-plan`
+- Auth: Admin required
+- Request Body (JSON):
+```json
+{
+  "name": "Custom As User Requirement",
+  "description": "Custom access configured by admin",
+  "segments": ["EQUITY", "CRYPTO", "COMMODITY"],
+  "price": 25000,
+  "durationDays": 30,
+  "features": ["Intraday Equity", "Delivery / Swing", "Crypto", "MCX Futures"],
+  "isActive": true,
+  "isDemo": false
+}
+```
+- Notes:
+  - `segments` will auto-map to permissions if `features`/`permissions` are not provided.
+  - Old active subscription is expired and a new one is created.
+- Response (201 example):
+```json
+{
+  "message": "Custom plan assigned successfully",
+  "plan": {
+    "id": "planCustom123",
+    "name": "Custom As User Requirement",
+    "price": 25000,
+    "durationDays": 30,
+    "segment": "EQUITY",
+    "permissions": ["EQUITY_INTRA", "EQUITY_DELIVERY", "CRYPTO", "MCX_FUT"],
+    "features": ["Intraday Equity", "Delivery / Swing", "Crypto", "MCX Futures"]
+  },
+  "subscription": {
+    "id": "subCustom123",
+    "startDate": "2026-03-08T10:00:00.000Z",
+    "endDate": "2026-04-07T10:00:00.000Z"
+  }
+}
+```
+
+### 1.6 Delete user
 - Method: `DELETE`
 - URL: `http://localhost:4000/v1/admin/users/:userId`
 - Auth: Admin required
 - Request Body: `No body`
 - Response: `204 No Content`
 
-### 1.6 Block or Unblock user
+### 1.7 Block or Unblock user
 - Method: `PATCH`
 - URL: `http://localhost:4000/v1/admin/users/:userId/block`
 - Auth: Admin required
@@ -163,7 +204,7 @@ Use this token in all admin APIs:
 }
 ```
 
-### 1.7 Liquidate user
+### 1.8 Liquidate user
 - Method: `PATCH`
 - URL: `http://localhost:4000/v1/admin/users/:userId/liquidate`
 - Auth: Admin required
@@ -179,7 +220,7 @@ Use this token in all admin APIs:
 }
 ```
 
-### 1.8 Admin system health
+### 1.9 Admin system health
 - Method: `GET`
 - URL: `http://localhost:4000/v1/admin/system/health`
 - Auth: Admin required
