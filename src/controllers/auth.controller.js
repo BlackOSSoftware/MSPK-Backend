@@ -10,6 +10,7 @@ const buildTelegramPayload = (userObject) => ({
   connected: Boolean(userObject?.telegramChatId),
   chatId: userObject?.telegramChatId || null,
   username: userObject?.telegramUsername || null,
+  displayName: userObject?.telegramDisplayName || userObject?.telegramUsername || null,
   connectedAt: userObject?.telegramConnectedAt || null,
   botUsername: telegramService.getTelegramConfig().botUsername || null,
 });
@@ -24,6 +25,7 @@ const serializeUser = (user, planDetails = {}) => {
   const telegram = buildTelegramPayload(userObject);
   delete userObject.telegramChatId;
   delete userObject.telegramUsername;
+  delete userObject.telegramDisplayName;
   delete userObject.telegramConnectedAt;
 
   return {

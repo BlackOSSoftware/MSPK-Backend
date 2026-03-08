@@ -6,28 +6,124 @@ import { getSignalAudienceGroups } from '../utils/signalRouting.js';
 
 const CLOSED_SIGNAL_STATUSES = ['Closed', 'Target Hit', 'Partial Profit Book', 'Stoploss Hit'];
 
+const runDetached = (label, task) => {
+  setImmediate(async () => {
+    try {
+      await task();
+    } catch (error) {
+      logger.error(label, error);
+    }
+  });
+};
+
 const mapSignalToCategory = (signalBody) => {
   const { symbol, segment } = signalBody;
   const sym = symbol ? symbol.toUpperCase() : '';
   const seg = segment ? segment.toUpperCase() : '';
 
-  // 1. High Priority: Crypto Detection (USDT pairs)
-  if (sym.includes('USDT') || sym.includes('USD') && seg === 'CRYPTO') return 'CRYPTO';
-
+  if ((sym.includes('USDT') || sym.includes('USD')) && seg === 'CRYPTO') return 'CRYPTO';
   if (sym.includes('NIFTY') && !sym.includes('BANK') && !sym.includes('FIN')) return 'NIFTY_OPT';
   if (sym.includes('BANKNIFTY')) return 'BANKNIFTY_OPT';
   if (sym.includes('FINNIFTY')) return 'FINNIFTY_OPT';
   if (seg === 'MCX' || seg === 'COMMODITY') return 'MCX_FUT';
   if (seg === 'CDS' || seg === 'CURRENCY') return 'CURRENCY';
   if (seg === 'CRYPTO') return 'CRYPTO';
-  if (seg === 'EQ' || seg === 'EQUITY') return 'EQUITY_INTRA'; // Default to Intra
-  
-  return 'EQUITY_INTRA'; // Fallback
+  if (seg === 'EQ' || seg === 'EQUITY') return 'EQUITY_INTRA';
+
+  return 'EQUITY_INTRA';
+};
+
+const scheduleCreateSideEffects = (signal, userId) => {
+  runDetached(`Failed side effects for created signal ${signal?.id || signal?._id}`, async () => {
+    try {
+      broadcastToRoles(['admin', 'sub-broker'], { type: 'new_signal', payload: signal });
+    } catch (error) {
+      // Passive fail
+    }
+
+    try {
+      const tpDetails = [
+        signal.targets?.target1 ? `TP1: ${signal.targets.target1}` : null,
+        signal.targets?.target2 ? `TP2: ${signal.targets.target2}` : null,
+        signal.targets?.target3 ? `TP3: ${signal.targets.target3}` : null,
+      ]
+        .filter((item) => item)
+        .join(' | ');
+
+      await announcementService.createAnnouncement({
+        title: `Signal: ${signal.symbol} ${signal.type}`,
+        message: `Entry: ${signal.entryPrice}\n${tpDetails}\nSL: ${signal.stopLoss}`,
+        type: 'SIGNAL',
+        priority: 'NORMAL',
+        targetAudience: { role: 'user', planValues: [], segments: getSignalAudienceGroups(signal) },
+        isActive: false,
+        isNotificationSent: true,
+      });
+    } catch (error) {
+      logger.error('Failed to create announcement for signal', error);
+    }
+
+    try {
+      const { redisClient } = await import('./redis.service.js');
+      const payload = JSON.stringify({
+        ...signal.toJSON(),
+        user: userId ?? 'system',
+        subType: 'SIGNAL_NEW',
+      });
+      await redisClient.publish('signals', payload);
+      logger.info(`Published new signal ${signal.id} to Redis 'signals' channel`);
+    } catch (error) {
+      logger.error('Failed to publish signal to Redis', error);
+    }
+  });
+};
+
+const scheduleUpdateSideEffects = (signal, updateBody, signalId) => {
+  if (!updateBody.status && !updateBody.notes) return;
+
+  runDetached(`Failed side effects for updated signal ${signalId}`, async () => {
+    try {
+      broadcastToRoles(['admin', 'sub-broker'], { type: 'update_signal', payload: signal });
+    } catch (error) {
+      // Passive fail
+    }
+
+    try {
+      const { redisClient } = await import('./redis.service.js');
+      let subType = null;
+      const notificationData = { ...signal.toJSON() };
+
+      if (updateBody.status === 'Target Hit') {
+        subType = 'SIGNAL_TARGET';
+        notificationData.targetLevel = 'TP1';
+      } else if (updateBody.status === 'Partial Profit Book') {
+        subType = 'SIGNAL_PARTIAL_PROFIT';
+        notificationData.currentPrice = signal.exitPrice ?? signal.entryPrice;
+      } else if (updateBody.status === 'Stoploss Hit') {
+        subType = 'SIGNAL_STOPLOSS';
+      } else if (updateBody.notes || updateBody.status) {
+        subType = 'SIGNAL_UPDATE';
+        notificationData.updateMessage = updateBody.notes || `Status changed to ${updateBody.status}`;
+      }
+
+      if (subType) {
+        await redisClient.publish(
+          'signals',
+          JSON.stringify({
+            ...notificationData,
+            subType,
+          })
+        );
+        logger.info(`Published ${subType} notification for signal ${signalId}`);
+      }
+    } catch (error) {
+      logger.error('Failed to emit socket/redis event for update signal', error);
+    }
+  });
 };
 
 const signalCreationGuard = new Map();
 
-// Cleanup old entries every 5 minutes
 setInterval(() => {
   const now = Date.now();
   const fiveMinutesAgo = now - 5 * 60 * 1000;
@@ -39,30 +135,27 @@ setInterval(() => {
 }, 5 * 60 * 1000);
 
 const createSignal = async (signalBody, user) => {
-  // Idempotency for webhook-style signals
   if (signalBody.uniqueId) {
     signalBody.uniqueId = String(signalBody.uniqueId).trim();
     const existing = await Signal.findOne({ uniqueId: signalBody.uniqueId });
     if (existing) return existing;
   }
 
-  // Normalize symbol for consistent matching
   const normalizedSymbol = signalBody.symbol?.toUpperCase().trim();
-  const normalizedPrice = Math.round(parseFloat(signalBody.entryPrice) * 100) / 100; // Round to 2 decimals
-  
-  // Global Deduplication Guard (Prevent identical signals in 5 minutes)
+  const normalizedPrice = Math.round(parseFloat(signalBody.entryPrice) * 100) / 100;
   const dedupKey = signalBody.uniqueId
     ? `UID_${signalBody.uniqueId}`
     : `${normalizedSymbol}_${signalBody.type}_${normalizedPrice}`;
   const now = Date.now();
-  
+
   if (signalCreationGuard.has(dedupKey)) {
     const lastCreated = signalCreationGuard.get(dedupKey);
     const timeSinceLastSignal = now - lastCreated;
-    
-    // Block if created within last 5 minutes (300 seconds)
+
     if (timeSinceLastSignal < 300000) {
-      logger.warn(`[SIGNAL_GUARD] Blocking duplicate signal for ${dedupKey} (${Math.round(timeSinceLastSignal/1000)}s ago)`);
+      logger.warn(
+        `[SIGNAL_GUARD] Blocking duplicate signal for ${dedupKey} (${Math.round(timeSinceLastSignal / 1000)}s ago)`
+      );
 
       if (signalBody.uniqueId) {
         const existing = await Signal.findOne({ uniqueId: signalBody.uniqueId });
@@ -72,69 +165,25 @@ const createSignal = async (signalBody, user) => {
       return null;
     }
   }
-  
+
   signalCreationGuard.set(dedupKey, now);
 
-  // Auto-map category if missing
   if (!signalBody.category) {
-      signalBody.category = mapSignalToCategory(signalBody);
+    signalBody.category = mapSignalToCategory(signalBody);
   }
 
   let signal;
   try {
     signal = await Signal.create({ ...signalBody, createdBy: user?.id });
-  } catch (e) {
-    // Handle rare race where multiple webhook requests try to create the same uniqueId.
-    if (signalBody.uniqueId && e?.code === 11000) {
+  } catch (error) {
+    if (signalBody.uniqueId && error?.code === 11000) {
       const existing = await Signal.findOne({ uniqueId: signalBody.uniqueId });
       if (existing) return existing;
     }
-    throw e;
+    throw error;
   }
 
-  // Realtime broadcast (for admin panel / live users)
-  try {
-    broadcastToRoles(['admin', 'sub-broker'], { type: 'new_signal', payload: signal });
-  } catch (e) {
-    // Passive fail (WS may not be initialized in some environments)
-  }
-  
-  // Create Announcement for the Feed
-  try {
-      const tpDetails = [
-          signal.targets?.target1 ? `TP1: ${signal.targets.target1}` : null,
-          signal.targets?.target2 ? `TP2: ${signal.targets.target2}` : null,
-          signal.targets?.target3 ? `TP3: ${signal.targets.target3}` : null
-      ].filter(t => t).join(' | ');
-
-      await announcementService.createAnnouncement({
-          title: `🚀 New Signal: ${signal.symbol} ${signal.type}`,
-          message: `Entry: ${signal.entryPrice}\n${tpDetails}\nSL: ${signal.stopLoss}`,
-          type: 'SIGNAL',
-          priority: 'NORMAL',
-          targetAudience: { role: 'user', planValues: [], segments: getSignalAudienceGroups(signal) },
-          isActive: false,
-          isNotificationSent: true
-      });
-  } catch (e) {
-      logger.error('Failed to create announcement for signal', e);
-  }
-
-  // Publish to Redis for Notification Service
-  try {
-      const { redisClient } = await import('./redis.service.js');
-      // Payload for notification service
-      const payload = JSON.stringify({ 
-          ...signal.toJSON(), 
-          user: user?.id ?? 'system',
-          subType: 'SIGNAL_NEW'  // Explicitly tell worker to use New Signal Template
-      }); 
-      await redisClient.publish('signals', payload);
-      logger.info(`Published new signal ${signal.id} to Redis 'signals' channel`);
-  } catch (e) {
-      logger.error('Failed to publish signal to Redis', e);
-  }
-  
+  scheduleCreateSideEffects(signal, user?.id);
   return signal;
 };
 
@@ -145,7 +194,7 @@ const querySignals = async (filter, options) => {
 
   const [totalResults, results] = await Promise.all([
     Signal.countDocuments(filter),
-    Signal.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit)
+    Signal.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit),
   ]);
 
   const totalPages = Math.ceil(totalResults / limit);
@@ -155,13 +204,11 @@ const querySignals = async (filter, options) => {
     page,
     limit,
     totalPages,
-    totalResults
+    totalResults,
   };
 };
 
-const getSignalById = async (signalId) => {
-  return Signal.findById(signalId);
-};
+const getSignalById = async (signalId) => Signal.findById(signalId);
 
 const getSignalStats = async (filter = {}) => {
   const pipeline = [];
@@ -175,101 +222,69 @@ const getSignalStats = async (filter = {}) => {
       totalSignals: { $sum: 1 },
       activeSignals: {
         $sum: {
-          $cond: [{ $in: ["$status", ["Open", "Active", "Paused"]] }, 1, 0]
-        }
+          $cond: [{ $in: ['$status', ['Open', 'Active', 'Paused']] }, 1, 0],
+        },
       },
       closedSignals: {
         $sum: {
-          $cond: [{ $in: ["$status", CLOSED_SIGNAL_STATUSES] }, 1, 0]
-        }
+          $cond: [{ $in: ['$status', CLOSED_SIGNAL_STATUSES] }, 1, 0],
+        },
       },
       targetHit: {
         $sum: {
-          $cond: [{ $eq: ["$status", "Target Hit"] }, 1, 0]
-        }
+          $cond: [{ $eq: ['$status', 'Target Hit'] }, 1, 0],
+        },
       },
       partialProfit: {
         $sum: {
-          $cond: [{ $eq: ["$status", "Partial Profit Book"] }, 1, 0]
-        }
+          $cond: [{ $eq: ['$status', 'Partial Profit Book'] }, 1, 0],
+        },
       },
       stoplossHit: {
         $sum: {
-          $cond: [{ $eq: ["$status", "Stoploss Hit"] }, 1, 0]
-        }
-      }
-    }
+          $cond: [{ $eq: ['$status', 'Stoploss Hit'] }, 1, 0],
+        },
+      },
+    },
   });
 
   const stats = await Signal.aggregate(pipeline);
+  const data =
+    stats[0] || {
+      totalSignals: 0,
+      activeSignals: 0,
+      closedSignals: 0,
+      targetHit: 0,
+      partialProfit: 0,
+      stoplossHit: 0,
+    };
 
-  const data = stats[0] || { totalSignals: 0, activeSignals: 0, closedSignals: 0, targetHit: 0, partialProfit: 0, stoplossHit: 0 };
-  
   const positiveOutcomes = data.targetHit + data.partialProfit;
   const outcomes = positiveOutcomes + data.stoplossHit;
   const successRate = outcomes > 0 ? Math.round((positiveOutcomes / outcomes) * 100) : 0;
 
   return {
     ...data,
-    successRate
+    successRate,
   };
 };
 
 const updateSignalById = async (signalId, updateBody) => {
   const signal = await Signal.findById(signalId);
   if (!signal) {
-     throw new Error('Signal not found');
+    throw new Error('Signal not found');
   }
-  // Auto-map category on update if segment/symbol changed or category missing
+
   if ((updateBody.symbol || updateBody.segment) && !updateBody.category) {
-     // Merge current signal data with updates to map correctly
-     const merged = { ...signal.toObject(), ...updateBody };
-     updateBody.category = mapSignalToCategory(merged);
+    const merged = { ...signal.toObject(), ...updateBody };
+    updateBody.category = mapSignalToCategory(merged);
   } else if (!signal.category && !updateBody.category) {
-      // First time mapping for legacy signals
-      updateBody.category = mapSignalToCategory(signal);
+    updateBody.category = mapSignalToCategory(signal);
   }
 
   Object.assign(signal, updateBody);
-  
-  // Status update broadcast
-  if (updateBody.status || updateBody.notes) {
-       try {
-           broadcastToRoles(['admin', 'sub-broker'], { type: 'update_signal', payload: signal });
-
-          // Notification Logic
-          const { redisClient } = await import('./redis.service.js');
-          let subType = null;
-          let notificationData = { ...signal.toJSON() }; // Use signal.toJSON() for full refreshed document
-
-          if (updateBody.status === 'Target Hit') {
-              subType = 'SIGNAL_TARGET';
-              notificationData.targetLevel = 'TP1'; // Logic to detect which target? usually TP1
-          } else if (updateBody.status === 'Partial Profit Book') {
-              subType = 'SIGNAL_PARTIAL_PROFIT';
-              notificationData.currentPrice = signal.exitPrice ?? signal.entryPrice;
-          } else if (updateBody.status === 'Stoploss Hit') {
-              subType = 'SIGNAL_STOPLOSS';
-          } else if (updateBody.notes || updateBody.status) {
-              // Generic Update
-              subType = 'SIGNAL_UPDATE';
-              notificationData.updateMessage = updateBody.notes || `Status changed to ${updateBody.status}`;
-          }
-
-          if (subType) {
-              await redisClient.publish('signals', JSON.stringify({
-                  ...notificationData,
-                  subType
-              }));
-              logger.info(`Published ${subType} notification for signal ${signalId}`);
-          }
-
-      } catch (e) {
-          logger.error('Failed to emit socket/redis event for update signal', e);
-      }
-  }
-
   await signal.save();
+  scheduleUpdateSideEffects(signal, updateBody, signalId);
   return signal;
 };
 

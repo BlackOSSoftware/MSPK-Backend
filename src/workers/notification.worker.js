@@ -120,6 +120,7 @@ const notificationWorker = new Worker('notifications', async (job) => {
     template,
     data,
     notification,
+    recipient,
   } = job.data;
   
   try {
@@ -138,6 +139,7 @@ const notificationWorker = new Worker('notifications', async (job) => {
 
       const isTelegramJob = type === 'telegram';
       const isEmailJob = type === 'email';
+      const isWhatsAppTestJob = type === 'whatsapp-test';
       const isSystemJob = userId === 'system';
       let user = null;
       if (!isSystemJob && userId) {
@@ -205,24 +207,24 @@ const notificationWorker = new Worker('notifications', async (job) => {
              logger.debug(`Skipping Telegram for job ${job.id} - disabled or chat not connected`);
           }
       } 
-       else if (type === 'whatsapp') {
+       else if (type === 'whatsapp' || type === 'whatsapp-test') {
            const waConfig = getSetting('whatsapp_config');
+           const whatsappRecipient = recipient || user?.phoneNumber || user?.phone;
            if (
              whatsappChannelService.isConfigured(waConfig) &&
-             user &&
-             (user.phoneNumber || user.phone) &&
-             user.isWhatsAppEnabled !== false
+             whatsappRecipient &&
+             (isWhatsAppTestJob || (user && user.isWhatsAppEnabled !== false))
            ) {
-               const phone = user.phoneNumber || user.phone;
                await whatsappChannelService.sendNotification(waConfig, {
-                   to: phone,
+                   to: whatsappRecipient,
+                   text: notification?.text,
                    title,
                    message,
                    signal,
                    announcement,
                });
            } else {
-               logger.debug(`Skipping WhatsApp for User ${userId} - Channel Disabled in Settings`);
+               logger.debug(`Skipping WhatsApp for User ${userId} - channel disabled, recipient missing, or user opted out`);
            }
       }
       else if (type === 'push') {

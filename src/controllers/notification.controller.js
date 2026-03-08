@@ -8,12 +8,16 @@ import Setting from '../models/Setting.js';
 import User from '../models/User.js';
 import telegramService from '../services/channels/telegram.service.js';
 import whatsappChannelService from '../services/channels/whatsapp.service.js';
+import notificationQueue from '../services/notificationQueue.js';
 import logger from '../config/log.js';
+
+const getErrorMessage = (error, fallback) => (error instanceof Error ? error.message : fallback);
 
 const buildTelegramConnectionPayload = (user) => ({
   connected: Boolean(user?.telegramChatId),
   chatId: user?.telegramChatId || null,
   username: user?.telegramUsername || null,
+  displayName: user?.telegramDisplayName || user?.telegramUsername || null,
   connectedAt: user?.telegramConnectedAt || null,
   botUsername: telegramService.getTelegramConfig().botUsername || null,
 });
@@ -164,6 +168,7 @@ const getTelegramConnectLink = catchAsync(async (req, res) => {
 const disconnectTelegram = catchAsync(async (req, res) => {
   req.user.telegramChatId = undefined;
   req.user.telegramUsername = undefined;
+  req.user.telegramDisplayName = undefined;
   req.user.telegramConnectedAt = undefined;
   req.user.telegramLinkToken = undefined;
   req.user.telegramLinkTokenExpiresAt = undefined;
@@ -188,6 +193,15 @@ const sendWhatsAppTestMessage = catchAsync(async (req, res) => {
     throw new ApiError(httpStatus.INTERNAL_SERVER_ERROR, 'WhatsApp channel is not configured on the server.');
   }
 
+  try {
+    await whatsappChannelService.validateChannel(waConfig);
+  } catch (error) {
+    throw new ApiError(
+      httpStatus.BAD_GATEWAY,
+      getErrorMessage(error, 'WhatsApp provider validation failed. Check the server configuration.')
+    );
+  }
+
   const now = new Date();
   const defaultMessage = [
     'MSPK Trade Solutions',
@@ -198,19 +212,71 @@ const sendWhatsAppTestMessage = catchAsync(async (req, res) => {
   ].join('\n');
 
   const message = String(req.body?.message || '').trim() || defaultMessage;
-  const result = await whatsappChannelService.sendText(waConfig, {
-    to: phone,
+  const provider = whatsappChannelService.getProviderName(waConfig);
+  const notification = {
+    title: 'MSPK Trade Solutions',
+    message: [
+      'WhatsApp test message',
+      `User: ${req.user.name || req.user.email || 'Trader'}`,
+      `Time: ${now.toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' })}`,
+      'If you received this message, your WhatsApp alert delivery is working.',
+    ].join('\n'),
     text: message,
+  };
+
+  try {
+    await notificationQueue.add(
+      'send-whatsapp-test',
+      {
+        type: 'whatsapp-test',
+        userId: String(req.user._id),
+        recipient: phone,
+        notification,
+      },
+      {
+        removeOnComplete: true,
+        removeOnFail: 50,
+        attempts: 2,
+        backoff: {
+          type: 'exponential',
+          delay: 5000,
+        },
+      }
+    );
+
+    logger.info(`WhatsApp test message queued for user ${req.user._id} via ${provider}`);
+
+    return res.status(httpStatus.ACCEPTED).send({
+      message: 'WhatsApp test message queued successfully',
+      provider,
+      to: phone,
+      queued: true,
+      externalMessageId: null,
+    });
+  } catch (queueError) {
+    logger.warn(`Failed to enqueue WhatsApp test for user ${req.user._id}: ${queueError.message}`);
+  }
+
+  setImmediate(async () => {
+    try {
+      const result = await whatsappChannelService.sendNotification(waConfig, {
+        to: phone,
+        text: message,
+        title: notification.title,
+        message: notification.message,
+      });
+      logger.info(`WhatsApp test message sent for user ${req.user._id} via ${result.provider} (background fallback)`);
+    } catch (sendError) {
+      logger.error(`WhatsApp test message failed for user ${req.user._id} in background fallback`, sendError);
+    }
   });
 
-  logger.info(`WhatsApp test message sent for user ${req.user._id} via ${result.provider}`);
-
-  res.send({
-    message: 'WhatsApp test message sent successfully',
-    provider: result.provider,
-    to: result.to,
-    queued: result.queued || false,
-    externalMessageId: result.messageId || null,
+  res.status(httpStatus.ACCEPTED).send({
+    message: 'WhatsApp test message accepted for background delivery',
+    provider,
+    to: phone,
+    queued: true,
+    externalMessageId: null,
   });
 });
 
@@ -224,6 +290,10 @@ const handleTelegramWebhook = catchAsync(async (req, res) => {
   const text = String(message?.text || '').trim();
   const chatId = message?.chat?.id ? String(message.chat.id) : null;
   const username = message?.from?.username || message?.chat?.username || null;
+  const displayName = [message?.from?.first_name, message?.from?.last_name]
+    .filter((part) => typeof part === 'string' && part.trim())
+    .join(' ')
+    .trim() || username || null;
 
   if (!chatId || !text.startsWith('/start')) {
     return res.status(httpStatus.OK).send({ ok: true });
@@ -264,6 +334,7 @@ const handleTelegramWebhook = catchAsync(async (req, res) => {
       $unset: {
         telegramChatId: 1,
         telegramUsername: 1,
+        telegramDisplayName: 1,
         telegramConnectedAt: 1,
         telegramLinkToken: 1,
         telegramLinkTokenExpiresAt: 1,
@@ -273,6 +344,7 @@ const handleTelegramWebhook = catchAsync(async (req, res) => {
 
   user.telegramChatId = chatId;
   user.telegramUsername = username;
+  user.telegramDisplayName = displayName;
   user.telegramConnectedAt = now;
   user.telegramLinkToken = undefined;
   user.telegramLinkTokenExpiresAt = undefined;

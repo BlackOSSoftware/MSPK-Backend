@@ -1,11 +1,12 @@
-import { Queue } from 'bullmq';
 import config from '../config/config.js';
 import logger from '../config/log.js';
 import { redisSubscriber } from './redis.service.js';
+import '../models/Plan.js';
 import Notification from '../models/Notification.js';
 import User from '../models/User.js';
 import MasterSymbol from '../models/MasterSymbol.js';
 import Setting from '../models/Setting.js'; // Import Setting model
+import notificationQueue from './notificationQueue.js';
 import {
   getSignalAudienceGroups,
   hasAudienceOverlap,
@@ -25,13 +26,6 @@ import {
   hasSelectedSignalSymbol,
 } from '../utils/userSignalSelection.js';
 import { sendToUser } from './websocket.service.js';
-
-const connection = {
-  host: config.redis.host,
-  port: config.redis.port,
-};
-
-const notificationQueue = new Queue('notifications', { connection });
 
 const serializeRealtimeNotification = (notification) => ({
   _id: notification._id,
@@ -54,6 +48,15 @@ const emitRealtimeNotifications = (notificationDocs = []) => {
     });
   });
 };
+
+const yieldToEventLoop = () =>
+  new Promise((resolve) => {
+    if (global.setImmediate) {
+      setImmediate(resolve);
+      return;
+    }
+    setTimeout(resolve, 0);
+  });
 
 class NotificationService {
   constructor() {
@@ -285,6 +288,7 @@ class NotificationService {
       try {
           const { targetAudience, title, message } = announcement;
           const query = { status: 'Active' };
+          const debugLive = process.env.DEBUG_LIVE === 'true';
           const waSetting = await Setting.findOne({ key: 'whatsapp_config' }).lean();
           const whatsappEnabled = whatsappChannelService.isConfigured(waSetting?.value || null);
 
@@ -317,7 +321,7 @@ class NotificationService {
                       status: 'active',
                       endDate: { $gt: now },
                       plan: { $in: eligiblePlanIds }
-                  }).select('user');
+                  }).select('user').lean();
                   
                   const userIdsFromSubs = Array.from(new Set(activeSubs.map(s => s.user.toString())));
                   query._id = { $in: userIdsFromSubs };
@@ -327,20 +331,23 @@ class NotificationService {
               }
           }
 
-          // LOGGING FOR DEBUG
-          console.log('[DEBUG-LIVE] Target Audience:', JSON.stringify(targetAudience));
-          console.log('[DEBUG-LIVE] Generated Query:', JSON.stringify(query));
+          if (debugLive) {
+              logger.debug(`[DEBUG-LIVE] Target Audience: ${JSON.stringify(targetAudience)}`);
+              logger.debug(`[DEBUG-LIVE] Generated Query: ${JSON.stringify(query)}`);
+          }
 
-          const users = await User.find(query).select('_id name phone phoneNumber');
+          const users = await User.find(query).select('_id name phone phoneNumber').lean();
           
-          console.log(`[DEBUG-LIVE] Users Found: ${users.length}`);
+          if (debugLive) {
+              logger.debug(`[DEBUG-LIVE] Users Found: ${users.length}`);
+          }
 
           if (users.length === 0) {
-              logger.info('[DEBUG-LIVE] No users found for announcement broadcast matching filters');
+              logger.info('No users found for announcement broadcast matching filters');
               return;
           }
 
-          logger.info(`[DEBUG-LIVE] Scheduling announcement broadcast for ${users.length} users`);
+          logger.info(`Scheduling announcement broadcast for ${users.length} users`);
 
           // 0. Telegram Channel Broadcast (One time)
           // We assume this is a general announcement for the public channel
@@ -350,31 +357,33 @@ class NotificationService {
               announcement: { title, message }
           }, { removeOnComplete: true });
 
-          const promises = users.map(user => {
+          const safeAnnouncement = announcement.toObject ? announcement.toObject() : announcement;
+          const JOB_BATCH_SIZE = 200;
+          for (let index = 0; index < users.length; index += JOB_BATCH_SIZE) {
+              const batch = users.slice(index, index + JOB_BATCH_SIZE);
               const jobs = [];
-              
-              // 1. Push Job
-              jobs.push(notificationQueue.add('send-push-announcement', {
-                  type: 'push',
-                  userId: user._id,
-                  announcement: announcement.toObject ? announcement.toObject() : announcement // Ensure plain object
-              }, { removeOnComplete: true }));
 
-              // 2. WhatsApp Job
-              // Only if user has phone. In production, check consent/settings too.
-              // Note: This can generate A LOT of jobs. Bulk APIs are preferred but per-user job is safer for rate limiting in worker.
-              if (whatsappEnabled && (user.phone || user.phoneNumber)) { // Check schema field
-                   jobs.push(notificationQueue.add('send-whatsapp-announcement', {
-                      type: 'whatsapp',
-                      userId: user._id, // Worker will fetch user to get phone
-                      announcement: announcement.toObject ? announcement.toObject() : announcement
-                   }, { removeOnComplete: true }));
+              for (const user of batch) {
+                  // 1. Push Job
+                  jobs.push(notificationQueue.add('send-push-announcement', {
+                      type: 'push',
+                      userId: user._id,
+                      announcement: safeAnnouncement
+                  }, { removeOnComplete: true }));
+
+                  // 2. WhatsApp Job
+                  if (whatsappEnabled && (user.phone || user.phoneNumber)) {
+                      jobs.push(notificationQueue.add('send-whatsapp-announcement', {
+                          type: 'whatsapp',
+                          userId: user._id,
+                          announcement: safeAnnouncement
+                      }, { removeOnComplete: true }));
+                  }
               }
 
-              return Promise.all(jobs);
-          });
-
-          await Promise.all(promises);
+              await Promise.allSettled(jobs);
+              await yieldToEventLoop();
+          }
 
           // Save In-App Notifications
           const notificationDocs = users.map(user => ({
@@ -529,7 +538,7 @@ class NotificationService {
           const activeSubs = await Subscription.find({
               status: 'active',
               endDate: { $gt: now }
-          }).select('user');
+          }).select('user').lean();
 
           if (activeSubs.length === 0) {
               logger.warn('No active subscriptions found for economic alert');
@@ -542,7 +551,7 @@ class NotificationService {
           const activeUsers = await User.find({
               _id: { $in: userIds },
               status: 'Active' // Double check user is valid
-          }).select('_id name email');
+          }).select('_id name email').lean();
 
           // Format event time
           const eventDate = new Date(economicEvent.date);
@@ -585,35 +594,38 @@ class NotificationService {
               logger.error('Failed to create announcement for economic alert', announcementError);
           }
 
-          // Send to all users
-          for (const user of activeUsers) {
-              try {
-                  // 1. Send Push Notification
-                  await notificationQueue.add('send-push', {
-                      type: 'push',
-                      userId: user._id,
-                      notification: {
-                          title,
-                          message,
-                          type: 'ECONOMIC_ALERT',
-                          data: notificationData
-                      }
-                  }, { removeOnComplete: true });
-
-                  // 2. Create In-App Notification
-                  const notification = await Notification.create({
-                      user: user._id,
+          // Send push jobs in controlled batches
+          const PUSH_BATCH_SIZE = 200;
+          for (let index = 0; index < activeUsers.length; index += PUSH_BATCH_SIZE) {
+              const batch = activeUsers.slice(index, index + PUSH_BATCH_SIZE);
+              const jobs = batch.map((user) => notificationQueue.add('send-push', {
+                  type: 'push',
+                  userId: user._id,
+                  notification: {
                       title,
                       message,
                       type: 'ECONOMIC_ALERT',
-                      data: notificationData,
-                      link: '/announcements/calendar'
-                  });
-                  emitRealtimeNotifications([notification]);
+                      data: notificationData
+                  }
+              }, { removeOnComplete: true }));
 
-              } catch (userError) {
-                  logger.error(`Failed to send alert to user ${user._id}:`, userError.message);
-              }
+              await Promise.allSettled(jobs);
+              await yieldToEventLoop();
+          }
+
+          // Save in-app notifications in bulk
+          const notificationDocs = activeUsers.map((user) => ({
+              user: user._id,
+              title,
+              message,
+              type: 'ECONOMIC_ALERT',
+              data: notificationData,
+              link: '/announcements/calendar'
+          }));
+
+          if (notificationDocs.length > 0) {
+              const createdNotifications = await Notification.insertMany(notificationDocs, { ordered: false });
+              emitRealtimeNotifications(createdNotifications);
           }
 
           logger.info(`Economic alert sent successfully to ${activeUsers.length} users`);

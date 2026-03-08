@@ -19,6 +19,25 @@ const normalizeWsToken = (value) => {
   return token;
 };
 
+const normalizeWsRequestUrl = (value) => {
+  const raw = String(value || '').trim();
+  if (!raw) return '/';
+
+  if (raw.startsWith('//?')) {
+    return raw.slice(1);
+  }
+
+  if (raw.startsWith('?')) {
+    return `/${raw}`;
+  }
+
+  if (raw.startsWith('/')) {
+    return raw;
+  }
+
+  return `/${raw}`;
+};
+
 const initWebSocket = (server) => {
   wss = new WebSocketServer({ server });
 
@@ -26,7 +45,14 @@ const initWebSocket = (server) => {
     logger.debug('New WebSocket connection attempt');
 
     // Handle authentication
-    const url = new URL(req.url, `http://${req.headers.host}`);
+    let url;
+    try {
+      url = new URL(normalizeWsRequestUrl(req.url), `http://${req.headers.host || 'localhost'}`);
+    } catch (error) {
+      logger.error(`WebSocket URL Parse Error: ${error.message}`);
+      ws.close(1008, 'Invalid connection URL');
+      return;
+    }
     const token = normalizeWsToken(url.searchParams.get('token'));
 
     if (token) {

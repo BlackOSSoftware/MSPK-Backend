@@ -10,6 +10,7 @@ class EconomicService {
             data: null,
             lastFetch: 0
         };
+        this.isAlertCheckRunning = false;
         // Cache duration: 1 Hour (Free tier limit is 250 calls/day, so 1 call/hr is safe)
         this.CACHE_DURATION = 60 * 60 * 1000; 
         this.baseUrl = 'https://financialmodelingprep.com/api/v3';
@@ -149,21 +150,41 @@ class EconomicService {
         const events = await this.getCalendar(from, to);
         if (!events || events.length === 0) return;
 
-        let upsertCount = 0;
-        for (const e of events) {
-            const eventId = `${e.date}_${e.country}_${e.event}`.replace(/\s+/g, '_');
-            
-            await EconomicEvent.findOneAndUpdate(
-                { eventId },
-                {
-                    ...e,
-                    eventId,
-                    date: new Date(e.date)
-                },
-                { upsert: true, new: true }
-            );
-            upsertCount++;
+        const operations = [];
+        for (const event of events) {
+            const eventDate = new Date(event.date);
+            if (Number.isNaN(eventDate.getTime())) continue;
+
+            const eventId = `${event.date}_${event.country}_${event.event}`.replace(/\s+/g, '_');
+            operations.push({
+                updateOne: {
+                    filter: { eventId },
+                    update: {
+                        $set: {
+                            ...event,
+                            eventId,
+                            date: eventDate
+                        }
+                    },
+                    upsert: true
+                }
+            });
         }
+
+        if (operations.length === 0) {
+            logger.info('ECONOMIC: No valid events to sync.');
+            return;
+        }
+
+        const CHUNK_SIZE = 500;
+        let upsertCount = 0;
+
+        for (let index = 0; index < operations.length; index += CHUNK_SIZE) {
+            const chunk = operations.slice(index, index + CHUNK_SIZE);
+            await EconomicEvent.bulkWrite(chunk, { ordered: false });
+            upsertCount += chunk.length;
+        }
+
         logger.info(`ECONOMIC: Synced ${upsertCount} events to Database.`);
     }
 
@@ -172,6 +193,13 @@ class EconomicService {
      * Sends alerts 30 minutes before event
      */
     async checkAndTriggerAlerts() {
+        if (this.isAlertCheckRunning) {
+            logger.warn('ECONOMIC: Previous alert check still running, skipping overlap.');
+            return;
+        }
+
+        this.isAlertCheckRunning = true;
+
         try {
             const now = new Date();
             const alertWindow = new Date(now.getTime() + 30 * 60 * 1000); // 30 minutes window
@@ -181,12 +209,13 @@ class EconomicService {
                 impact: 'High',
                 date: { $gte: now, $lte: alertWindow },
                 isAlertSent: false
-            });
+            }).select('_id event country currency impact date actual forecast previous').lean();
 
             if (pendingEvents.length === 0) return;
 
             logger.info(`ECONOMIC: Found ${pendingEvents.length} high-impact events for alert.`);
 
+            const alertedEventIds = [];
             for (const event of pendingEvents) {
                 try {
                     // Send alert to all users via notification service
@@ -201,9 +230,7 @@ class EconomicService {
                         previous: event.previous
                     });
 
-                    // Mark as alerted
-                    event.isAlertSent = true;
-                    await event.save();
+                    alertedEventIds.push(event._id);
 
                     logger.info(`ECONOMIC: Alert sent for ${event.event} (${event.currency})`);
 
@@ -212,10 +239,19 @@ class EconomicService {
                 }
             }
 
+            if (alertedEventIds.length > 0) {
+                await EconomicEvent.updateMany(
+                    { _id: { $in: alertedEventIds } },
+                    { $set: { isAlertSent: true } }
+                );
+            }
+
             logger.info(`ECONOMIC: Completed alert check - ${pendingEvents.length} alerts sent`);
 
         } catch (error) {
             logger.error('ECONOMIC: Alert check failed', error);
+        } finally {
+            this.isAlertCheckRunning = false;
         }
     }
 }

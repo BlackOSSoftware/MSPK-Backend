@@ -4,6 +4,7 @@ import logger from '../../config/log.js';
 import msg91Service from '../msg91.service.js';
 
 const DEFAULT_ULTRAMSG_BASE_URL = 'https://api.ultramsg.com';
+const DEFAULT_REQUEST_TIMEOUT_MS = 30000;
 
 const normalizeProvider = (value = '') => {
   const normalized = String(value || '').trim().toLowerCase();
@@ -23,6 +24,21 @@ const toPositiveInteger = (value, fallback) => {
     return Math.round(parsed);
   }
   return fallback;
+};
+
+const getRequestTimeoutMs = () =>
+  toPositiveInteger(process.env.WHATSAPP_REQUEST_TIMEOUT_MS, DEFAULT_REQUEST_TIMEOUT_MS);
+
+const isPlaceholderValue = (value = '') => {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (!normalized) return false;
+
+  return (
+    normalized.includes('your_') ||
+    normalized.includes('example') ||
+    normalized === 'null' ||
+    normalized === 'undefined'
+  );
 };
 
 const isChatId = (value = '') => /@(?:c|g)\.us$/i.test(String(value || '').trim());
@@ -129,7 +145,11 @@ const isConfigured = (rawConfig = null) => {
   }
 
   if (resolved.provider === 'msg91') {
-    return Boolean(process.env.MSG91_AUTH_KEY && process.env.MSG91_WHATSAPP_INTEGRATED_NUMBER);
+    return Boolean(
+      process.env.MSG91_AUTH_KEY &&
+        process.env.MSG91_WHATSAPP_INTEGRATED_NUMBER &&
+        !isPlaceholderValue(process.env.MSG91_WHATSAPP_INTEGRATED_NUMBER)
+    );
   }
 
   return false;
@@ -178,7 +198,7 @@ const sendUltraMsgText = async (resolvedConfig, { to, text, priority }) => {
     headers: {
       'Content-Type': 'application/x-www-form-urlencoded',
     },
-    timeout: 15000,
+    timeout: getRequestTimeoutMs(),
   });
 
   logger.info(`WhatsApp UltraMsg send accepted for ${recipient}`);
@@ -211,13 +231,22 @@ const sendMetaText = async (resolvedConfig, { to, text }) => {
     },
   };
 
-  const response = await axios.post(url, payload, {
-    headers: {
-      Authorization: `Bearer ${resolvedConfig.meta.accessToken}`,
-      'Content-Type': 'application/json',
-    },
-    timeout: 15000,
-  });
+  let response;
+  try {
+    response = await axios.post(url, payload, {
+      headers: {
+        Authorization: `Bearer ${resolvedConfig.meta.accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      timeout: getRequestTimeoutMs(),
+    });
+  } catch (error) {
+    const providerError = error?.response?.data?.error;
+    if (providerError?.code === 190) {
+      throw new Error('WhatsApp Meta access token has expired or is invalid. Update WHATSAPP_ACCESS_TOKEN.');
+    }
+    throw error;
+  }
 
   logger.info(`WhatsApp Meta send accepted for ${recipient}`);
 
@@ -227,6 +256,39 @@ const sendMetaText = async (resolvedConfig, { to, text }) => {
     raw: response.data,
     queued: false,
     messageId: extractMessageId(response.data),
+  };
+};
+
+const validateChannel = async (rawConfig = null) => {
+  const resolvedConfig = resolveWhatsAppConfig(rawConfig);
+  if (!isConfigured(resolvedConfig)) {
+    throw new Error('WhatsApp channel is not configured');
+  }
+
+  if (resolvedConfig.provider === 'meta') {
+    const url = `https://graph.facebook.com/v17.0/${resolvedConfig.meta.phoneNumberId}`;
+
+    try {
+      await axios.get(url, {
+        headers: {
+          Authorization: `Bearer ${resolvedConfig.meta.accessToken}`,
+        },
+        params: {
+          fields: 'id',
+        },
+        timeout: Math.min(getRequestTimeoutMs(), 8000),
+      });
+    } catch (error) {
+      const providerError = error?.response?.data?.error;
+      if (providerError?.code === 190) {
+        throw new Error('WhatsApp Meta access token has expired or is invalid. Update WHATSAPP_ACCESS_TOKEN.');
+      }
+      throw new Error(providerError?.message || error?.message || 'WhatsApp provider validation failed');
+    }
+  }
+
+  return {
+    provider: resolvedConfig.provider,
   };
 };
 
@@ -317,6 +379,7 @@ export default {
   isConfigured,
   normalizeRecipient,
   resolveWhatsAppConfig,
+  validateChannel,
   sendNotification,
   sendText,
 };

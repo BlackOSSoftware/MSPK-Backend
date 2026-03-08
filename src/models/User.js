@@ -133,6 +133,11 @@ const userSchema = new mongoose.Schema(
       trim: true,
       set: emptyStringToUndefined,
     },
+    telegramDisplayName: {
+      type: String,
+      trim: true,
+      set: emptyStringToUndefined,
+    },
     telegramConnectedAt: {
       type: Date,
     },

@@ -3,6 +3,7 @@ import mongoose from 'mongoose';
 import Signal from '../models/Signal.js';
 import MasterSymbol from '../models/MasterSymbol.js';
 import catchAsync from '../utils/catchAsync.js';
+import logger from '../config/log.js';
 import { signalService } from '../services/index.js';
 import {
   buildWebhookSignalId,
@@ -16,8 +17,27 @@ const normalizeTimeframe = (timeframe) => {
   if (timeframe === null || timeframe === undefined) return timeframe;
   const tf = String(timeframe).trim();
   if (!tf) return tf;
-  // If sender sends "1" / "5" etc, interpret as minutes.
-  if (/^\d+$/.test(tf)) return `${tf}m`;
+  const normalized = tf.toUpperCase();
+
+  if (normalized === 'S') return 'Scalp';
+  if (/^\d+S$/.test(normalized)) return `${normalized.slice(0, -1)}s`;
+  if (/^\d+M$/.test(normalized)) return `${normalized.slice(0, -1)}m`;
+  if (/^\d+H$/.test(normalized)) return `${normalized.slice(0, -1)}h`;
+  if (['D', '1D', 'DAY'].includes(normalized)) return '1D';
+  if (['W', '1W', 'WEEK'].includes(normalized)) return '1W';
+  if (['MO', 'MON', 'MONTH', '1MO', '1MON', '1MONTH'].includes(normalized)) return '1M';
+
+  if (/^\d+$/.test(normalized)) {
+    const amount = Number(normalized);
+    if (!Number.isFinite(amount) || amount <= 0) return tf;
+    if (amount < 60) return `${amount}m`;
+    if (amount < 1440 && amount % 60 === 0) return `${amount / 60}h`;
+    if (amount === 1440) return '1D';
+    if (amount === 10080) return '1W';
+    if (amount === 43200) return '1M';
+    return `${amount}m`;
+  }
+
   return tf;
 };
 
@@ -110,33 +130,37 @@ const getWebhookSymbolInput = (body = {}) =>
 
 const looksLikeMasterSymbolId = (value) => /-[a-f0-9]{24}$/i.test(String(value || '').trim());
 
-const resolveMasterSymbol = async (input) => {
+const resolveMasterSymbol = async (input, { symbolIdRequested = false } = {}) => {
   const rawInput = String(input || '').trim();
   if (!rawInput) return null;
 
   const normalizedSymbol = normalizeSignalSymbol(rawInput);
-  const filters = [
-    { symbolId: new RegExp(`^${escapeRegex(rawInput)}$`, 'i') },
-    { symbol: normalizedSymbol },
-  ];
+  if (!symbolIdRequested && !mongoose.Types.ObjectId.isValid(rawInput)) {
+    return MasterSymbol.findOne({ symbol: normalizedSymbol }).lean();
+  }
+
+  const filters = [{ symbol: normalizedSymbol }];
 
   if (mongoose.Types.ObjectId.isValid(rawInput)) {
     filters.unshift({ _id: rawInput });
   }
 
+  filters.unshift({ symbolId: new RegExp(`^${escapeRegex(rawInput)}$`, 'i') });
+
   return MasterSymbol.findOne({ $or: filters }).lean();
 };
 
 const receiveSignal = catchAsync(async (req, res) => {
+  const startedAt = Date.now();
   const event = String(req.body.event || '').trim().toUpperCase();
   const webhookId = String(
     req.body.uniq_id || req.body.unique_id || req.body.uniqueId || req.body.uniqe_id || ''
   ).trim();
   const symbolInput = getWebhookSymbolInput(req.body);
-  const resolvedMasterSymbol = await resolveMasterSymbol(symbolInput);
   const symbolIdRequested =
     Boolean(req.body.symbol_id || req.body.symbolId || req.body.master_symbol_id || req.body.masterSymbolId) ||
     looksLikeMasterSymbolId(symbolInput);
+  const resolvedMasterSymbol = await resolveMasterSymbol(symbolInput, { symbolIdRequested });
   const symbol = resolvedMasterSymbol
     ? normalizeSignalSymbol(resolvedMasterSymbol.symbol)
     : normalizeSignalSymbol(req.body.symbol || symbolInput);
@@ -146,14 +170,22 @@ const receiveSignal = catchAsync(async (req, res) => {
   const isFreeFromPayload = parseBoolean(req.body.is_free ?? req.body.isFree ?? req.body.free);
   const isFree = isFreeFromPayload ?? false;
 
+  const sendWebhookResponse = (status, payload) => {
+    logger.info(
+      `[WEBHOOK] ${event || 'ENTRY'} ${symbol || symbolInput || 'unknown'} responded in ${Date.now() - startedAt}ms`
+    );
+    return res.status(status).send(payload);
+  };
+
   if (symbolIdRequested && symbolInput && !resolvedMasterSymbol) {
-    return res
-      .status(httpStatus.BAD_REQUEST)
-      .send({ message: 'Provided symbol ID does not match any master symbol.', symbolId: symbolInput });
+    return sendWebhookResponse(httpStatus.BAD_REQUEST, {
+      message: 'Provided symbol ID does not match any master symbol.',
+      symbolId: symbolInput,
+    });
   }
 
   if (!symbol || !segment) {
-    return res.status(httpStatus.BAD_REQUEST).send({
+    return sendWebhookResponse(httpStatus.BAD_REQUEST, {
       message: 'Valid symbol and segment are required to process webhook.',
       symbol: symbolInput || req.body.symbol || '',
     });
@@ -213,7 +245,7 @@ const receiveSignal = catchAsync(async (req, res) => {
   if (event === 'EXIT') {
     const existing = await findSignalByWebhookId(webhookId);
     if (!existing) {
-      return res.status(httpStatus.OK).send({ status: 'not_found', uniq_id: webhookId, symbol });
+      return sendWebhookResponse(httpStatus.OK, { status: 'not_found', uniq_id: webhookId, symbol });
     }
 
     const desiredStatus = deriveExitStatus({
@@ -245,7 +277,7 @@ const receiveSignal = catchAsync(async (req, res) => {
       new Date(existing.exitTime).getTime() === incomingExitTime.getTime();
 
     if (alreadyApplied) {
-      return res.status(httpStatus.OK).send({ status: 'ok', signal: existing });
+      return sendWebhookResponse(httpStatus.OK, { status: 'ok', signal: existing });
     }
 
     const updateBody = {
@@ -257,7 +289,7 @@ const receiveSignal = catchAsync(async (req, res) => {
     };
 
     const updated = await signalService.updateSignalById(existing.id, updateBody);
-    return res.status(httpStatus.OK).send({ status: 'ok', signal: updated });
+    return sendWebhookResponse(httpStatus.OK, { status: 'ok', signal: updated });
   }
 
   const normalizedTimeframe = normalizeTimeframe(req.body.timeframe);
@@ -312,7 +344,7 @@ const receiveSignal = catchAsync(async (req, res) => {
 
     if (!isClosedSignal) {
       const updated = await signalService.updateSignalById(existingByUniqueId.id, updateBody);
-      return res.status(httpStatus.OK).send({ status: 'ok', signal: updated, updatedExisting: true });
+      return sendWebhookResponse(httpStatus.OK, { status: 'ok', signal: updated, updatedExisting: true });
     }
   }
 
@@ -321,10 +353,10 @@ const receiveSignal = catchAsync(async (req, res) => {
   // signalService has an in-memory 5m dedup guard that can return null.
   if (!created) {
     const afterGuard = await Signal.findOne({ uniqueId: signalBody.uniqueId });
-    return res.status(httpStatus.OK).send({ status: 'duplicate_blocked', signal: afterGuard || null });
+    return sendWebhookResponse(httpStatus.OK, { status: 'duplicate_blocked', signal: afterGuard || null });
   }
 
-  return res.status(httpStatus.OK).send({ status: 'ok', signal: created });
+  return sendWebhookResponse(httpStatus.OK, { status: 'ok', signal: created });
 });
 
 export default {

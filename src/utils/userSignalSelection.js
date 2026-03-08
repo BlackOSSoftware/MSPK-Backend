@@ -1,4 +1,34 @@
+import { isCryptoLikeSymbol } from './signalRouting.js';
+
 const MAX_SELECTED_SYMBOLS_PER_SEGMENT = 10;
+
+const getSelectedSymbolAliases = (symbol = '') => {
+  const normalized = String(symbol || '').trim().toUpperCase();
+  if (!normalized) return [];
+
+  const aliases = new Set([normalized]);
+  if (!isCryptoLikeSymbol(normalized)) {
+    return Array.from(aliases);
+  }
+
+  const stripped = normalized.replace(/(\.P|PERP)$/i, '');
+  const derivativeSuffix = normalized.slice(stripped.length);
+
+  if (stripped.endsWith('USDT')) {
+    aliases.add(`${stripped.slice(0, -1)}${derivativeSuffix}`);
+  } else if (stripped.endsWith('USD')) {
+    aliases.add(`${stripped}T${derivativeSuffix}`);
+  }
+
+  return Array.from(aliases);
+};
+
+const expandSelectedSymbols = (symbols = []) =>
+  Array.from(
+    new Set(
+      normalizeSelectedSymbols(symbols).flatMap((symbol) => getSelectedSymbolAliases(symbol))
+    )
+  );
 
 const normalizeSelectedSymbols = (symbols = []) =>
   Array.from(
@@ -48,7 +78,7 @@ const getUserSelectedSymbols = (user, symbolDocsBySymbol = null) =>
     : normalizeSelectedSymbols(user?.marketWatchlist);
 
 const buildSelectedSignalFilter = (symbols = []) => {
-  const selectedSymbols = normalizeSelectedSymbols(symbols);
+  const selectedSymbols = expandSelectedSymbols(symbols);
   if (selectedSymbols.length === 0) {
     return { _id: { $in: [] } };
   }
@@ -60,13 +90,14 @@ const hasSelectedSignalSymbol = (symbols = [], signalSymbol = '') => {
   const normalizedSignal = String(signalSymbol || '').trim().toUpperCase();
   if (!normalizedSignal) return false;
 
-  return normalizeSelectedSymbols(symbols).includes(normalizedSignal);
+  return expandSelectedSymbols(symbols).includes(normalizedSignal);
 };
 
 export {
   MAX_SELECTED_SYMBOLS_PER_SEGMENT,
   buildSelectedSignalFilter,
   buildSelectedSymbolDocsMap,
+  expandSelectedSymbols,
   getUserSelectedSymbols,
   hasSelectedSignalSymbol,
   limitSelectedSymbolsPerSegment,

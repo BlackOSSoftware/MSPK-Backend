@@ -15,22 +15,14 @@ const createAnnouncement = async (announcementBody) => {
   const isImmediatelyActive = announcement.isActive && 
       (!announcement.startDate || new Date(announcement.startDate) <= now);
 
-  console.log(`[DEBUG-LIVE] Announcement Created: ID=${announcement._id}`);
-  console.log(`[DEBUG-LIVE] isActive=${announcement.isActive}, startDate=${announcement.startDate}, now=${now}`);
-  console.log(`[DEBUG-LIVE] isImmediatelyActive=${isImmediatelyActive}, isNotificationSent=${announcement.isNotificationSent}`);
-
   if (isImmediatelyActive && !announcement.isNotificationSent) {
-      console.log('[DEBUG-LIVE] Triggering Immediate Notification (Creation)...');
-      // Fire and forget notification (or await if critical)
       notificationService.scheduleAnnouncementNotifications(announcement).catch(err => {
-          console.error('[DEBUG-LIVE] Initial Notification Trigger Failed', err);
+          console.error('Initial announcement notification trigger failed', err);
       });
       
       // Update flag
       announcement.isNotificationSent = true;
       await announcement.save();
-  } else {
-      console.log('[DEBUG-LIVE] Notification skipped on Creation (Scheduled for later).');
   }
 
   return announcement;
@@ -90,18 +82,11 @@ const updateAnnouncementById = async (announcementId, updateBody) => {
   const isImmediatelyActive = announcement.isActive && 
       (!announcement.startDate || new Date(announcement.startDate) <= now);
 
-  console.log(`[DEBUG-LIVE] Announcement Update: ID=${announcement._id}`);
-  console.log(`[DEBUG-LIVE] isActive=${announcement.isActive}, startDate=${announcement.startDate}, now=${now}`);
-  console.log(`[DEBUG-LIVE] isImmediatelyActive=${isImmediatelyActive}, isNotificationSent=${announcement.isNotificationSent}`);
-
   if (isImmediatelyActive && !announcement.isNotificationSent) {
-      console.log('[DEBUG-LIVE] Triggering Immediate Notification...');
       notificationService.scheduleAnnouncementNotifications(announcement).catch(err => {
-          console.error('[DEBUG-LIVE] Update Notification Trigger Failed', err);
+          console.error('Update announcement notification trigger failed', err);
       });
       announcement.isNotificationSent = true;
-  } else {
-      console.log('[DEBUG-LIVE] Notification skipped (Scheduled for later or already sent).');
   }
 
   await announcement.save();

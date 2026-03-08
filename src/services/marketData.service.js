@@ -82,6 +82,22 @@ class MarketDataService extends EventEmitter {
 
         this._lastKiteStatsLogAtMs = 0;
         this._lastMarketDataStatsLogAtMs = 0;
+        this._pendingTickBatches = [];
+        this._queuedTickCount = 0;
+        this._isTickDraining = false;
+        this._tickDrainScheduled = false;
+        this._lastTickDropWarnAtMs = 0;
+        const configuredTickBatchSize = Number.parseInt(
+            process.env.MARKET_DATA_TICK_BATCH_SIZE || process.env.MARKETDATA_TICK_BATCH_SIZE || '300',
+            10
+        );
+        this.tickProcessBatchSize = Number.isFinite(configuredTickBatchSize) && configuredTickBatchSize > 0
+            ? configuredTickBatchSize
+            : 300;
+        const configuredMaxQueuedTicks = Number.parseInt(process.env.MARKET_DATA_MAX_QUEUED_TICKS || '50000', 10);
+        this.maxQueuedTicks = Number.isFinite(configuredMaxQueuedTicks) && configuredMaxQueuedTicks > 0
+            ? configuredMaxQueuedTicks
+            : 50000;
     }
 
     async init() {
@@ -644,149 +660,248 @@ class MarketDataService extends EventEmitter {
             }
         }
 
-        for (const tick of ticks) {
-            let symbol = tick.symbol;
+        this._pendingTickBatches.push({
+            source,
+            ticks,
+            index: 0,
+        });
+        this._queuedTickCount += ticks.length;
 
-            if (source === 'kite' && tick.instrument_token) {
-                symbol = this.tokenMap[String(tick.instrument_token)] || symbol;
+        let droppedTicks = 0;
+        while (this._queuedTickCount > this.maxQueuedTicks && this._pendingTickBatches.length > 0) {
+            const oldestBatch = this._pendingTickBatches[0];
+            const remainingInBatch = Math.max(0, oldestBatch.ticks.length - oldestBatch.index);
+
+            if (remainingInBatch === 0) {
+                this._pendingTickBatches.shift();
+                continue;
             }
 
-            symbol = this._getCanonicalSymbol(symbol);
-            if (!symbol) continue;
-
-            const lastPrice = toNumber(tick.last_price ?? tick.price ?? tick.last, NaN);
-            if (!Number.isFinite(lastPrice)) continue;
-
-            const targetSymbols = this._resolveAliasTargets(symbol);
-            if (targetSymbols.length === 0) {
-                targetSymbols.push(symbol);
+            const overflow = this._queuedTickCount - this.maxQueuedTicks;
+            if (overflow >= remainingInBatch) {
+                this._pendingTickBatches.shift();
+                this._queuedTickCount -= remainingInBatch;
+                droppedTicks += remainingInBatch;
+                continue;
             }
 
-            for (const targetSymbol of targetSymbols) {
-                this.currentPrices[targetSymbol] = lastPrice;
-                const incomingSessionId =
-                    typeof tick.session_id === 'string' && tick.session_id.trim()
-                        ? tick.session_id.trim()
-                        : null;
+            oldestBatch.index += overflow;
+            this._queuedTickCount -= overflow;
+            droppedTicks += overflow;
+            break;
+        }
 
-                if (!this.currentQuotes[targetSymbol]) {
-                    this.currentQuotes[targetSymbol] = {
-                        last_price: lastPrice,
-                        ohlc: {
-                            open: lastPrice,
-                            high: lastPrice,
-                            low: lastPrice,
-                            close: lastPrice,
-                        },
-                        bid: 0,
-                        ask: 0,
-                        volume: 0,
-                        session_id: incomingSessionId,
-                    };
-                }
+        if (droppedTicks > 0) {
+            const now = Date.now();
+            if (now - this._lastTickDropWarnAtMs >= 5000) {
+                logger.warn(`MARKET_DATA: Dropped ${droppedTicks} queued ticks to protect event loop (max=${this.maxQueuedTicks})`);
+                this._lastTickDropWarnAtMs = now;
+            }
+        }
+        this._scheduleTickDrain();
+    }
 
-                const quote = this.currentQuotes[targetSymbol];
-                quote.last_price = lastPrice;
+    _scheduleTickDrain() {
+        if (this._tickDrainScheduled || this._isTickDraining) return;
+        this._tickDrainScheduled = true;
 
-                if (tick.ohlc) {
-                    const prevOpen = toNumber(quote.ohlc.open, lastPrice);
-                    const prevHigh = toNumber(quote.ohlc.high, lastPrice);
-                    const prevLow = toNumber(quote.ohlc.low, lastPrice);
-                    const incomingOpen = toNumber(tick.ohlc.open, prevOpen);
-                    const incomingHigh = toNumber(tick.ohlc.high, NaN);
-                    const incomingLow = toNumber(tick.ohlc.low, NaN);
-                    const incomingClose = toNumber(tick.ohlc.close, lastPrice);
-                    const open = Number.isFinite(incomingOpen) ? incomingOpen : prevOpen;
-                    const close = Number.isFinite(incomingClose) ? incomingClose : lastPrice;
-                    const prevSessionId =
-                        typeof quote.session_id === 'string' && quote.session_id.trim()
-                            ? quote.session_id.trim()
-                            : null;
-                    const isSessionReset = Boolean(
-                        incomingSessionId &&
-                        prevSessionId &&
-                        incomingSessionId !== prevSessionId
-                    );
-                    const high = Number.isFinite(incomingHigh)
-                        ? (
-                            isSessionReset
-                                ? Math.max(incomingHigh, open, close, lastPrice)
-                                : Math.max(prevHigh, incomingHigh, open, close, lastPrice)
-                        )
-                        : (
-                            isSessionReset
-                                ? Math.max(open, close, lastPrice)
-                                : Math.max(prevHigh, open, close, lastPrice)
-                        );
-                    const low = Number.isFinite(incomingLow)
-                        ? (
-                            isSessionReset
-                                ? Math.min(incomingLow, open, close, lastPrice)
-                                : Math.min(prevLow, incomingLow, open, close, lastPrice)
-                        )
-                        : (
-                            isSessionReset
-                                ? Math.min(open, close, lastPrice)
-                                : Math.min(prevLow, open, close, lastPrice)
-                        );
+        const schedule = global.setImmediate
+            ? global.setImmediate
+            : (fn) => setTimeout(fn, 0);
 
-                    quote.ohlc = {
-                        open,
-                        high,
-                        low,
-                        close,
-                    };
-                    if (incomingSessionId) {
-                        quote.session_id = incomingSessionId;
+        schedule(() => {
+            this._tickDrainScheduled = false;
+            this._drainTickQueue().catch((error) => {
+                logger.error(`MARKET_DATA: Tick drain failed: ${error.message}`);
+            });
+        });
+    }
+
+    async _drainTickQueue() {
+        if (this._isTickDraining) return;
+        this._isTickDraining = true;
+
+        try {
+            while (this._pendingTickBatches.length > 0) {
+                let processed = 0;
+
+                while (processed < this.tickProcessBatchSize && this._pendingTickBatches.length > 0) {
+                    const batch = this._pendingTickBatches[0];
+                    while (batch.index < batch.ticks.length && processed < this.tickProcessBatchSize) {
+                        this._processSingleTick(batch.ticks[batch.index], batch.source);
+                        batch.index += 1;
+                        processed += 1;
+                        this._queuedTickCount = Math.max(0, this._queuedTickCount - 1);
                     }
-                } else {
-                    quote.ohlc.high = Math.max(toNumber(quote.ohlc.high, lastPrice), lastPrice);
-                    quote.ohlc.low = Math.min(toNumber(quote.ohlc.low, lastPrice), lastPrice);
-                    quote.ohlc.close = lastPrice;
-                    if (!Number.isFinite(quote.ohlc.open)) {
-                        quote.ohlc.open = lastPrice;
+
+                    if (batch.index >= batch.ticks.length) {
+                        this._pendingTickBatches.shift();
                     }
                 }
 
-                const newBid = toNumber(tick.bid ?? tick.depth?.buy?.[0]?.price, 0);
-                const newAsk = toNumber(tick.ask ?? tick.depth?.sell?.[0]?.price, 0);
-                if (newBid > 0) quote.bid = newBid;
-                if (newAsk > 0) quote.ask = newAsk;
+                if (this._pendingTickBatches.length > 0) {
+                    await new Promise((resolve) => {
+                        if (global.setImmediate) {
+                            setImmediate(resolve);
+                            return;
+                        }
+                        setTimeout(resolve, 0);
+                    });
+                }
+            }
+        } finally {
+            this._isTickDraining = false;
+        }
 
-                const volume = toNumber(tick.total_volume ?? tick.volume ?? tick.last_quantity, quote.volume || 0);
-                quote.volume = volume;
+        if (this._pendingTickBatches.length > 0) {
+            this._scheduleTickDrain();
+        }
+    }
 
-                const open = toNumber(quote.ohlc.open, lastPrice);
-                const change = lastPrice - open;
-                const changePercent = open > 0 ? (change / open) * 100 : 0;
+    _processSingleTick(tick, source) {
+        if (!tick) return;
 
-                const payload = {
-                    symbol: targetSymbol,
-                    price: lastPrice,
+        let symbol = tick.symbol;
+
+        if (source === 'kite' && tick.instrument_token) {
+            symbol = this.tokenMap[String(tick.instrument_token)] || symbol;
+        }
+
+        symbol = this._getCanonicalSymbol(symbol);
+        if (!symbol) return;
+
+        const lastPrice = toNumber(tick.last_price ?? tick.price ?? tick.last, NaN);
+        if (!Number.isFinite(lastPrice)) return;
+
+        const targetSymbols = this._resolveAliasTargets(symbol);
+        if (targetSymbols.length === 0) {
+            targetSymbols.push(symbol);
+        }
+
+        for (const targetSymbol of targetSymbols) {
+            this.currentPrices[targetSymbol] = lastPrice;
+            const incomingSessionId =
+                typeof tick.session_id === 'string' && tick.session_id.trim()
+                    ? tick.session_id.trim()
+                    : null;
+
+            if (!this.currentQuotes[targetSymbol]) {
+                this.currentQuotes[targetSymbol] = {
                     last_price: lastPrice,
-                    open,
-                    high: toNumber(quote.ohlc.high, lastPrice),
-                    low: toNumber(quote.ohlc.low, lastPrice),
-                    change,
-                    changePercent,
-                    volume,
-                    total_volume: volume,
-                    bid: quote.bid || 0,
-                    ask: quote.ask || 0,
-                    timestamp: tick.timestamp || new Date(),
-                    provider: source === 'kite' ? 'kite' : 'market_data',
+                    ohlc: {
+                        open: lastPrice,
+                        high: lastPrice,
+                        low: lastPrice,
+                        close: lastPrice,
+                    },
+                    bid: 0,
+                    ask: 0,
+                    volume: 0,
+                    session_id: incomingSessionId,
                 };
-
-                this.emit('price_update', payload);
-                pipeline.push(payload);
-                this._persistSymbolPrice(targetSymbol);
             }
 
-            if (source !== 'kite') {
-                const candidateLatency = toNumber(tick._latencyMs, 0);
-                if (candidateLatency > 0) {
-                    this.marketDataLatency = candidateLatency;
+            const quote = this.currentQuotes[targetSymbol];
+            quote.last_price = lastPrice;
+
+            if (tick.ohlc) {
+                const prevOpen = toNumber(quote.ohlc.open, lastPrice);
+                const prevHigh = toNumber(quote.ohlc.high, lastPrice);
+                const prevLow = toNumber(quote.ohlc.low, lastPrice);
+                const incomingOpen = toNumber(tick.ohlc.open, prevOpen);
+                const incomingHigh = toNumber(tick.ohlc.high, NaN);
+                const incomingLow = toNumber(tick.ohlc.low, NaN);
+                const incomingClose = toNumber(tick.ohlc.close, lastPrice);
+                const open = Number.isFinite(incomingOpen) ? incomingOpen : prevOpen;
+                const close = Number.isFinite(incomingClose) ? incomingClose : lastPrice;
+                const prevSessionId =
+                    typeof quote.session_id === 'string' && quote.session_id.trim()
+                        ? quote.session_id.trim()
+                        : null;
+                const isSessionReset = Boolean(
+                    incomingSessionId &&
+                    prevSessionId &&
+                    incomingSessionId !== prevSessionId
+                );
+                const high = Number.isFinite(incomingHigh)
+                    ? (
+                        isSessionReset
+                            ? Math.max(incomingHigh, open, close, lastPrice)
+                            : Math.max(prevHigh, incomingHigh, open, close, lastPrice)
+                    )
+                    : (
+                        isSessionReset
+                            ? Math.max(open, close, lastPrice)
+                            : Math.max(prevHigh, open, close, lastPrice)
+                    );
+                const low = Number.isFinite(incomingLow)
+                    ? (
+                        isSessionReset
+                            ? Math.min(incomingLow, open, close, lastPrice)
+                            : Math.min(prevLow, incomingLow, open, close, lastPrice)
+                    )
+                    : (
+                        isSessionReset
+                            ? Math.min(open, close, lastPrice)
+                            : Math.min(prevLow, open, close, lastPrice)
+                    );
+
+                quote.ohlc = {
+                    open,
+                    high,
+                    low,
+                    close,
+                };
+                if (incomingSessionId) {
+                    quote.session_id = incomingSessionId;
                 }
+            } else {
+                quote.ohlc.high = Math.max(toNumber(quote.ohlc.high, lastPrice), lastPrice);
+                quote.ohlc.low = Math.min(toNumber(quote.ohlc.low, lastPrice), lastPrice);
+                quote.ohlc.close = lastPrice;
+                if (!Number.isFinite(quote.ohlc.open)) {
+                    quote.ohlc.open = lastPrice;
+                }
+            }
+
+            const newBid = toNumber(tick.bid ?? tick.depth?.buy?.[0]?.price, 0);
+            const newAsk = toNumber(tick.ask ?? tick.depth?.sell?.[0]?.price, 0);
+            if (newBid > 0) quote.bid = newBid;
+            if (newAsk > 0) quote.ask = newAsk;
+
+            const volume = toNumber(tick.total_volume ?? tick.volume ?? tick.last_quantity, quote.volume || 0);
+            quote.volume = volume;
+
+            const open = toNumber(quote.ohlc.open, lastPrice);
+            const change = lastPrice - open;
+            const changePercent = open > 0 ? (change / open) * 100 : 0;
+
+            const payload = {
+                symbol: targetSymbol,
+                price: lastPrice,
+                last_price: lastPrice,
+                open,
+                high: toNumber(quote.ohlc.high, lastPrice),
+                low: toNumber(quote.ohlc.low, lastPrice),
+                change,
+                changePercent,
+                volume,
+                total_volume: volume,
+                bid: quote.bid || 0,
+                ask: quote.ask || 0,
+                timestamp: tick.timestamp || new Date(),
+                provider: source === 'kite' ? 'kite' : 'market_data',
+            };
+
+            this.emit('price_update', payload);
+            pipeline.push(payload);
+            this._persistSymbolPrice(targetSymbol);
+        }
+
+        if (source !== 'kite') {
+            const candidateLatency = toNumber(tick._latencyMs, 0);
+            if (candidateLatency > 0) {
+                this.marketDataLatency = candidateLatency;
             }
         }
     }

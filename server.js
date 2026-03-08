@@ -55,6 +55,8 @@ const startServer = async () => {
 
     // 2.5 Initialize Firebase
     initializeFirebase();
+    economicService.initialize(config.fmpApiKey);
+    logger.info('Economic Service initialized with FMP API key');
 
     // 3. Start Express Server
     const server = app.listen(config.port, '0.0.0.0', () => {
@@ -71,10 +73,6 @@ const startServer = async () => {
     } else {
       logger.warn('Skipped DB-dependent background services because MongoDB is unavailable.');
     }
-    
-    // Initialize Economic Service with API key
-    economicService.initialize(config.fmpApiKey);
-    logger.info('Economic Service initialized with FMP API key');
 
     if (!redisConnected) {
       logger.warn('Redis unavailable: pub/sub, queue workers, and cache-backed features may not work.');

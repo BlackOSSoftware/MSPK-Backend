@@ -386,6 +386,40 @@ const removeUserWatchlist = catchAsync(async (req, res) => {
     res.send({ symbols: user.marketWatchlist });
 });
 
+const reorderUserWatchlist = catchAsync(async (req, res) => {
+    const requestedSymbols = Array.isArray(req.body?.symbols)
+        ? normalizeSelectedSymbols(req.body.symbols)
+        : [];
+
+    const user = req.user;
+    const { normalizedSymbols, enforcedSymbols } = await getEnforcedUserWatchlist(user);
+    const currentSymbols = normalizedSymbols.length !== enforcedSymbols.length
+        ? enforcedSymbols
+        : [...enforcedSymbols];
+
+    if (currentSymbols.length === 0) {
+        user.marketWatchlist = [];
+        await user.save();
+        return res.send({ symbols: [] });
+    }
+
+    if (requestedSymbols.length === 0) {
+        throw new ApiError(httpStatus.BAD_REQUEST, 'Symbols array is required');
+    }
+
+    const allowedSymbols = new Set(currentSymbols);
+    const nextSymbols = requestedSymbols.filter((symbol, index, list) => (
+        allowedSymbols.has(symbol) && list.indexOf(symbol) === index
+    ));
+    const missingSymbols = currentSymbols.filter((symbol) => !nextSymbols.includes(symbol));
+    const finalOrder = [...nextSymbols, ...missingSymbols];
+
+    user.marketWatchlist = finalOrder;
+    await user.save();
+
+    res.send({ symbols: user.marketWatchlist });
+});
+
 import { calculateRSI, getFearGreedFromRSI } from '../utils/technicalIndicators.js'; // Import Utility
 
 // Get Market Sentiment (Real-Time RSI + VIX)
@@ -1030,6 +1064,7 @@ export default {
     getUserWatchlist,
     addUserWatchlist,
     removeUserWatchlist,
+    reorderUserWatchlist,
     getMarketStats: (req, res) => {
         const stats = marketDataService.getStats();
         res.send(stats);

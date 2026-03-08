@@ -26,6 +26,7 @@ router.get('/sentiment', auth(), marketController.getSentiment); // Authenticate
 router.get('/watchlist', auth(), marketController.getUserWatchlist);
 router.post('/watchlist/add', auth(), marketController.addUserWatchlist);
 router.post('/watchlist/remove', auth(), marketController.removeUserWatchlist);
+router.post('/watchlist/reorder', auth(), marketController.reorderUserWatchlist);
 router.post('/login/:provider', marketController.handleLogin);
 router.get('/login/:provider', marketController.handleLoginCallback); // Browser Redirect Callback
 router.get('/login/:provider/url', marketController.getLoginUrl); // Generic Login URL
