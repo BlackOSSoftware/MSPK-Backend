@@ -7,14 +7,35 @@ import { metricsMiddleware } from './middleware/metrics.js';
 import config from './config/config.js';
 import routes from './routes/index.js';
 import webhookRoute from './routes/webhook.route.js';
+import marketController from './controllers/market.controller.js';
 
 const app = express();
 
+const allowedOrigins = [
+  'http://localhost:5173',
+  'http://localhost:3000',
+  'http://localhost:3001',
+  'https://www.mspktradesolutions.com',
+  'https://user.mspktradesolutions.com',
+  'https://admin.mspktradesolutions.com'
+];
+
+const corsOptions = {
+  origin(origin, callback) {
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+    return callback(new Error(`CORS not allowed for origin: ${origin}`));
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+};
+
 // Middleware
-app.use(cors({
-  origin: true, // Reflects the request origin
-  credentials: true
-}));
+app.use(cors(corsOptions));
+app.options(/.*/, cors(corsOptions));
 app.use(compression({
   level: 6,
   threshold: 1024
@@ -38,7 +59,6 @@ if (config.env === 'development') {
 }
 
 // Direct Route for Fyers Login Callback to match User's App Config (No /v1)
-import marketController from './controllers/market.controller.js';
 app.get('/market/login/fyers', marketController.handleLoginCallback);
 app.use('/webhook', webhookRoute);
 app.use('/webhooks', webhookRoute);
