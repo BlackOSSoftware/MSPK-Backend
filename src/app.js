@@ -2,6 +2,7 @@ import express from 'express';
 import helmet from 'helmet';
 import cors from 'cors';
 import morgan from 'morgan';
+import compression from 'compression';
 import { metricsMiddleware } from './middleware/metrics.js';
 import config from './config/config.js';
 import routes from './routes/index.js';
@@ -14,13 +15,20 @@ app.use(cors({
   origin: true, // Reflects the request origin
   credentials: true
 }));
+app.use(compression({
+  level: 6,
+  threshold: 1024
+}));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(
   ['/webhook', '/webhooks', '/v1/webhook', '/v1/webhooks'],
   express.text({ type: ['text/plain', 'text/*'] })
 );
-app.use('/uploads', express.static('uploads')); // Serve uploaded files
+app.use('/uploads', express.static('uploads', {
+  maxAge: '6h',
+  etag: true
+})); // Serve uploaded files
 // app.use(helmet()); // Temporarily disabled to debug 308 Redirects
 // app.use(cors()); // Moved to top
 

@@ -38,8 +38,29 @@ const normalizeWsRequestUrl = (value) => {
   return `/${raw}`;
 };
 
+const parseWsBoolean = (value, fallback = true) => {
+  if (value === undefined || value === null || value === '') return fallback;
+  const normalized = String(value).trim().toLowerCase();
+  if (['true', '1', 'yes', 'y', 'on'].includes(normalized)) return true;
+  if (['false', '0', 'no', 'n', 'off'].includes(normalized)) return false;
+  return fallback;
+};
+
 const initWebSocket = (server) => {
-  wss = new WebSocketServer({ server });
+  wss = new WebSocketServer({
+    server,
+    perMessageDeflate: {
+      zlibDeflateOptions: {
+        level: 6
+      },
+      zlibInflateOptions: {
+        chunkSize: 10240
+      },
+      clientNoContextTakeover: true,
+      serverNoContextTakeover: true,
+      threshold: 1024
+    }
+  });
 
   wss.on('connection', (ws, req) => {
     logger.debug('New WebSocket connection attempt');
@@ -54,6 +75,7 @@ const initWebSocket = (server) => {
       return;
     }
     const token = normalizeWsToken(url.searchParams.get('token'));
+    const shouldAutoSubscribe = parseWsBoolean(url.searchParams.get('autoSubscribe'), true);
 
     if (token) {
       jwt.verify(token, config.jwt.secret, async (err, decoded) => {
@@ -85,27 +107,31 @@ const initWebSocket = (server) => {
             return;
           }
 
-          // 2. Auto-Subscribe to Plan Segments
-          const planDetails = await authService.getUserActivePlan(user);
-          const segments = authService.getSegmentsFromPermissions(planDetails.permissions);
-          
-          if (segments.length > 0) {
-            const symbols = await MasterSymbol.find({ segment: { $in: segments }, isActive: true });
-            const tickerNames = symbols.map(s => s.symbol);
+          // 2. Auto-Subscribe to Plan Segments (optional)
+          if (shouldAutoSubscribe) {
+            const planDetails = await authService.getUserActivePlan(user);
+            const segments = authService.getSegmentsFromPermissions(planDetails.permissions);
             
-            logger.info(`WS: Auto-subscribing user ${user.email} to ${tickerNames.length} symbols in segments: ${segments.join(', ')}`);
-            
-            tickerNames.forEach(sym => {
-              subscribeToRoom(ws, sym);
-            });
+            if (segments.length > 0) {
+              const symbols = await MasterSymbol.find({ segment: { $in: segments }, isActive: true });
+              const tickerNames = symbols.map(s => s.symbol);
+              
+              logger.info(`WS: Auto-subscribing user ${user.email} to ${tickerNames.length} symbols in segments: ${segments.join(', ')}`);
+              
+              tickerNames.forEach(sym => {
+                subscribeToRoom(ws, sym);
+              });
 
-            // Send confirmation of active segments
-            ws.send(JSON.stringify({ 
-                type: 'subscription_sync', 
-                payload: { segments, symbolCount: tickerNames.length } 
-            }));
+              // Send confirmation of active segments
+              ws.send(JSON.stringify({ 
+                  type: 'subscription_sync', 
+                  payload: { segments, symbolCount: tickerNames.length } 
+              }));
+            } else {
+               logger.info(`WS: User ${user.email} has no active plan segments to subscribe.`);
+            }
           } else {
-             logger.info(`WS: User ${user.email} has no active plan segments to subscribe.`);
+            logger.info(`WS: Auto-subscribe disabled for user ${user.email}`);
           }
         } catch (authErr) {
           logger.error('WS: Plan logic error during connection:', authErr.message);

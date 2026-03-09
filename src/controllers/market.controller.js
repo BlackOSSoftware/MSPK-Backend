@@ -1066,7 +1066,10 @@ export default {
     removeUserWatchlist,
     reorderUserWatchlist,
     getMarketStats: (req, res) => {
-        const stats = marketDataService.getStats();
+        const includePrices = parseBooleanQuery(req.query.includePrices);
+        const stats = marketDataService.getStats({
+            includePrices: includePrices !== undefined ? includePrices : true
+        });
         res.send(stats);
     }
 };

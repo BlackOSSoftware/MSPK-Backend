@@ -132,7 +132,8 @@ class MarketDataService extends EventEmitter {
         }
 
         this.statsInterval = setInterval(async () => {
-            const stats = this.getStats();
+            const includePrices = String(process.env.MARKETDATA_STATS_INCLUDE_PRICES || '').toLowerCase() === 'true';
+            const stats = this.getStats({ includePrices });
             this.emit('stats_update', stats);
 
             if (redisClient?.status === 'ready') {
@@ -981,7 +982,11 @@ class MarketDataService extends EventEmitter {
             nextConfig.market_data_interval_ms = Number.parseInt(process.env.MT5_WS_INTERVAL_MS, 10);
         }
 
-        if (!nextConfig.data_feed_provider) {
+        if (process.env.DATA_FEED_PROVIDER) {
+            nextConfig.data_feed_provider = String(process.env.DATA_FEED_PROVIDER).trim().toLowerCase();
+        } else if (process.env.MARKET_DATA_WS_URL || process.env.MT5_WS_URL) {
+            nextConfig.data_feed_provider = 'market_data';
+        } else if (!nextConfig.data_feed_provider) {
             if (nextConfig.market_data_ws_url) {
                 nextConfig.data_feed_provider = 'market_data';
             } else if (nextConfig.kite_api_key) {
@@ -1068,7 +1073,8 @@ class MarketDataService extends EventEmitter {
         );
     }
 
-    getStats() {
+    getStats(options = {}) {
+        const includePrices = options.includePrices !== false;
         const marketDataStats = {
             connected: mt5Service.isConnected || false,
             latency: mt5Service.isConnected ? `${toNumber(this.marketDataLatency, 0)}ms` : 'Disconnected',
@@ -1090,7 +1096,6 @@ class MarketDataService extends EventEmitter {
             marketData: marketDataStats,
             mt5: marketDataStats,
             alltick: marketDataStats,
-            prices: this.currentPrices || {},
         };
 
         if (stats.provider === 'kite') {
@@ -1099,6 +1104,10 @@ class MarketDataService extends EventEmitter {
         } else {
             stats.latency = stats.marketData.latency;
             stats.tickCount = stats.marketData.tickCount;
+        }
+
+        if (includePrices) {
+            stats.prices = this.currentPrices || {};
         }
 
         return stats;
