@@ -15,6 +15,25 @@ const buildTelegramPayload = (userObject) => ({
   botUsername: telegramService.getTelegramConfig().botUsername || null,
 });
 
+const maskEmail = (email) => {
+  const value = String(email || '').trim().toLowerCase();
+  const at = value.indexOf('@');
+  if (at <= 1) return value || '';
+  const name = value.slice(0, at);
+  const domain = value.slice(at + 1);
+  const first = name[0];
+  const last = name[name.length - 1] || '';
+  return `${first}***${last}@${domain}`;
+};
+
+const maskPhone = (phone) => {
+  const raw = String(phone || '').trim();
+  const digits = raw.replace(/\D/g, '');
+  if (digits.length <= 4) return raw || '';
+  const last4 = digits.slice(-4);
+  return `***${last4}`;
+};
+
 const serializeUser = (user, planDetails = {}) => {
   const userObject = user?.toObject ? user.toObject() : { ...user };
 
@@ -69,6 +88,16 @@ const sendOtp = catchAsync(async (req, res) => {
         
         const success = await msg91Service.sendOtp(normalizedIdentifier, templateId);
         if (success) {
+            await User.updateOne(
+                { phone: normalizedIdentifier },
+                {
+                    $set: {
+                        lastOtpSentAt: new Date(),
+                        lastOtpChannel: 'phone',
+                        lastOtpTarget: maskPhone(normalizedIdentifier)
+                    }
+                }
+            );
             res.send({ message: 'OTP sent successfully to phone' });
         } else {
             res.status(httpStatus.INTERNAL_SERVER_ERROR).send({ message: 'Failed to send OTP' });
@@ -88,16 +117,7 @@ const sendOtp = catchAsync(async (req, res) => {
              });
         }
 
-        // 2. Check if OTP is already active
-        const ttl = await redisClient.ttl(key);
-        if (ttl > 0) {
-            return res.status(httpStatus.BAD_REQUEST).send({ 
-                message: `OTP already sent. Please wait ${Math.ceil(ttl / 60)} minutes before resending.`,
-                ttl: ttl 
-            });
-        }
-
-        // Generate OTP
+        // Generate OTP (always allow resend within daily limit)
         const otp = Math.floor(100000 + Math.random() * 900000).toString();
         
         // Store in Redis (10 mins expiry)
@@ -110,6 +130,16 @@ const sendOtp = catchAsync(async (req, res) => {
             // Increment Daily Count
             const newCount = await redisClient.incr(dailyKey);
             if (newCount === 1) await redisClient.expire(dailyKey, 86400); // 24 Hours
+            await User.updateOne(
+                { email: normalizedIdentifier },
+                {
+                    $set: {
+                        lastOtpSentAt: new Date(),
+                        lastOtpChannel: 'email',
+                        lastOtpTarget: maskEmail(normalizedIdentifier)
+                    }
+                }
+            );
 
             res.send({ 
                 message: 'OTP sent successfully to email', 

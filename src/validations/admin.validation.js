@@ -28,8 +28,10 @@ const createUser = {
     // Demo segments
     segments: Joi.array().items(
       Joi.string().valid(
-        'EQUITY', 'OPTIONS', 'COMMODITY', 'FOREX', 'CRYPTO',
-        'equity', 'options', 'commodity', 'forex', 'crypto'
+        'ALL',
+        'EQUITY', 'OPTIONS', 'FNO', 'COMMODITY', 'FOREX', 'CURRENCY', 'CRYPTO', 'BTST',
+        'all',
+        'equity', 'options', 'fno', 'commodity', 'forex', 'currency', 'crypto', 'btst'
       )
     ).optional(),
     
@@ -55,8 +57,10 @@ const updateUser = {
       planId: Joi.string().custom(objectId).allow(null, ''), // Allow switching plan
       segments: Joi.array().items(
         Joi.string().valid(
-          'EQUITY', 'OPTIONS', 'COMMODITY', 'FOREX', 'CRYPTO',
-          'equity', 'options', 'commodity', 'forex', 'crypto'
+          'ALL',
+          'EQUITY', 'OPTIONS', 'FNO', 'COMMODITY', 'FOREX', 'CURRENCY', 'CRYPTO', 'BTST',
+          'all',
+          'equity', 'options', 'fno', 'commodity', 'forex', 'currency', 'crypto', 'btst'
         )
       ).optional(),
       status: Joi.string().valid('Active', 'Inactive', 'Suspended', 'Blocked'), // Includes new statuses

@@ -216,8 +216,15 @@ const getSignalAccessContext = async (req) => {
 const buildBaseFilterForAccess = (access) => {
   if (access.mode === 'admin') return {};
 
+  const enforceWatchlist =
+    String(process.env.SIGNAL_REQUIRE_WATCHLIST || '').trim().toLowerCase() === 'true';
   const selectedSymbolFilter =
-    access.mode === 'user' ? buildSelectedSignalFilter(access.selectedSymbols) : null;
+    enforceWatchlist &&
+    access.mode === 'user' &&
+    Array.isArray(access.selectedSymbols) &&
+    access.selectedSymbols.length > 0
+      ? buildSelectedSignalFilter(access.selectedSymbols)
+      : null;
   let accessFilter = !access.allowedSegments?.length && !access.allowedCategories?.length
     ? { isFree: true }
     : {
@@ -241,7 +248,13 @@ const buildBaseFilterForAccess = (access) => {
 
 const assertSignalAccess = (access, signal) => {
   if (access.mode === 'admin') return;
-  if (access.mode === 'user' && !hasSelectedSignalSymbol(access.selectedSymbols, signal.symbol)) {
+  const enforceWatchlist =
+    String(process.env.SIGNAL_REQUIRE_WATCHLIST || '').trim().toLowerCase() === 'true';
+  if (
+    enforceWatchlist &&
+    access.mode === 'user' &&
+    !hasSelectedSignalSymbol(access.selectedSymbols, signal.symbol)
+  ) {
     throw new ApiError(httpStatus.FORBIDDEN, 'You only receive signals for scripts selected in your watchlist.');
   }
   if (signal.isFree) return;

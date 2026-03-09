@@ -33,6 +33,48 @@ const mapSignalToCategory = (signalBody) => {
   return 'EQUITY_INTRA';
 };
 
+const toFiniteNumber = (value) => {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string') {
+    const normalized = value.replace(/,/g, '').trim();
+    if (!normalized) return undefined;
+    const parsed = Number(normalized);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return undefined;
+};
+
+const resolveExitPriceFromStatus = (signal, nextStatus) => {
+  const status = String(nextStatus || signal?.status || '').trim().toLowerCase();
+  const entry = toFiniteNumber(signal?.entryPrice);
+  const stopLoss = toFiniteNumber(signal?.stopLoss);
+  const t1 = toFiniteNumber(signal?.targets?.target1);
+  const t2 = toFiniteNumber(signal?.targets?.target2);
+  const t3 = toFiniteNumber(signal?.targets?.target3);
+
+  if (status.includes('stop') && typeof stopLoss === 'number') return stopLoss;
+  if (status.includes('target')) {
+    if (typeof t1 === 'number') return t1;
+    if (typeof t2 === 'number') return t2;
+    if (typeof t3 === 'number') return t3;
+  }
+  if (status.includes('partial')) {
+    if (typeof t2 === 'number') return t2;
+    if (typeof t1 === 'number') return t1;
+    if (typeof t3 === 'number') return t3;
+  }
+  return entry;
+};
+
+const resolveTotalPoints = (signal, exitPrice) => {
+  const entry = toFiniteNumber(signal?.entryPrice);
+  const exit = toFiniteNumber(exitPrice);
+  if (typeof entry !== 'number' || typeof exit !== 'number') return undefined;
+  const isSell = String(signal?.type || '').trim().toUpperCase() === 'SELL';
+  const points = isSell ? entry - exit : exit - entry;
+  return Math.round(points * 100) / 100;
+};
+
 const scheduleCreateSideEffects = (signal, userId) => {
   runDetached(`Failed side effects for created signal ${signal?.id || signal?._id}`, async () => {
     try {
@@ -283,6 +325,27 @@ const updateSignalById = async (signalId, updateBody) => {
   }
 
   Object.assign(signal, updateBody);
+
+  if (updateBody?.status && CLOSED_SIGNAL_STATUSES.includes(updateBody.status)) {
+    if (signal.exitPrice === undefined || signal.exitPrice === null) {
+      const exitPrice = resolveExitPriceFromStatus(signal, updateBody.status);
+      if (typeof exitPrice === 'number') {
+        signal.exitPrice = exitPrice;
+      }
+    }
+
+    if (signal.totalPoints === undefined || signal.totalPoints === null) {
+      const derivedPoints = resolveTotalPoints(signal, signal.exitPrice);
+      if (typeof derivedPoints === 'number') {
+        signal.totalPoints = derivedPoints;
+      }
+    }
+
+    if (!signal.exitTime) {
+      signal.exitTime = new Date();
+    }
+  }
+
   await signal.save();
   scheduleUpdateSideEffects(signal, updateBody, signalId);
   return signal;

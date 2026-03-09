@@ -1,6 +1,7 @@
 import httpStatus from 'http-status';
 import catchAsync from '../utils/catchAsync.js';
 import User from '../models/User.js';
+import Segment from '../models/Segment.js';
 import Subscription from '../models/Subscription.js';
 import Plan from '../models/Plan.js';
 import Notification from '../models/Notification.js';
@@ -20,11 +21,21 @@ const normalizeSubscriptionSegments = (segments) => {
     return Array.from(new Set(normalized));
 };
 
+const normalizeSegmentForSubscription = (segment) => {
+    const value = String(segment || '').trim().toUpperCase();
+    if (!value) return null;
+    if (value === 'FNO') return 'OPTIONS';
+    if (value === 'CURRENCY') return 'FOREX';
+    return value;
+};
+
 const mapSubscriptionToPreferred = (segments) => {
     const map = {
         EQUITY: 'NSE',
         OPTIONS: 'OPTIONS',
+        FNO: 'OPTIONS',
         COMMODITY: 'MCX',
+        CURRENCY: 'FOREX',
         FOREX: 'FOREX',
         CRYPTO: 'CRYPTO'
     };
@@ -78,7 +89,13 @@ const createUser = catchAsync(async (req, res) => {
         throw new ApiError(httpStatus.BAD_REQUEST, 'Email already taken');
     }
 
-    const normalizedSegments = normalizeSubscriptionSegments(segments);
+    let normalizedSegments = normalizeSubscriptionSegments(segments).map(normalizeSegmentForSubscription).filter(Boolean);
+    if (normalizedSegments.includes('ALL')) {
+        const activeSegments = await Segment.find({ is_active: true }).select('segment_code').lean();
+        normalizedSegments = activeSegments
+            .map((seg) => normalizeSegmentForSubscription(seg.segment_code))
+            .filter(Boolean);
+    }
     const preferredSegments = mapSubscriptionToPreferred(normalizedSegments);
 
     const user = await User.create({
@@ -158,7 +175,13 @@ const assignCustomPlan = catchAsync(async (req, res) => {
         throw new ApiError(httpStatus.NOT_FOUND, 'User not found');
     }
 
-    const normalizedSegments = normalizeSubscriptionSegments(segments);
+    let normalizedSegments = normalizeSubscriptionSegments(segments).map(normalizeSegmentForSubscription).filter(Boolean);
+    if (normalizedSegments.includes('ALL')) {
+        const activeSegments = await Segment.find({ is_active: true }).select('segment_code').lean();
+        normalizedSegments = activeSegments
+            .map((seg) => normalizeSegmentForSubscription(seg.segment_code))
+            .filter(Boolean);
+    }
 
     let resolvedPermissions = permissions;
     if ((!resolvedPermissions || resolvedPermissions.length === 0) && (!features || features.length === 0) && normalizedSegments.length > 0) {
@@ -272,6 +295,9 @@ const getUsers = catchAsync(async (req, res) => {
           pnl: u.pnl || 0,
           
           joinDate: u.createdAt,
+          lastOtpSentAt: u.lastOtpSentAt || null,
+          lastOtpChannel: u.lastOtpChannel || null,
+          lastOtpTarget: u.lastOtpTarget || null,
       };
   }));
   res.send(enrichedUsers);
@@ -345,6 +371,9 @@ const getUser = catchAsync(async (req, res) => {
       pnl: user.pnl || 0,
       
       joinDate: user.createdAt,
+      lastOtpSentAt: user.lastOtpSentAt || null,
+      lastOtpChannel: user.lastOtpChannel || null,
+      lastOtpTarget: user.lastOtpTarget || null,
       
       // History
       subscriptionHistory: history.map(h => ({

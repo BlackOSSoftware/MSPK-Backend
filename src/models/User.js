@@ -149,6 +149,17 @@ const userSchema = new mongoose.Schema(
     telegramLinkTokenExpiresAt: {
       type: Date,
     },
+    lastOtpSentAt: {
+      type: Date,
+    },
+    lastOtpChannel: {
+      type: String,
+      enum: ['email', 'phone'],
+    },
+    lastOtpTarget: {
+      type: String,
+      trim: true,
+    },
     marketWatchlist: {
       type: [String],
       default: []
