@@ -1077,7 +1077,10 @@ class MarketDataService extends EventEmitter {
 
         if (process.env.KITE_API_KEY) nextConfig.kite_api_key = process.env.KITE_API_KEY;
         if (process.env.KITE_API_SECRET) nextConfig.kite_api_secret = process.env.KITE_API_SECRET;
-        if (process.env.KITE_ACCESS_TOKEN) nextConfig.kite_access_token = process.env.KITE_ACCESS_TOKEN;
+        // Prefer DB-stored access token; only fall back to env if DB missing.
+        if (!nextConfig.kite_access_token && process.env.KITE_ACCESS_TOKEN) {
+            nextConfig.kite_access_token = process.env.KITE_ACCESS_TOKEN;
+        }
 
         if (process.env.FMP_API_KEY) nextConfig.fmp_api_key = process.env.FMP_API_KEY;
 
