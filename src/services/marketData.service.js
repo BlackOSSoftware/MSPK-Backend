@@ -1270,41 +1270,41 @@ class MarketDataService extends EventEmitter {
         let canonical = this._getCanonicalSymbol(symbol) || String(symbol || '').trim();
         if (!canonical) return [];
         const alias = this._resolveHistoryAlias(canonical);
-        if (alias && this.symbols[alias]) {
-            canonical = alias;
-        }
+        const historySymbol = alias || canonical;
 
         const fromTs = parseTs(from);
         const toTs = parseTs(to, Math.floor(Date.now() / 1000));
         try {
-            const symbolDoc = this.symbols[canonical] || null;
+            const symbolDoc = this.symbols[historySymbol] || this.symbols[canonical] || null;
             const kiteInstrument =
                 symbolDoc?.instrumentToken ||
+                kiteInstrumentsService.getInstrumentBySymbol(historySymbol)?.instrument_token ||
                 kiteInstrumentsService.getInstrumentBySymbol(canonical)?.instrument_token ||
                 null;
             const canUseKite = Boolean(
                 kiteInstrument &&
                 this.config.kite_api_key &&
-                this.config.kite_api_secret
+                this.config.kite_api_secret &&
+                this.config.kite_access_token
             );
             const shouldUseKite = canUseKite && (
-                this._isIndianSymbol(canonical, symbolDoc) ||
+                this._isIndianSymbol(historySymbol, symbolDoc) ||
                 !this._isMarketDataSymbol(symbolDoc)
             );
 
             if (shouldUseKite) {
                 const fromKey = Math.floor(fromTs / 30) * 30;
                 const toKey = Math.floor(toTs / 30) * 30;
-                const cacheKey = `history_${canonical}_${resolution}_${fromKey}_${toKey}`;
+                const cacheKey = `history_${historySymbol}_${resolution}_${fromKey}_${toKey}`;
 
                 return await cacheManager.getOrFetch(cacheKey, async () => {
                     if (this.kiteAuthBrokenUntil && Date.now() < this.kiteAuthBrokenUntil) {
-                        logger.warn(`MARKET_DATA: Skipping Kite history for ${canonical}; auth cooldown active`);
+                        logger.warn(`MARKET_DATA: Skipping Kite history for ${historySymbol}; auth cooldown active`);
                         return [];
                     }
 
                     const data = await this._fetchKiteHistory(
-                        canonical,
+                        historySymbol,
                         resolution,
                         new Date(fromTs * 1000),
                         new Date(toTs * 1000),
@@ -1317,13 +1317,13 @@ class MarketDataService extends EventEmitter {
                 }, '24h');
             }
 
-            if (this._isIndianSymbol(canonical, symbolDoc)) {
-                logger.warn(`MARKET_DATA: Skipping MT5 history for Indian symbol ${canonical}`);
+            if (this._isIndianSymbol(historySymbol, symbolDoc)) {
+                logger.warn(`MARKET_DATA: Skipping MT5 history for Indian symbol ${historySymbol}`);
                 return [];
             }
 
             const marketDataHistory = await this._fetchMarketDataHistory(
-                canonical,
+                historySymbol,
                 resolution,
                 fromTs,
                 toTs,
