@@ -1275,13 +1275,21 @@ class MarketDataService extends EventEmitter {
         const toTs = parseTs(to, Math.floor(Date.now() / 1000));
         try {
             const symbolDoc = this.symbols[canonical] || null;
+            const kiteInstrument =
+                symbolDoc?.instrumentToken ||
+                kiteInstrumentsService.getInstrumentBySymbol(canonical)?.instrument_token ||
+                null;
             const canUseKite = Boolean(
-                symbolDoc?.instrumentToken &&
+                kiteInstrument &&
                 this.config.kite_api_key &&
+                this.config.kite_api_secret
+            );
+            const shouldUseKite = canUseKite && (
+                this._isIndianSymbol(canonical, symbolDoc) ||
                 !this._isMarketDataSymbol(symbolDoc)
             );
 
-            if (canUseKite) {
+            if (shouldUseKite) {
                 const fromKey = Math.floor(fromTs / 30) * 30;
                 const toKey = Math.floor(toTs / 30) * 30;
                 const cacheKey = `history_${canonical}_${resolution}_${fromKey}_${toKey}`;
@@ -1296,7 +1304,8 @@ class MarketDataService extends EventEmitter {
                         canonical,
                         resolution,
                         new Date(fromTs * 1000),
-                        new Date(toTs * 1000)
+                        new Date(toTs * 1000),
+                        kiteInstrument
                     );
 
                     return Array.isArray(data)
@@ -1351,9 +1360,10 @@ class MarketDataService extends EventEmitter {
         }
     }
 
-    async _fetchKiteHistory(symbol, resolution, from, to) {
+    async _fetchKiteHistory(symbol, resolution, from, to, instrumentTokenOverride = null) {
         const symbolDoc = this.symbols[symbol];
-        if (!symbolDoc?.instrumentToken) return [];
+        const instrumentToken = instrumentTokenOverride || symbolDoc?.instrumentToken;
+        if (!instrumentToken) return [];
 
         const interval = resolutionToKiteInterval(resolution);
 
@@ -1363,7 +1373,7 @@ class MarketDataService extends EventEmitter {
         const adjustedFromTs = safeFromTs > safeToTs ? safeToTs - 86400 : safeFromTs;
 
         return kiteService.getHistoricalData(
-            symbolDoc.instrumentToken,
+            instrumentToken,
             interval,
             new Date(adjustedFromTs * 1000),
             new Date(safeToTs * 1000)
