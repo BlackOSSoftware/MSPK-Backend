@@ -29,7 +29,7 @@ const SEGMENT_SEED = [
 function mapExchange(segment) {
     if (segment === 'CURRENCY') return 'FOREX';
     if (segment === 'CRYPTO') return 'CRYPTO';
-    if (segment === 'COMMODITY') return 'FOREX';
+    if (segment === 'COMMODITY') return 'COMEX';
     if (segment === 'INDICES') return 'FOREX';
     return 'GLOBAL';
 }

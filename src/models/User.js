@@ -10,6 +10,38 @@ const emptyStringToUndefined = (value) => {
   return normalized ? normalized : undefined;
 };
 
+const marketNamedWatchlistSchema = new mongoose.Schema(
+  {
+    id: {
+      type: String,
+      required: true,
+      default: () => new mongoose.Types.ObjectId().toHexString(),
+    },
+    name: {
+      type: String,
+      required: true,
+      trim: true,
+    },
+    symbols: {
+      type: [String],
+      default: [],
+    },
+    isDefault: {
+      type: Boolean,
+      default: false,
+    },
+    createdAt: {
+      type: Date,
+      default: Date.now,
+    },
+    updatedAt: {
+      type: Date,
+      default: Date.now,
+    },
+  },
+  { _id: false }
+);
+
 const userSchema = new mongoose.Schema(
   {
     name: {
@@ -163,7 +195,15 @@ const userSchema = new mongoose.Schema(
     marketWatchlist: {
       type: [String],
       default: []
-    }
+    },
+    marketWatchlists: {
+      type: [marketNamedWatchlistSchema],
+      default: [],
+    },
+    activeMarketWatchlistId: {
+      type: String,
+      trim: true,
+    },
   },
   {
     timestamps: true,

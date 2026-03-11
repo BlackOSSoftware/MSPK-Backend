@@ -12,6 +12,8 @@ import notificationQueue from '../services/notificationQueue.js';
 import logger from '../config/log.js';
 
 const getErrorMessage = (error, fallback) => (error instanceof Error ? error.message : fallback);
+const isFatalWhatsAppValidationError = (message = '') =>
+  /access token has expired or is invalid/i.test(String(message || ''));
 
 const buildTelegramConnectionPayload = (user) => ({
   connected: Boolean(user?.telegramChatId),
@@ -193,13 +195,19 @@ const sendWhatsAppTestMessage = catchAsync(async (req, res) => {
     throw new ApiError(httpStatus.INTERNAL_SERVER_ERROR, 'WhatsApp channel is not configured on the server.');
   }
 
+  let validationWarning = null;
   try {
     await whatsappChannelService.validateChannel(waConfig);
   } catch (error) {
-    throw new ApiError(
-      httpStatus.BAD_GATEWAY,
-      getErrorMessage(error, 'WhatsApp provider validation failed. Check the server configuration.')
+    validationWarning = getErrorMessage(
+      error,
+      'WhatsApp provider validation failed. Delivery will still be attempted.'
     );
+    logger.warn(`WhatsApp provider validation warning for user ${req.user._id}: ${validationWarning}`);
+  }
+
+  if (validationWarning && isFatalWhatsAppValidationError(validationWarning)) {
+    throw new ApiError(httpStatus.BAD_REQUEST, validationWarning);
   }
 
   const now = new Date();
@@ -252,6 +260,7 @@ const sendWhatsAppTestMessage = catchAsync(async (req, res) => {
       to: phone,
       queued: true,
       externalMessageId: null,
+      validationWarning,
     });
   } catch (queueError) {
     logger.warn(`Failed to enqueue WhatsApp test for user ${req.user._id}: ${queueError.message}`);
@@ -277,6 +286,7 @@ const sendWhatsAppTestMessage = catchAsync(async (req, res) => {
     to: phone,
     queued: true,
     externalMessageId: null,
+    validationWarning,
   });
 });
 

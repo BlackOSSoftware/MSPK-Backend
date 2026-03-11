@@ -46,8 +46,41 @@ const buildSelectedSymbolDocsMap = (symbolDocs = []) =>
       .filter(([symbol]) => Boolean(symbol))
   );
 
-const getSelectionBucketKey = (symbolDoc = {}) =>
-  String(symbolDoc?.segment || symbolDoc?.exchange || 'OTHER').trim().toUpperCase() || 'OTHER';
+const getSelectionBucketKey = (symbolDoc = {}) => {
+  const segment = String(symbolDoc?.segment || '').trim().toUpperCase();
+  const exchange = String(symbolDoc?.exchange || '').trim().toUpperCase();
+  const subsegment = String(symbolDoc?.subsegment || '').trim().toUpperCase();
+  const symbol = String(symbolDoc?.symbol || '').trim().toUpperCase();
+  const name = String(symbolDoc?.name || '').trim().toUpperCase();
+  const tags = Array.isArray(symbolDoc?.meta?.tags)
+    ? symbolDoc.meta.tags.map((tag) => String(tag || '').trim().toUpperCase())
+    : [];
+
+  if (exchange === 'MCX') return 'COMMODITY';
+
+  if (
+    exchange === 'COMEX' ||
+    exchange === 'NYMEX' ||
+    (segment === 'COMMODITY' && exchange && exchange !== 'MCX') ||
+    (segment === 'FNO' && ['COMEX', 'NYMEX'].includes(exchange)) ||
+    ['ENERGY', 'METALS', 'AGRICULTURE', 'FUTURES_OTHER', 'RATES_FUTURES'].includes(subsegment) ||
+    tags.includes('COMMODITY') ||
+    tags.includes('METALS') ||
+    tags.includes('ENERGY') ||
+    /(?:CRUDE|WTI|BRENT|USOIL|UKOIL|XAU|XAG|GC\d*!|SI\d*!|CL\d*!|NG\d*!|HG\d*!)/.test(symbol) ||
+    /(?:CRUDE|WTI|BRENT|COMEX|NYMEX|GOLD|SILVER|NATURAL GAS|COPPER)/.test(name)
+  ) {
+    return 'COMEX';
+  }
+
+  if (segment === 'CURRENCY' || segment === 'FOREX') {
+    return 'FOREX';
+  }
+
+  if (exchange === 'FOREX') return 'FOREX';
+  if (segment) return segment;
+  return exchange || 'OTHER';
+};
 
 const limitSelectedSymbolsPerSegment = (
   symbols = [],
@@ -98,6 +131,7 @@ export {
   buildSelectedSignalFilter,
   buildSelectedSymbolDocsMap,
   expandSelectedSymbols,
+  getSelectionBucketKey,
   getUserSelectedSymbols,
   hasSelectedSignalSymbol,
   limitSelectedSymbolsPerSegment,

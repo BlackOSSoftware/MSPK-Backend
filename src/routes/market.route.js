@@ -23,6 +23,10 @@ router.delete('/symbols/:id', marketController.deleteSymbol);
 router.get('/stats', auth(), marketController.getMarketStats); 
 router.get('/tickers', auth(), marketController.getTickers); // Authenticated for Subscription Logic
 router.get('/sentiment', auth(), marketController.getSentiment); // Authenticated for Context Awareness
+router.get('/watchlists', auth(), marketController.getUserWatchlists);
+router.post('/watchlists', auth(), marketController.createUserWatchlist);
+router.patch('/watchlists/:id', auth(), marketController.updateUserWatchlist);
+router.delete('/watchlists/:id', auth(), marketController.deleteUserWatchlist);
 router.get('/watchlist', auth(), marketController.getUserWatchlist);
 router.post('/watchlist/add', auth(), marketController.addUserWatchlist);
 router.post('/watchlist/remove', auth(), marketController.removeUserWatchlist);

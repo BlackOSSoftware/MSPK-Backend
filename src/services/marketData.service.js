@@ -1,4 +1,5 @@
 import { EventEmitter } from 'events';
+import axios from 'axios';
 import Setting from '../models/Setting.js';
 import MasterSymbol from '../models/MasterSymbol.js';
 import { kiteService } from './kite.service.js';
@@ -12,6 +13,24 @@ import cacheManager from './cacheManager.js';
 
 const INDIAN_EXCHANGES = new Set(['NSE', 'BSE', 'MCX', 'NFO', 'CDS', 'BCD']);
 const SENSITIVE_KEY_PATTERN = /(api_key|api_secret|access_token)/i;
+const SYMBOLS_CACHE_VERSION_KEY = 'market_symbols_cache_version';
+const SYMBOLS_CACHE_TTL = '5m';
+const SYMBOL_SEARCH_CACHE_TTL = '5m';
+const KITE_HISTORY_ALIASES = new Map([
+    ['BANKNIFTY', 'NSE:NIFTY BANK-INDEX'],
+    ['NSE:BANKNIFTY', 'NSE:NIFTY BANK-INDEX'],
+    ['NSE:NIFTYBANK', 'NSE:NIFTY BANK-INDEX'],
+    ['NSE:NIFTY BANK', 'NSE:NIFTY BANK-INDEX'],
+    ['NIFTY', 'NSE:NIFTY 50-INDEX'],
+    ['NIFTY50', 'NSE:NIFTY 50-INDEX'],
+    ['NSE:NIFTY', 'NSE:NIFTY 50-INDEX'],
+    ['NSE:NIFTY 50', 'NSE:NIFTY 50-INDEX'],
+    ['FINNIFTY', 'NSE:NIFTY FIN SERVICE-INDEX'],
+    ['NSE:FINNIFTY', 'NSE:NIFTY FIN SERVICE-INDEX'],
+    ['NSE:NIFTY FIN SERVICE', 'NSE:NIFTY FIN SERVICE-INDEX'],
+    ['INDIAVIX', 'NSE:INDIA VIX'],
+    ['NSE:INDIAVIX', 'NSE:INDIA VIX'],
+]);
 
 const toNumber = (value, fallback = 0) => {
     const parsed = Number(value);
@@ -62,6 +81,7 @@ class MarketDataService extends EventEmitter {
         this.tokenMap = {};
         this.symbolCaseMap = new Map();
         this.marketDataAliasMap = new Map();
+        this._symbolsCacheVersion = 1;
 
         this.currentPrices = {};
         this.currentQuotes = {};
@@ -153,6 +173,22 @@ class MarketDataService extends EventEmitter {
 
     _normalizeMarketSymbol(symbol) {
         return String(symbol || '').trim().toUpperCase();
+    }
+
+    _resolveHistoryAlias(symbol) {
+        const normalized = this._normalizeMarketSymbol(symbol);
+        return KITE_HISTORY_ALIASES.get(normalized) || normalized;
+    }
+
+    _isIndianSymbol(symbol, symbolDoc = null) {
+        const docExchange = String(symbolDoc?.exchange || '').toUpperCase();
+        if (docExchange && INDIAN_EXCHANGES.has(docExchange)) return true;
+        const normalized = this._normalizeMarketSymbol(symbol);
+        if (normalized.includes(':')) {
+            const exchange = normalized.split(':')[0];
+            return INDIAN_EXCHANGES.has(exchange);
+        }
+        return false;
     }
 
     _getUsdUsdtAlias(symbol) {
@@ -261,6 +297,10 @@ class MarketDataService extends EventEmitter {
         if (!canonical) return candidates;
 
         addCandidate(canonical);
+        const historyAlias = this._resolveHistoryAlias(canonical);
+        if (historyAlias && historyAlias !== canonical) {
+            addCandidate(historyAlias);
+        }
 
         const doc = symbolDoc || this.symbols[canonical] || null;
         if (doc?.symbol) addCandidate(doc.symbol);
@@ -333,8 +373,14 @@ class MarketDataService extends EventEmitter {
     }
 
     _toKiteQuoteSymbol(rawSymbol, symbolDoc = null) {
-        const canonical = this._getCanonicalSymbol(rawSymbol) || this._normalizeMarketSymbol(rawSymbol);
+        const normalizedRaw = this._normalizeMarketSymbol(rawSymbol);
+        const historyAlias = this._resolveHistoryAlias(normalizedRaw);
+        const canonical = this._getCanonicalSymbol(historyAlias) || historyAlias || normalizedRaw;
         if (!canonical) return null;
+
+        if (symbolDoc?.sourceSymbol) {
+            return String(symbolDoc.sourceSymbol).trim().toUpperCase();
+        }
 
         const token = symbolDoc?.instrumentToken;
         if (token) {
@@ -378,9 +424,76 @@ class MarketDataService extends EventEmitter {
         return !symbolDoc.instrumentToken;
     }
 
-    async loadMasterSymbols() {
+    async _getSymbolsCacheVersion() {
+        if (redisClient?.status === 'ready') {
+            try {
+                const value = await redisClient.get(SYMBOLS_CACHE_VERSION_KEY);
+                const parsed = Number.parseInt(value, 10);
+                if (Number.isFinite(parsed) && parsed > 0) {
+                    this._symbolsCacheVersion = parsed;
+                    return this._symbolsCacheVersion;
+                }
+
+                await redisClient.set(SYMBOLS_CACHE_VERSION_KEY, String(this._symbolsCacheVersion));
+            } catch (error) {
+                logger.debug(`MARKET_DATA: Failed reading symbols cache version: ${error.message}`);
+            }
+        }
+
+        return this._symbolsCacheVersion;
+    }
+
+    async _bumpSymbolsCacheVersion() {
+        if (redisClient?.status === 'ready') {
+            try {
+                const next = await redisClient.incr(SYMBOLS_CACHE_VERSION_KEY);
+                const parsed = Number.parseInt(next, 10);
+                if (Number.isFinite(parsed) && parsed > 0) {
+                    this._symbolsCacheVersion = parsed;
+                    return this._symbolsCacheVersion;
+                }
+            } catch (error) {
+                logger.debug(`MARKET_DATA: Failed bumping symbols cache version: ${error.message}`);
+            }
+        }
+
+        this._symbolsCacheVersion += 1;
+        return this._symbolsCacheVersion;
+    }
+
+    _buildSymbolsSnapshot() {
+        return Object.values(this.symbols)
+            .filter(Boolean)
+            .map((doc) => (typeof doc?.toObject === 'function' ? doc.toObject() : { ...doc }));
+    }
+
+    async _persistSymbolsCache() {
+        const version = await this._getSymbolsCacheVersion();
+        const cacheKey = `master_symbols_v${version}`;
+        const snapshot = this._buildSymbolsSnapshot();
+        await cacheManager.set(cacheKey, snapshot, SYMBOLS_CACHE_TTL);
+    }
+
+    async refreshSymbolsCache({ bumpVersion = true } = {}) {
+        if (bumpVersion) {
+            await this._bumpSymbolsCacheVersion();
+        }
+        await this._persistSymbolsCache();
+    }
+
+    async loadMasterSymbols({ forceReload = false } = {}) {
         try {
-            const docs = await MasterSymbol.find({});
+            const version = await this._getSymbolsCacheVersion();
+            const cacheKey = `master_symbols_v${version}`;
+
+            let docs = null;
+            if (!forceReload) {
+                docs = await cacheManager.get(cacheKey);
+            }
+            if (!Array.isArray(docs)) {
+                docs = await MasterSymbol.find({}).lean();
+                await cacheManager.set(cacheKey, docs, SYMBOLS_CACHE_TTL);
+            }
 
             this.symbols = {};
             this.tokenMap = {};
@@ -587,18 +700,20 @@ class MarketDataService extends EventEmitter {
 
             const symbolDoc = this.symbols[canonical] || null;
 
-            const canUseMarketData = symbolDoc && (this._isMarketDataSymbol(symbolDoc) || !symbolDoc.instrumentToken);
+            const canUseMarketData = symbolDoc && this._isMarketDataSymbol(symbolDoc);
             if (canUseMarketData) {
                 const wireSymbols = this._resolveMarketDataWireSymbols(symbolDoc);
                 const symbolsToSubscribe = wireSymbols.length > 0 ? wireSymbols : [symbolDoc.symbol];
                 this._registerMarketDataAliases(symbolDoc.symbol, symbolsToSubscribe);
                 symbolsToSubscribe.forEach((value) => marketDataSymbols.add(value));
-            } else if (symbolDoc?.instrumentToken) {
-                const kiteSymbol = this._toKiteQuoteSymbol(canonical, symbolDoc) || canonical;
-                kiteSymbols.push(kiteSymbol);
-                internalByKite.set(kiteSymbol, symbolDoc.symbol);
             } else {
-                marketDataSymbols.add(symbolDoc?.symbol || canonical);
+                const kiteSymbol = this._toKiteQuoteSymbol(canonical, symbolDoc) || canonical;
+                if (kiteSymbol) {
+                    kiteSymbols.push(kiteSymbol);
+                    internalByKite.set(kiteSymbol, symbolDoc?.symbol || canonical);
+                } else {
+                    marketDataSymbols.add(symbolDoc?.symbol || canonical);
+                }
             }
         }
 
@@ -1148,27 +1263,30 @@ class MarketDataService extends EventEmitter {
         return response;
     }
 
-    async getHistory(symbol, resolution, from, to) {
-        const canonical = this._getCanonicalSymbol(symbol) || String(symbol || '').trim();
+    async getHistory(symbol, resolution, from, to, countOverride = null) {
+        let canonical = this._getCanonicalSymbol(symbol) || String(symbol || '').trim();
         if (!canonical) return [];
+        const alias = this._resolveHistoryAlias(canonical);
+        if (alias && this.symbols[alias]) {
+            canonical = alias;
+        }
 
         const fromTs = parseTs(from);
         const toTs = parseTs(to, Math.floor(Date.now() / 1000));
+        try {
+            const symbolDoc = this.symbols[canonical] || null;
+            const canUseKite = Boolean(
+                symbolDoc?.instrumentToken &&
+                this.config.kite_api_key &&
+                !this._isMarketDataSymbol(symbolDoc)
+            );
 
-        const fromKey = Math.floor(fromTs / 30) * 30;
-        const toKey = Math.floor(toTs / 30) * 30;
-        const cacheKey = `history_${canonical}_${resolution}_${fromKey}_${toKey}`;
+            if (canUseKite) {
+                const fromKey = Math.floor(fromTs / 30) * 30;
+                const toKey = Math.floor(toTs / 30) * 30;
+                const cacheKey = `history_${canonical}_${resolution}_${fromKey}_${toKey}`;
 
-        return cacheManager.getOrFetch(cacheKey, async () => {
-            try {
-                const symbolDoc = this.symbols[canonical] || null;
-                const canUseKite = Boolean(
-                    symbolDoc?.instrumentToken &&
-                    this.config.kite_api_key &&
-                    !this._isMarketDataSymbol(symbolDoc)
-                );
-
-                if (canUseKite) {
+                return await cacheManager.getOrFetch(cacheKey, async () => {
                     if (this.kiteAuthBrokenUntil && Date.now() < this.kiteAuthBrokenUntil) {
                         logger.warn(`MARKET_DATA: Skipping Kite history for ${canonical}; auth cooldown active`);
                         return [];
@@ -1184,38 +1302,53 @@ class MarketDataService extends EventEmitter {
                     return Array.isArray(data)
                         ? data.filter((candle) => candle && candle.time && candle.close !== undefined)
                         : [];
-                }
+                }, '24h');
+            }
 
-                // External market-data websocket currently provides live ticks only.
-                // Return best-effort snapshot candle when available.
-                const livePrice = toNumber(this.currentPrices[canonical], 0);
-                const quote = this.currentQuotes[canonical];
-
-                if (quote?.ohlc) {
-                    return [{
-                        time: toTs,
-                        open: toNumber(quote.ohlc.open, livePrice),
-                        high: toNumber(quote.ohlc.high, livePrice),
-                        low: toNumber(quote.ohlc.low, livePrice),
-                        close: toNumber(quote.ohlc.close, livePrice),
-                        volume: toNumber(quote.volume, 0),
-                    }];
-                }
-
-                return [];
-            } catch (error) {
-                if (
-                    error.message?.includes('403') ||
-                    error.message?.includes('401') ||
-                    error.message?.toLowerCase().includes('incorrect api_key')
-                ) {
-                    this.kiteAuthBrokenUntil = Date.now() + 5 * 60 * 1000;
-                }
-
-                logger.error(`MARKET_DATA: History fetch failed for ${canonical}: ${error.message}`);
+            if (this._isIndianSymbol(canonical, symbolDoc)) {
+                logger.warn(`MARKET_DATA: Skipping MT5 history for Indian symbol ${canonical}`);
                 return [];
             }
-        }, '24h');
+
+            const marketDataHistory = await this._fetchMarketDataHistory(
+                canonical,
+                resolution,
+                fromTs,
+                toTs,
+                countOverride
+            );
+            if (marketDataHistory.length > 0) {
+                return marketDataHistory;
+            }
+
+            // External market-data websocket fallback: best-effort snapshot candle.
+            const livePrice = toNumber(this.currentPrices[canonical], 0);
+            const quote = this.currentQuotes[canonical];
+
+            if (quote?.ohlc) {
+                return [{
+                    time: toTs,
+                    open: toNumber(quote.ohlc.open, livePrice),
+                    high: toNumber(quote.ohlc.high, livePrice),
+                    low: toNumber(quote.ohlc.low, livePrice),
+                    close: toNumber(quote.ohlc.close, livePrice),
+                    volume: toNumber(quote.volume, 0),
+                }];
+            }
+
+            return [];
+        } catch (error) {
+            if (
+                error.message?.includes('403') ||
+                error.message?.includes('401') ||
+                error.message?.toLowerCase().includes('incorrect api_key')
+            ) {
+                this.kiteAuthBrokenUntil = Date.now() + 5 * 60 * 1000;
+            }
+
+            logger.error(`MARKET_DATA: History fetch failed for ${canonical}: ${error.message}`);
+            return [];
+        }
     }
 
     async _fetchKiteHistory(symbol, resolution, from, to) {
@@ -1237,46 +1370,131 @@ class MarketDataService extends EventEmitter {
         );
     }
 
+    _resolveMarketDataHttpBase() {
+        const explicit = String(
+            process.env.MARKET_DATA_HTTP_URL ||
+            process.env.MARKET_DATA_API_URL ||
+            ''
+        ).trim();
+        if (explicit) {
+            return explicit.replace(/\/+$/, '');
+        }
+
+        const wsUrl = String(this.config?.market_data_ws_url || '').trim();
+        if (!wsUrl) return '';
+        const protocolFixed = wsUrl.replace(/^wss:/i, 'https:').replace(/^ws:/i, 'http:');
+        const stripped = protocolFixed.replace(/\/ws\/market.*$/i, '');
+        return stripped.replace(/\/+$/, '');
+    }
+
+    _getMarketDataHistoryCount(override = null) {
+        const baseRaw = override !== null && override !== undefined
+            ? Number.parseInt(override, 10)
+            : Number.parseInt(process.env.MARKET_DATA_HISTORY_COUNT || '500', 10);
+        if (!Number.isFinite(baseRaw) || baseRaw <= 0) return 500;
+        const bounded = Math.max(baseRaw, 500);
+        return Math.min(bounded, 2000);
+    }
+
+    _normalizeMarketDataHistory(rows = []) {
+        return rows
+            .map((item) => {
+                if (!item || typeof item !== 'object') return null;
+                const timeRaw = item.time ?? item.timestamp ?? item.t;
+                let time = Number(timeRaw);
+                if (!Number.isFinite(time)) return null;
+                if (time > 10_000_000_000) time = Math.floor(time / 1000);
+
+                const open = toNumber(item.open, NaN);
+                const high = toNumber(item.high, NaN);
+                const low = toNumber(item.low, NaN);
+                const close = toNumber(item.close, NaN);
+                if (!Number.isFinite(open) || !Number.isFinite(high) || !Number.isFinite(low) || !Number.isFinite(close)) {
+                    return null;
+                }
+                return {
+                    time,
+                    open,
+                    high,
+                    low,
+                    close,
+                    volume: toNumber(item.volume, 0),
+                };
+            })
+            .filter(Boolean)
+            .sort((a, b) => a.time - b.time);
+    }
+
+    async _fetchMarketDataHistory(symbol, resolution, fromTs, toTs, countOverride = null) {
+        const baseUrl = this._resolveMarketDataHttpBase();
+        if (!baseUrl) return [];
+
+        try {
+            const count = this._getMarketDataHistoryCount(countOverride);
+            const params = {
+                symbol,
+                resolution,
+                count,
+                from: fromTs,
+                to: toTs,
+            };
+            const headers = this.config.market_data_api_key
+                ? { 'x-api-key': this.config.market_data_api_key }
+                : undefined;
+            const response = await axios.get(`${baseUrl}/api/history`, {
+                params,
+                headers,
+                timeout: 8000,
+            });
+            const data = response.data;
+            const rows = Array.isArray(data)
+                ? data
+                : Array.isArray(data?.candles)
+                    ? data.candles
+                    : [];
+            return this._normalizeMarketDataHistory(rows);
+        } catch (error) {
+            logger.warn(`MARKET_DATA: History API failed for ${symbol}: ${error.message}`);
+            return [];
+        }
+    }
+
     async searchInstruments(query = '') {
         const safeQuery = typeof query === 'string' ? query.trim() : '';
 
         try {
-            const dbFilter = safeQuery
-                ? {
-                    $or: [
-                        { symbol: { $regex: safeQuery, $options: 'i' } },
-                        { name: { $regex: safeQuery, $options: 'i' } },
-                    ],
-                }
-                : {};
+            const version = await this._getSymbolsCacheVersion();
+            const normalizedQuery = safeQuery.toLowerCase() || 'all';
+            const cacheKey = `symbol_search_v${version}_${normalizedQuery}`;
 
-            const dbSymbols = await MasterSymbol.find(dbFilter)
-                .sort({ symbol: 1 })
-                .limit(50)
-                .lean();
+            return await cacheManager.getOrFetch(cacheKey, async () => {
+                const dbFilter = safeQuery
+                    ? {
+                        $or: [
+                            { symbol: { $regex: safeQuery, $options: 'i' } },
+                            { name: { $regex: safeQuery, $options: 'i' } },
+                        ],
+                    }
+                    : {};
 
-            const dbMapped = dbSymbols.map((item) => ({
-                symbol: item.symbol,
-                name: item.name,
-                segment: item.segment,
-                exchange: item.exchange,
-                provider: item.provider || null,
-                lotSize: item.lotSize || 1,
-                tickSize: item.tickSize || 0.01,
-            }));
+                const dbSymbols = await MasterSymbol.find(dbFilter)
+                    .sort({ symbol: 1 })
+                    .limit(50)
+                    .lean();
 
-            let kiteResults = [];
-            if (safeQuery && this.config?.kite_api_key) {
-                try {
-                    kiteResults = kiteInstrumentsService.search(safeQuery, 50);
-                } catch (error) {
-                    logger.error(`MARKET_DATA: Kite search failed: ${error.message}`);
-                }
-            }
+                const dbMapped = dbSymbols.map((item) => ({
+                    symbol: item.symbol,
+                    name: item.name,
+                    segment: item.segment,
+                    exchange: item.exchange,
+                    provider: item.provider || null,
+                    lotSize: item.lotSize || 1,
+                    tickSize: item.tickSize || 0.01,
+                    instrumentToken: item.instrumentToken || null,
+                }));
 
-            const combined = [...dbMapped, ...kiteResults];
-            const unique = Array.from(new Map(combined.map((item) => [item.symbol, item])).values());
-            return unique.slice(0, 50);
+                return dbMapped.slice(0, 50);
+            }, SYMBOL_SEARCH_CACHE_TTL);
         } catch (error) {
             logger.error(`MARKET_DATA: Search failed: ${error.message}`);
             return [];
@@ -1307,6 +1525,8 @@ class MarketDataService extends EventEmitter {
             kiteService.setAccessToken(this.config.kite_access_token);
 
             const result = await kiteInstrumentsService.syncFromZerodha();
+            await this.loadMasterSymbols({ forceReload: true });
+            await this.refreshSymbolsCache({ bumpVersion: true });
             return {
                 synced: true,
                 provider: 'kite',

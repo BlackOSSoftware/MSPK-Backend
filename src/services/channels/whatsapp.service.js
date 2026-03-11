@@ -43,6 +43,34 @@ const isPlaceholderValue = (value = '') => {
 
 const isChatId = (value = '') => /@(?:c|g)\.us$/i.test(String(value || '').trim());
 
+const stripWrappingQuotes = (value = '') =>
+  String(value || '')
+    .trim()
+    .replace(/^["']+|["']+$/g, '');
+
+const normalizeSecretToken = (value = '') => stripWrappingQuotes(value);
+
+const normalizeBearerToken = (value = '') =>
+  normalizeSecretToken(value).replace(/^Bearer\s+/i, '').trim();
+
+const getMetaTokenPair = (source = {}, metaConfig = {}) => {
+  const sourceToken = normalizeBearerToken(
+    metaConfig.accessToken || source.accessToken || source.apiKey || ''
+  );
+  const envToken = normalizeBearerToken(
+    process.env.WHATSAPP_ACCESS_TOKEN || config.whatsapp?.meta?.accessToken || ''
+  );
+
+  const primary = sourceToken || envToken;
+  const fallback =
+    sourceToken && envToken && sourceToken !== envToken ? envToken : '';
+
+  return {
+    primary,
+    fallback,
+  };
+};
+
 const normalizeRecipient = (value, provider, defaultCountryCode = '91') => {
   const raw = String(value || '').trim();
   if (!raw) return '';
@@ -80,6 +108,7 @@ const resolveWhatsAppConfig = (rawConfig = null) => {
 
   const ultramsgConfig = source.ultramsg && typeof source.ultramsg === 'object' ? source.ultramsg : {};
   const metaConfig = source.meta && typeof source.meta === 'object' ? source.meta : {};
+  const metaTokenPair = getMetaTokenPair(source, metaConfig);
 
   return {
     enabled: source.enabled !== false && Boolean(provider),
@@ -102,7 +131,12 @@ const resolveWhatsAppConfig = (rawConfig = null) => {
       ).trim(),
       token: String(
         ultramsgConfig.token || source.token || source.apiToken || config.whatsapp?.ultramsg?.token || ''
-      ).trim(),
+      )
+        .trim()
+        ? normalizeSecretToken(
+            ultramsgConfig.token || source.token || source.apiToken || config.whatsapp?.ultramsg?.token || ''
+          )
+        : '',
       priority: toPositiveInteger(
         ultramsgConfig.priority ??
           source.priority ??
@@ -112,13 +146,8 @@ const resolveWhatsAppConfig = (rawConfig = null) => {
       ),
     },
     meta: {
-      accessToken: String(
-        metaConfig.accessToken ||
-          source.accessToken ||
-          source.apiKey ||
-          config.whatsapp?.meta?.accessToken ||
-          ''
-      ).trim(),
+      accessToken: metaTokenPair.primary,
+      fallbackAccessToken: metaTokenPair.fallback,
       phoneNumberId: String(
         metaConfig.phoneNumberId ||
           source.phoneNumberId ||
@@ -231,21 +260,43 @@ const sendMetaText = async (resolvedConfig, { to, text }) => {
     },
   };
 
-  let response;
-  try {
-    response = await axios.post(url, payload, {
+  const sendRequest = async (token) =>
+    axios.post(url, payload, {
       headers: {
-        Authorization: `Bearer ${resolvedConfig.meta.accessToken}`,
+        Authorization: `Bearer ${token}`,
         'Content-Type': 'application/json',
       },
       timeout: getRequestTimeoutMs(),
     });
+
+  let response;
+  try {
+    response = await sendRequest(resolvedConfig.meta.accessToken);
   } catch (error) {
     const providerError = error?.response?.data?.error;
     if (providerError?.code === 190) {
-      throw new Error('WhatsApp Meta access token has expired or is invalid. Update WHATSAPP_ACCESS_TOKEN.');
+      const fallbackToken = resolvedConfig.meta.fallbackAccessToken;
+      if (fallbackToken) {
+        try {
+          response = await sendRequest(fallbackToken);
+          logger.warn('WhatsApp Meta primary token failed with code 190. Sent message using fallback env token.');
+        } catch (fallbackError) {
+          const fallbackProviderError = fallbackError?.response?.data?.error;
+          if (fallbackProviderError?.code === 190) {
+            throw new Error(
+              'WhatsApp Meta access token has expired or is invalid. Update whatsapp_config.meta.accessToken or WHATSAPP_ACCESS_TOKEN.'
+            );
+          }
+          throw fallbackError;
+        }
+      } else {
+        throw new Error(
+          'WhatsApp Meta access token has expired or is invalid. Update whatsapp_config.meta.accessToken or WHATSAPP_ACCESS_TOKEN.'
+        );
+      }
+    } else {
+      throw error;
     }
-    throw error;
   }
 
   logger.info(`WhatsApp Meta send accepted for ${recipient}`);
@@ -267,21 +318,48 @@ const validateChannel = async (rawConfig = null) => {
 
   if (resolvedConfig.provider === 'meta') {
     const url = `https://graph.facebook.com/v17.0/${resolvedConfig.meta.phoneNumberId}`;
-
-    try {
-      await axios.get(url, {
+    const validateWithToken = async (token) =>
+      axios.get(url, {
         headers: {
-          Authorization: `Bearer ${resolvedConfig.meta.accessToken}`,
+          Authorization: `Bearer ${token}`,
         },
         params: {
           fields: 'id',
         },
         timeout: Math.min(getRequestTimeoutMs(), 8000),
       });
+
+    try {
+      await validateWithToken(resolvedConfig.meta.accessToken);
     } catch (error) {
       const providerError = error?.response?.data?.error;
       if (providerError?.code === 190) {
-        throw new Error('WhatsApp Meta access token has expired or is invalid. Update WHATSAPP_ACCESS_TOKEN.');
+        const fallbackToken = resolvedConfig.meta.fallbackAccessToken;
+        if (fallbackToken) {
+          try {
+            await validateWithToken(fallbackToken);
+            logger.warn('WhatsApp Meta primary token failed validation (190). Using fallback env token.');
+          } catch (fallbackError) {
+            const fallbackProviderError = fallbackError?.response?.data?.error;
+            if (fallbackProviderError?.code === 190) {
+              throw new Error(
+                'WhatsApp Meta access token has expired or is invalid. Update whatsapp_config.meta.accessToken or WHATSAPP_ACCESS_TOKEN.'
+              );
+            }
+            throw new Error(
+              fallbackProviderError?.message ||
+                fallbackError?.message ||
+                'WhatsApp provider validation failed'
+            );
+          }
+        } else {
+          throw new Error(
+            'WhatsApp Meta access token has expired or is invalid. Update whatsapp_config.meta.accessToken or WHATSAPP_ACCESS_TOKEN.'
+          );
+        }
+        return {
+          provider: resolvedConfig.provider,
+        };
       }
       throw new Error(providerError?.message || error?.message || 'WhatsApp provider validation failed');
     }

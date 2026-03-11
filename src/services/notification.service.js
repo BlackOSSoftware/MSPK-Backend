@@ -49,6 +49,49 @@ const emitRealtimeNotifications = (notificationDocs = []) => {
   });
 };
 
+const mapLegacyPlanToAudienceGroups = (planName = '') => {
+  const normalized = String(planName || '').trim().toUpperCase();
+  if (!normalized || normalized === 'FREE') return [];
+
+  const groups = new Set();
+  if (normalized.includes('ALL') || normalized.includes('PREMIUM') || normalized.includes('PRO')) {
+    groups.add('ALL');
+  }
+  if (normalized.includes('EQUITY') || normalized.includes('NSE')) groups.add('EQUITY');
+  if (normalized.includes('OPTION') || normalized.includes('FNO')) groups.add('FNO');
+  if (normalized.includes('COMMODITY') || normalized.includes('MCX')) groups.add('COMMODITY');
+  if (normalized.includes('FOREX') || normalized.includes('CURRENCY')) groups.add('CURRENCY');
+  if (normalized.includes('CRYPTO')) groups.add('CRYPTO');
+
+  if (groups.size === 0) {
+    // Legacy plan names often imply full access (ex: "Premium"). Be permissive here.
+    groups.add('ALL');
+  }
+
+  return Array.from(groups);
+};
+
+const derivePlanSegments = (plan, authService) => {
+  if (!plan) return [];
+  const permissions = Array.isArray(plan.permissions) ? plan.permissions : [];
+  const segmentsFromPerms = authService.getSegmentsFromPermissions(permissions);
+  if (segmentsFromPerms.length > 0) return segmentsFromPerms;
+
+  if (plan.segment) {
+    const normalized = String(plan.segment || '').trim().toUpperCase();
+    if (normalized) return [normalized];
+  }
+
+  const name = String(plan.name || '').trim().toUpperCase();
+  if (!name) return [];
+
+  if (name.includes('ALL') || name.includes('PREMIUM') || name.includes('PRO')) {
+    return ['ALL'];
+  }
+
+  return [];
+};
+
 const yieldToEventLoop = () =>
   new Promise((resolve) => {
     if (global.setImmediate) {
@@ -87,6 +130,9 @@ class NotificationService {
 
   async scheduleNotifications(signal) {
       try {
+          const debugBroadcastAll =
+              String(process.env.DEBUG_SIGNAL_BROADCAST_ALL || '').trim().toLowerCase() === 'true';
+
           // Fetch Global Notification Settings
           const settings = await Setting.find({ 
               key: { $in: ['telegram_config', 'whatsapp_config', 'push_config', 'email_config', 'notification_templates'] } 
@@ -130,13 +176,7 @@ class NotificationService {
           
           activeSubs.forEach(sub => {
               if (sub.plan && sub.user) {
-                  const planSegmentsFromPerms = Array.isArray(sub.plan.permissions) && sub.plan.permissions.length > 0
-                      ? authService.getSegmentsFromPermissions(sub.plan.permissions)
-                      : [];
-
-                  const planSegmentGroups = planSegmentsFromPerms.length > 0
-                      ? planSegmentsFromPerms
-                      : (sub.plan.segment ? [sub.plan.segment] : []);
+                  const planSegmentGroups = derivePlanSegments(sub.plan, authService);
 
                   if (
                       signalAudienceGroups.length === 0 ||
@@ -158,49 +198,123 @@ class NotificationService {
               }
           });
 
+          // Include legacy user.subscription plans for backward compatibility
+          const legacyUsers = await User.find({
+              status: 'Active',
+              'subscription.plan': { $exists: true, $ne: 'free' },
+              $or: [
+                  { 'subscription.expiresAt': { $exists: false } },
+                  { 'subscription.expiresAt': null },
+                  { 'subscription.expiresAt': { $gt: now } }
+              ]
+          }).select('_id subscription').lean();
+
+          legacyUsers.forEach((legacyUser) => {
+              if (!legacyUser?._id) return;
+              const legacyGroups = mapLegacyPlanToAudienceGroups(legacyUser.subscription?.plan);
+              if (legacyGroups.length === 0) return;
+              if (
+                  signalAudienceGroups.length === 0 ||
+                  hasAudienceOverlap(legacyGroups, signalAudienceGroups)
+              ) {
+                  candidateUserIds.add(legacyUser._id.toString());
+              }
+          });
+
           // Also include the Creator for verification (if not already included)
           const createdById = signal.createdBy ? signal.createdBy.toString() : null;
           if (createdById) candidateUserIds.add(createdById);
 
-          const candidateIds = Array.from(candidateUserIds);
-          const users = candidateIds.length > 0
-              ? await User.find({
-                    _id: { $in: candidateIds },
-                    status: 'Active'
-                }).select('_id name email role fcmTokens phone phoneNumber preferredSegments marketWatchlist isNotificationEnabled isWhatsAppEnabled isEmailAlertEnabled telegramChatId telegramUsername')
-              : [];
+          let users = [];
+          if (debugBroadcastAll) {
+              logger.warn('[ALERT] DEBUG_SIGNAL_BROADCAST_ALL enabled - sending to all active users.');
+              users = await User.find({ status: 'Active' })
+                  .select('_id name email role fcmTokens phone phoneNumber preferredSegments marketWatchlist isNotificationEnabled isWhatsAppEnabled isEmailAlertEnabled telegramChatId telegramUsername')
+                  .lean();
+          } else {
+              const candidateIds = Array.from(candidateUserIds);
+              users = candidateIds.length > 0
+                  ? await User.find({
+                        _id: { $in: candidateIds },
+                        status: 'Active'
+                    }).select('_id name email role fcmTokens phone phoneNumber preferredSegments marketWatchlist isNotificationEnabled isWhatsAppEnabled isEmailAlertEnabled telegramChatId telegramUsername')
+                  : [];
+          }
           const allSelectedSymbols = users.flatMap((user) => getUserSelectedSymbols(user));
           const selectedSymbolDocs = allSelectedSymbols.length > 0
               ? await MasterSymbol.find({ symbol: { $in: allSelectedSymbols } }).select('symbol segment exchange').lean()
               : [];
           const selectedSymbolDocsMap = buildSelectedSymbolDocsMap(selectedSymbolDocs);
 
-          const eligibleUsers = users.filter((user) => {
+          const selectionStateByUser = new Map();
+          users.forEach((user) => {
+              const userId = user?._id?.toString() || '';
+              const selectedSymbols = getUserSelectedSymbols(user, selectedSymbolDocsMap);
+              const hasSymbol = hasSelectedSignalSymbol(selectedSymbols, signal.symbol);
+              selectionStateByUser.set(userId, {
+                  userId,
+                  selectedCount: selectedSymbols.length,
+                  hasSymbol,
+                  isWhatsAppEnabled: user?.isWhatsAppEnabled !== false,
+                  hasPhone: Boolean(user?.phoneNumber || user?.phone),
+                  isNotificationsEnabled: user?.isNotificationEnabled !== false,
+              });
+          });
+
+          const eligibleUsers = debugBroadcastAll
+              ? users
+              : users.filter((user) => {
+              const userId = user?._id?.toString() || '';
               const isPrivilegedCreator =
                   createdById &&
-                  user._id.toString() === createdById &&
+                  userId === createdById &&
                   user.role !== 'user';
 
               if (!isPrivilegedCreator) {
-                  const selectedSymbols = getUserSelectedSymbols(user, selectedSymbolDocsMap);
-                  if (!hasSelectedSignalSymbol(selectedSymbols, signal.symbol)) {
+                  const state = selectionStateByUser.get(userId);
+                  if (!state?.hasSymbol) {
                       return false;
                   }
               }
 
-              if (signalAudienceGroups.length === 0) return true;
-
-              const preferredGroups = mapPreferredSegmentsToAudienceGroups(user.preferredSegments);
-              if (preferredGroups.length === 0) return true;
-
-              return hasAudienceOverlap(preferredGroups, signalAudienceGroups);
+              // Watchlist selection is explicit; don't block by preferred segments.
+              return true;
           });
 
           const emailEnabled = emailConfig ? emailConfig.enabled !== false : true;
 
           logger.info(`Found ${eligibleUsers.length} eligible users for Signal ${signal.symbol}`);
 
+          if (eligibleUsers.length === 0 && !debugBroadcastAll) {
+              const selectionFailures = Array.from(selectionStateByUser.values())
+                  .filter((entry) => !entry.hasSymbol)
+                  .slice(0, 6)
+                  .map((entry) => ({
+                      userId: entry.userId,
+                      selectedCount: entry.selectedCount,
+                      hasPhone: entry.hasPhone,
+                      isWhatsAppEnabled: entry.isWhatsAppEnabled,
+                  }));
+
+              logger.warn('[ALERT] No eligible users for signal', {
+                  signal: { symbol: signal.symbol, segment: signal.segment, audience: signalAudienceGroups },
+                  candidates: {
+                      activeSubs: activeSubs.length,
+                      activeSegmentSubs: activeSegmentSubs.length,
+                      legacyUsers: legacyUsers.length,
+                      candidateUserIds: candidateUserIds.size,
+                      usersFetched: users.length,
+                  },
+                  selectionFailures,
+              });
+          }
+
           // Step B: Schedule Jobs for each user
+          let whatsappScheduled = 0;
+          let whatsappSkippedNoPhone = 0;
+          let whatsappSkippedDisabled = 0;
+          let whatsappSkippedGlobal = 0;
+
           const promises = eligibleUsers.map((user) => {
               const jobs = [];
               const userId = user._id.toString();
@@ -225,11 +339,14 @@ class NotificationService {
                   }, { removeOnComplete: true }));
               }
 
-              if (
-                  whatsappEnabled &&
-                  user.isWhatsAppEnabled !== false &&
-                  (user.phoneNumber || user.phone)
-              ) {
+              if (!whatsappEnabled) {
+                  whatsappSkippedGlobal += 1;
+              } else if (user.isWhatsAppEnabled === false) {
+                  whatsappSkippedDisabled += 1;
+              } else if (!(user.phoneNumber || user.phone)) {
+                  whatsappSkippedNoPhone += 1;
+              } else {
+                  whatsappScheduled += 1;
                   jobs.push(notificationQueue.add('send-whatsapp', {
                       type: 'whatsapp',
                       userId,
@@ -250,6 +367,19 @@ class NotificationService {
           });
 
           await Promise.all(promises.flat());
+
+          if (eligibleUsers.length > 0 && whatsappScheduled === 0) {
+              logger.warn('[ALERT] No WhatsApp recipients for signal', {
+                  signal: { symbol: signal.symbol, segment: signal.segment },
+                  whatsappEnabled,
+                  eligibleUsers: eligibleUsers.length,
+                  skipped: {
+                      globalDisabled: whatsappSkippedGlobal,
+                      userDisabled: whatsappSkippedDisabled,
+                      missingPhone: whatsappSkippedNoPhone,
+                  },
+              });
+          }
           
 
           // Step C: Create In-App Notifications (DB)

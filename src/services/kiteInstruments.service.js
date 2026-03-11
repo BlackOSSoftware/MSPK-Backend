@@ -1,10 +1,54 @@
-import fs from 'fs';
-import path from 'path';
 import { kiteService } from './kite.service.js';
 import logger from '../config/log.js';
 import MasterSymbol from '../models/MasterSymbol.js';
+import { buildMasterSymbolId } from '../utils/masterSymbolId.js';
+import { KITE_SYNC_SYMBOLS } from '../config/seedSymbols.js';
 
-const INSTRUMENTS_FILE = path.join(process.cwd(), 'data', 'kite_instruments.json');
+const toUpper = (value) => String(value ?? '').trim().toUpperCase();
+
+const stripSymbolSuffix = (value = '') => {
+    let normalized = toUpper(value);
+    if (normalized.endsWith('-INDEX')) {
+        normalized = normalized.slice(0, -6);
+    } else if (normalized.endsWith('-EQ')) {
+        normalized = normalized.slice(0, -3);
+    } else if (normalized.endsWith('.EQ')) {
+        normalized = normalized.slice(0, -3);
+    }
+    return normalized;
+};
+
+const toKiteSymbol = (item = {}) => {
+    const raw = toUpper(item.sourceSymbol || item.symbol);
+    if (!raw) return null;
+
+    let exchange = '';
+    let trading = '';
+
+    if (raw.includes(':')) {
+        const parts = raw.split(':');
+        exchange = toUpper(parts.shift());
+        trading = toUpper(parts.join(':'));
+    } else {
+        exchange = toUpper(item.exchange || 'NSE');
+        trading = raw;
+    }
+
+    trading = stripSymbolSuffix(trading);
+    if (!exchange || !trading) return null;
+
+    return `${exchange}:${trading}`;
+};
+
+const buildAllowMap = () => {
+    const map = new Map();
+    for (const item of KITE_SYNC_SYMBOLS || []) {
+        const kiteSymbol = toKiteSymbol(item);
+        if (!kiteSymbol) continue;
+        map.set(kiteSymbol, item);
+    }
+    return map;
+};
 
 class KiteInstrumentsService {
     constructor() {
@@ -14,32 +58,68 @@ class KiteInstrumentsService {
     }
 
     /**
-     * Sync instruments from Zerodha and save locally
+     * Sync curated instruments from Zerodha and save to MongoDB
      */
     async syncFromZerodha() {
         try {
-            logger.info('KITE_SYNC: Starting daily instrument sync...');
-            
-            // Ensure data directory exists
-            const dataDir = path.dirname(INSTRUMENTS_FILE);
-            if (!fs.existsSync(dataDir)) {
-                fs.mkdirSync(dataDir, { recursive: true });
+            logger.info('KITE_SYNC: Starting curated instrument sync...');
+
+            const allowMap = buildAllowMap();
+            if (allowMap.size === 0) {
+                throw new Error('No allowed Kite symbols configured for sync');
             }
 
             const instruments = await kiteService.getInstruments();
-            if (!instruments || instruments.length === 0) {
+            if (!Array.isArray(instruments) || instruments.length === 0) {
                 throw new Error('Received empty instrument list from Zerodha');
             }
 
-            // Save to local file system for fast loading (avoid bloating MongoDB unnecessarily)
-            fs.writeFileSync(INSTRUMENTS_FILE, JSON.stringify(instruments));
-            
-            logger.info(`KITE_SYNC: Successfully synced ${instruments.length} instruments to ${INSTRUMENTS_FILE}`);
-            
-            // Reload into memory
+            let synced = 0;
+            const missing = new Set(allowMap.keys());
+
+            for (const inst of instruments) {
+                const key = toUpper(`${inst.exchange}:${inst.tradingsymbol}`);
+                const target = allowMap.get(key);
+                if (!target) continue;
+
+                missing.delete(key);
+
+                const payload = {
+                    symbol: toUpper(target.symbol),
+                    name: target.name || inst.name || inst.tradingsymbol,
+                    segment: target.segment || (inst.segment === 'INDICES' ? 'INDICES' : 'EQUITY'),
+                    exchange: target.exchange || inst.exchange,
+                    provider: target.provider || 'kite',
+                    sourceSymbol: target.sourceSymbol || key,
+                    lotSize: inst.lot_size || target.lotSize || 1,
+                    tickSize: inst.tick_size || target.tickSize || 0.05,
+                    instrumentToken: String(inst.instrument_token),
+                    isActive: target.isActive !== undefined ? target.isActive : true,
+                    isWatchlist: target.isWatchlist !== undefined ? target.isWatchlist : false,
+                };
+
+                const doc = await MasterSymbol.findOneAndUpdate(
+                    { symbol: payload.symbol },
+                    { $set: payload },
+                    { upsert: true, new: true, setDefaultsOnInsert: true }
+                );
+
+                if (!doc.symbolId) {
+                    doc.symbolId = buildMasterSymbolId(doc);
+                    await doc.save();
+                }
+
+                synced += 1;
+            }
+
+            if (missing.size > 0) {
+                logger.warn(`KITE_SYNC: Missing ${missing.size} symbols from allowlist`);
+            }
+
             await this.loadIntoMemory();
-            
-            return { count: instruments.length };
+            logger.info(`KITE_SYNC: Successfully synced ${synced} instruments into MongoDB`);
+
+            return { count: synced, missing: Array.from(missing) };
         } catch (error) {
             logger.error(`KITE_SYNC: Sync failed: ${error.message}`);
             throw error;
@@ -47,27 +127,47 @@ class KiteInstrumentsService {
     }
 
     /**
-     * Load instruments from local file into memory maps
+     * Load instruments from MongoDB into memory maps
      */
     async loadIntoMemory() {
         try {
-            if (!fs.existsSync(INSTRUMENTS_FILE)) {
-                logger.warn('KITE_SYNC: No local instrument file found. Sync required.');
-                return;
-            }
-
-            logger.info('KITE_SYNC: Loading instruments into memory...');
-            const data = fs.readFileSync(INSTRUMENTS_FILE, 'utf8');
-            const instruments = JSON.parse(data);
+            logger.info('KITE_SYNC: Loading curated instruments into memory...');
+            const docs = await MasterSymbol.find({
+                provider: 'kite',
+                instrumentToken: { $exists: true, $ne: null },
+            }).lean();
 
             this.instrumentMap.clear();
             this.symbolMap.clear();
 
-            for (const inst of instruments) {
-                // We use EXCHANGE:SYMBOL format for consistency
-                const fullSymbol = `${inst.exchange}:${inst.tradingsymbol}`;
-                this.instrumentMap.set(inst.instrument_token.toString(), fullSymbol);
-                this.symbolMap.set(fullSymbol, inst);
+            for (const doc of docs) {
+                const kiteSymbol = toKiteSymbol(doc);
+                if (!kiteSymbol) continue;
+
+                const [exchange, ...rest] = kiteSymbol.split(':');
+                const tradingsymbol = rest.join(':');
+                const inst = {
+                    exchange,
+                    tradingsymbol,
+                    instrument_token: doc.instrumentToken,
+                    name: doc.name,
+                    segment: doc.segment,
+                    lot_size: doc.lotSize,
+                    tick_size: doc.tickSize,
+                };
+
+                const canonical = toUpper(doc.symbol);
+                if (canonical) {
+                    this.symbolMap.set(canonical, inst);
+                }
+
+                if (kiteSymbol && kiteSymbol !== canonical) {
+                    this.symbolMap.set(kiteSymbol, inst);
+                }
+
+                if (doc.instrumentToken) {
+                    this.instrumentMap.set(String(doc.instrumentToken), kiteSymbol);
+                }
             }
 
             logger.info(`KITE_SYNC: Loaded ${this.instrumentMap.size} instruments into memory maps`);
@@ -80,83 +180,61 @@ class KiteInstrumentsService {
      * Get instrument details by full symbol (EXCHANGE:TRADINGSYMBOL)
      */
     getInstrumentBySymbol(symbol) {
-        return this.symbolMap.get(symbol);
+        return this.symbolMap.get(toUpper(symbol));
     }
 
     /**
      * Get full symbol by token
      */
     getSymbolByToken(token) {
-        return this.instrumentMap.get(token.toString());
+        return this.instrumentMap.get(String(token).trim());
     }
 
     /**
      * Search instruments by query
      */
-    /**
-     * Search instruments by query
-     */
-    search(query, limit = 50) { // Increased limit
+    search(query, limit = 50) {
         const results = [];
-        const q = query.toUpperCase();
-        
-        // Priority buckets
+        const q = String(query || '').toUpperCase();
+
         const exactMatches = [];
         const startsWithMatches = [];
         const containsMatches = [];
 
+        const seenTokens = new Set();
+
         for (const [symbol, inst] of this.symbolMap.entries()) {
-            // Optimization: Skip checking if we have enough, but we want quality results so we check all or meaningful subset
-            // For performance on 100k+ items, we might need an index. But for 3-5k items loop is fine.
-            // Kite has ~100k instruments. This loop might be heavy. 
-            // We should trust the loop but break early if we have enough HIGH QUALITY matches.
-            
+            const tokenKey = String(inst.instrument_token || '');
+            if (tokenKey && seenTokens.has(tokenKey)) continue;
+
             const s = symbol.toUpperCase();
             const n = (inst.name || '').toUpperCase();
-            
-            if (s.includes(q) || n.includes(q)) {
-                // Formatting
-                const item = {
-                    symbol,
-                    name: inst.name,
-                    exchange: inst.exchange,
-                    instrumentToken: inst.instrument_token,
-                    segment: inst.segment,
-                    lotSize: inst.lot_size,
-                    tickSize: inst.tick_size
-                };
 
-                // Ranking Logic
-                // 1. Exact Match on Trading Symbol
-                if (inst.tradingsymbol === q) {
-                    exactMatches.push(item);
-                } 
-                // 2. Exact Match on Name
-                else if (inst.name.toUpperCase() === q) {
-                    exactMatches.push(item);
-                }
-                // 3. Equity / Index Priority (NSE/BSE)
-                else if (inst.segment === 'NSE' || inst.segment === 'BSE' || inst.segment === 'INDICES') {
-                     if (s.startsWith(q)) startsWithMatches.push(item);
-                     else containsMatches.push(item);
-                }
-                // 4. Closest Futures (Current Month)
-                else if (inst.segment === 'NFO-FUT' || inst.segment === 'MCX-FUT') {
-                     // Prioritize near month? Complex. Just treat as normal startsWith
-                     if (s.startsWith(q)) startsWithMatches.push(item);
-                     else containsMatches.push(item);
-                }
-                // 5. Rest
-                else {
-                    containsMatches.push(item);
-                }
+            if (!s.includes(q) && !n.includes(q)) {
+                continue;
+            }
+
+            if (tokenKey) seenTokens.add(tokenKey);
+
+            const item = {
+                symbol,
+                name: inst.name,
+                exchange: inst.exchange,
+                instrumentToken: inst.instrument_token,
+                segment: inst.segment,
+                lotSize: inst.lot_size,
+                tickSize: inst.tick_size,
+            };
+
+            if (s === q || n === q) {
+                exactMatches.push(item);
+            } else if (s.startsWith(q)) {
+                startsWithMatches.push(item);
+            } else {
+                containsMatches.push(item);
             }
         }
 
-        // Combine and Slice
-        // We want Exact -> StartsWith (Equity) -> StartsWith (Others) -> Contains
-        // But the logic above grouped all StartsWith together.
-        // Let's simplified sort:
         const sorted = [...exactMatches, ...startsWithMatches, ...containsMatches];
         return sorted.slice(0, limit);
     }

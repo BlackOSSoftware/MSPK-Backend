@@ -25,6 +25,7 @@ const mapSignalToCategory = (signalBody) => {
   if (sym.includes('NIFTY') && !sym.includes('BANK') && !sym.includes('FIN')) return 'NIFTY_OPT';
   if (sym.includes('BANKNIFTY')) return 'BANKNIFTY_OPT';
   if (sym.includes('FINNIFTY')) return 'FINNIFTY_OPT';
+  if (seg === 'COMEX' || seg === 'NYMEX') return 'MCX_FUT';
   if (seg === 'MCX' || seg === 'COMMODITY') return 'MCX_FUT';
   if (seg === 'CDS' || seg === 'CURRENCY') return 'CURRENCY';
   if (seg === 'CRYPTO') return 'CRYPTO';

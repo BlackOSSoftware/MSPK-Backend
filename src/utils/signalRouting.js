@@ -102,7 +102,9 @@ const getSignalAudienceGroups = (signalLike = {}) => {
   const segment = normalizeSignalSegment(signalLike.segment, signalLike.symbol);
 
   if (category === 'CRYPTO' || segment === 'CRYPTO') groups.add('CRYPTO');
-  if (['MCX_FUT'].includes(category) || ['MCX', 'COMMODITY'].includes(segment)) groups.add('COMMODITY');
+  if (['MCX_FUT'].includes(category) || ['MCX', 'COMMODITY', 'COMEX', 'NYMEX'].includes(segment)) {
+    groups.add('COMMODITY');
+  }
   if (category === 'CURRENCY' || ['CURRENCY', 'CDS', 'BCD', 'FOREX'].includes(segment)) groups.add('CURRENCY');
   if (
     ['NIFTY_OPT', 'BANKNIFTY_OPT', 'FINNIFTY_OPT', 'STOCK_OPT'].includes(category) ||

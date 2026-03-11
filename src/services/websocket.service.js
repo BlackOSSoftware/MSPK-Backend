@@ -7,6 +7,31 @@ import pipeline from '../utils/pipeline/DataPipeline.js';
 
 let wss;
 const rooms = new Map(); // Map<string, Set<WebSocket>>
+const SESSION_MISMATCH_LOG_WINDOW_MS = 60 * 1000;
+const SESSION_MISMATCH_CLEANUP_MS = 10 * 60 * 1000;
+const sessionMismatchLog = new Map(); // Map<string, { last: number; count: number }>
+
+const shouldLogSessionMismatch = (key) => {
+  if (!key) return true;
+  const now = Date.now();
+  const entry = sessionMismatchLog.get(key);
+  if (!entry || now - entry.last > SESSION_MISMATCH_LOG_WINDOW_MS) {
+    sessionMismatchLog.set(key, { last: now, count: 1 });
+    return true;
+  }
+  entry.count += 1;
+  sessionMismatchLog.set(key, entry);
+  return false;
+};
+
+setInterval(() => {
+  const now = Date.now();
+  sessionMismatchLog.forEach((entry, key) => {
+    if (now - entry.last > SESSION_MISMATCH_CLEANUP_MS) {
+      sessionMismatchLog.delete(key);
+    }
+  });
+}, SESSION_MISMATCH_CLEANUP_MS);
 
 const normalizeWsToken = (value) => {
   const token = String(value || '')
@@ -101,7 +126,12 @@ const initWebSocket = (server) => {
 
           // 1. Single Session Verification
           if (user.tokenVersion && decoded.v !== user.tokenVersion) {
-            logger.warn(`WS: Session mismatch for ${user.email}. Expected v:${user.tokenVersion}, got v:${decoded.v}`);
+            const logKey = user.id || user.email || decoded.sub || 'unknown';
+            if (shouldLogSessionMismatch(logKey)) {
+              logger.warn(
+                `WS: Session mismatch for ${user.email}. Expected v:${user.tokenVersion}, got v:${decoded.v}`
+              );
+            }
             ws.send(JSON.stringify({ type: 'error', payload: 'Session expired. Logged in on another device.' }));
             ws.close(1008, 'Session expired');
             return;
