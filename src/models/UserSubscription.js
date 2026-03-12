@@ -55,6 +55,18 @@ const userSubscriptionSchema = new mongoose.Schema(
     admin_note: {
       type: String,
       default: null
+    },
+    renewalReminderLastSentAt: {
+      type: Date,
+      default: null
+    },
+    demoExpiryReminderSent: {
+      type: Boolean,
+      default: false
+    },
+    demoExpiryReminderSentAt: {
+      type: Date,
+      default: null
     }
   },
   {

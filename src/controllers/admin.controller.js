@@ -12,6 +12,7 @@ import transactionService from '../services/transaction.service.js';
 import { subBrokerService, announcementService } from '../services/index.js';
 import subscriptionService from '../services/subscription.service.js';
 import planService from '../services/plan.service.js';
+import subscriptionCron from '../jobs/subscriptionCron.js';
 
 const normalizeSubscriptionSegments = (segments) => {
     if (!Array.isArray(segments)) return [];
@@ -633,6 +634,16 @@ const broadcastMessage = catchAsync(async (req, res) => {
     });
 });
 
+const sendRenewalReminders = catchAsync(async (req, res) => {
+    const result = await subscriptionCron.runRenewalRemindersNow();
+    res.status(httpStatus.OK).send({ message: 'Renewal reminders triggered', ...result });
+});
+
+const sendDemoReminders = catchAsync(async (req, res) => {
+    const result = await subscriptionCron.runDemoRemindersNow();
+    res.status(httpStatus.OK).send({ message: 'Demo reminders triggered', ...result });
+});
+
 export default {
   getUsers,
   createUser,
@@ -644,5 +655,7 @@ export default {
   deleteUser,
   blockUser, 
   getSystemHealth,
-  broadcastMessage
+  broadcastMessage,
+  sendRenewalReminders,
+  sendDemoReminders
 };

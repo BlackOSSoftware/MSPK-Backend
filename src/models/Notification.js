@@ -27,6 +27,7 @@ const notificationSchema = mongoose.Schema(
         'SUBSCRIPTION_REMINDER',
         'SUBSCRIPTION_EXPIRY_REMINDER',
         'SUBSCRIPTION_EXPIRED',
+        'DEMO_REMINDER',
         'ECONOMIC_ALERT',
         'REMINDER'
       ],

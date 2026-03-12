@@ -38,5 +38,7 @@ router
   .get(adminController.getSystemHealth);
 
 router.post('/broadcast', adminController.broadcastMessage);
+router.post('/reminders/renewal', adminController.sendRenewalReminders);
+router.post('/reminders/demo', adminController.sendDemoReminders);
 
 export default router;

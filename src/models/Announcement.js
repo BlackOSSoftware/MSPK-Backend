@@ -24,6 +24,7 @@ const announcementSchema = new mongoose.Schema(
       role: { type: String, enum: ['all', 'user', 'sub-broker'], default: 'all' },
       planValues: [String], // e.g. ['pro', 'enterprise']
       segments: [String],   // e.g. ['EQUITY_INTRA', 'NIFTY_OPT']
+      includeCustomPlans: { type: Boolean, default: false },
     },
     startDate: {
       type: Date,

@@ -428,21 +428,36 @@ class NotificationService {
           }
 
           // 2. Advanced Targeting (Plans / Segments)
-          if (targetAudience && (targetAudience.planValues?.length > 0 || targetAudience.segments?.length > 0)) {
+          if (targetAudience && (targetAudience.planValues?.length > 0 || targetAudience.segments?.length > 0 || targetAudience.includeCustomPlans)) {
               const { default: Subscription } = await import('../models/Subscription.js');
               const { default: Plan } = await import('../models/Plan.js');
 
-              const eligiblePlansFilter = { $or: [] };
-              if (targetAudience.planValues?.length > 0) {
-                  eligiblePlansFilter.$or.push({ name: { $in: targetAudience.planValues } });
-              }
+              const eligiblePlansFilters = [];
+              const segmentFilters = [];
+
               if (targetAudience.segments?.length > 0) {
                   // Check direct segment OR specific permissions (most sub-categories are in permissions)
-                  eligiblePlansFilter.$or.push({ segment: { $in: targetAudience.segments } });
-                  eligiblePlansFilter.$or.push({ permissions: { $in: targetAudience.segments } });
+                  segmentFilters.push({ segment: { $in: targetAudience.segments } });
+                  segmentFilters.push({ permissions: { $in: targetAudience.segments } });
               }
 
-              const eligiblePlans = await Plan.find(eligiblePlansFilter).select('_id');
+              if (targetAudience.planValues?.length > 0) {
+                  eligiblePlansFilters.push({ name: { $in: targetAudience.planValues } });
+              }
+
+              if (targetAudience.includeCustomPlans) {
+                  if (segmentFilters.length > 0) {
+                      eligiblePlansFilters.push({ isCustom: true, $or: segmentFilters });
+                  } else {
+                      eligiblePlansFilters.push({ isCustom: true });
+                  }
+              } else if (segmentFilters.length > 0) {
+                  eligiblePlansFilters.push(...segmentFilters);
+              }
+
+              const eligiblePlans = eligiblePlansFilters.length > 0
+                  ? await Plan.find({ $or: eligiblePlansFilters }).select('_id isDemo')
+                  : [];
               const eligiblePlanIds = eligiblePlans.map(p => p._id);
 
               if (eligiblePlanIds.length > 0) {
@@ -454,7 +469,23 @@ class NotificationService {
                   }).select('user').lean();
                   
                   const userIdsFromSubs = Array.from(new Set(activeSubs.map(s => s.user.toString())));
-                  query._id = { $in: userIdsFromSubs };
+                  let combinedUserIds = userIdsFromSubs;
+
+                  // If any selected plan is demo, include demo segment subscribers too
+                  const hasDemoPlan = eligiblePlans.some(p => p.isDemo);
+                  if (hasDemoPlan) {
+                      const { default: UserSubscription } = await import('../models/UserSubscription.js');
+                      const demoSubs = await UserSubscription.find({
+                          status: 'active',
+                          is_active: true,
+                          plan_type: 'demo',
+                          end_date: { $gt: now }
+                      }).select('user_id').lean();
+                      const demoUserIds = Array.from(new Set(demoSubs.map(s => s.user_id.toString())));
+                      combinedUserIds = Array.from(new Set([...combinedUserIds, ...demoUserIds]));
+                  }
+
+                  query._id = { $in: combinedUserIds };
               } else {
                   logger.info('No matching plans found for targeting filters');
                   return;
@@ -545,30 +576,75 @@ class NotificationService {
       try {
           const planName = subscription.plan?.name || 'Subscription';
           const expiryDate = new Date(subscription.endDate).toLocaleDateString('en-IN');
+          const userName = user?.name || 'Trader';
+          const title = '⏳ Plan Expiring Soon';
+          const whatsappNumber = '917770039037';
+          const whatsappLink = `https://wa.me/${whatsappNumber}`;
+          const message = [
+              `Hi ${userName},`,
+              '',
+              `Your ${planName} plan expires in ${daysLeft} day(s) (${expiryDate}).`,
+              'Please renew to continue receiving premium signals and alerts.',
+              '',
+              'MSPK Trade Solutions'
+          ].join('\n');
+          const whatsappMessage = [
+              `Hi ${userName},`,
+              '',
+              `Your ${planName} plan expires in ${daysLeft} day(s) (${expiryDate}).`,
+              'Please renew to continue receiving premium signals and alerts.',
+              'Reply here to purchase the renewal and we will activate your plan immediately.',
+              '',
+              'MSPK Trade Solutions'
+          ].join('\n');
           
           // 1. Send Push Notification
               await notificationQueue.add('send-push-reminder', {
                   type: 'push',
                   userId: user._id,
                   notification: {
-                      title: '⏰ Subscription Expiring Soon',
-                      message: `Your ${planName} plan expires in ${daysLeft} days (${expiryDate}). Renew now to continue enjoying our services!`,
+                      title,
+                      message,
                       type: 'SUBSCRIPTION_EXPIRY_REMINDER',
                       data: {
                           subscriptionId: subscription._id,
                           planName,
                           daysLeft,
-                          expiryDate
-                      }
+                          expiryDate,
+                          url: '/dashboard/notifications',
+                          whatsappLink
+                      },
+                      link: '/dashboard/notifications'
                   }
               }, { removeOnComplete: true });
 
-          // 2. Send Email Notification
+          // 2. Send WhatsApp Notification
+          await notificationQueue.add('send-whatsapp', {
+              type: 'whatsapp',
+              userId: user._id,
+              notification: {
+                  title,
+                  message: whatsappMessage,
+                  text: whatsappMessage
+              }
+          }, { removeOnComplete: true });
+
+          // 3. Send Telegram Notification
+          await notificationQueue.add('send-telegram', {
+              type: 'telegram',
+              userId: user._id,
+              notification: {
+                  title,
+                  message
+              }
+          }, { removeOnComplete: true });
+
+          // 4. Send Email Notification
           await notificationQueue.add('send-email', {
               type: 'email',
               userId: user._id,
               email: user.email,
-              subject: `⏰ Your ${planName} Plan Expires in ${daysLeft} Days`,
+              subject: `⏳ Your ${planName} Plan Expires in ${daysLeft} Days`,
               template: 'pre-expiry-reminder',
               data: {
                   userName: user.name,
@@ -579,14 +655,14 @@ class NotificationService {
               }
           }, { removeOnComplete: true });
 
-          // 3. Create In-App Notification
+          // 5. Create In-App Notification
           const notification = await Notification.create({
               user: user._id,
-              title: '⏰ Subscription Expiring Soon',
-              message: `Your ${planName} plan expires in ${daysLeft} days. Renew now!`,
+              title,
+              message,
               type: 'SUBSCRIPTION_REMINDER',
-              data: { subscriptionId: subscription._id },
-              link: '/subscription'
+              data: { subscriptionId: subscription._id, whatsappLink },
+              link: '/dashboard/notifications'
           });
           emitRealtimeNotifications([notification]);
 
@@ -594,6 +670,82 @@ class NotificationService {
 
       } catch (error) {
           logger.error(`Failed to send pre-expiry reminder for user ${user._id}`, error);
+      }
+  }
+
+  async sendDemoExpiryReminder(user, subscription, daysLeft) {
+      try {
+          const expiryDate = new Date(subscription.end_date || subscription.endDate).toLocaleDateString('en-IN');
+          const userName = user?.name || 'Trader';
+          const title = '⏳ Demo Access Ending Soon';
+          const whatsappNumber = '917770039037';
+          const whatsappLink = `https://wa.me/${whatsappNumber}`;
+          const message = [
+              `Hi ${userName},`,
+              '',
+              `Your demo access ends in ${daysLeft} day(s) (${expiryDate}).`,
+              'Upgrade now to keep receiving premium trading signals and alerts.',
+              '',
+              'MSPK Trade Solutions'
+          ].join('\n');
+          const whatsappMessage = [
+              `Hi ${userName},`,
+              '',
+              `Your demo access ends in ${daysLeft} day(s) (${expiryDate}).`,
+              'Upgrade now to keep receiving premium trading signals and alerts.',
+              'Reply here to purchase your plan and we will activate it immediately.',
+              '',
+              'MSPK Trade Solutions'
+          ].join('\n');
+
+          await notificationQueue.add('send-push-reminder', {
+              type: 'push',
+              userId: user._id,
+              notification: {
+                  title,
+                  message,
+                  type: 'DEMO_EXPIRY_REMINDER',
+                  data: {
+                      subscriptionId: subscription._id,
+                      daysLeft,
+                      expiryDate,
+                      url: '/dashboard/notifications',
+                      whatsappLink
+                  },
+                  link: '/dashboard/notifications'
+              }
+          }, { removeOnComplete: true });
+
+          await notificationQueue.add('send-whatsapp', {
+              type: 'whatsapp',
+              userId: user._id,
+              notification: {
+                  title,
+                  message: whatsappMessage,
+                  text: whatsappMessage
+              }
+          }, { removeOnComplete: true });
+
+          await notificationQueue.add('send-telegram', {
+              type: 'telegram',
+              userId: user._id,
+              notification: {
+                  title,
+                  message
+              }
+          }, { removeOnComplete: true });
+
+          const notification = await Notification.create({
+              user: user._id,
+              title,
+              message,
+              type: 'DEMO_REMINDER',
+              data: { subscriptionId: subscription._id, whatsappLink },
+              link: '/dashboard/notifications'
+          });
+          emitRealtimeNotifications([notification]);
+      } catch (error) {
+          logger.error(`Failed to send demo expiry reminder for user ${user?._id}`, error);
       }
   }
 

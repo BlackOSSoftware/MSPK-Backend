@@ -33,6 +33,10 @@ const subscriptionSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    renewalReminderLastSentAt: {
+      type: Date,
+      default: null,
+    },
     transaction: {
       type: mongoose.Schema.Types.ObjectId, // Link to Transaction
       ref: 'Transaction'
