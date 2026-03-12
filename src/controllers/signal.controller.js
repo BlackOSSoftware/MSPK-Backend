@@ -150,6 +150,7 @@ const getSignalAccessContext = async (req) => {
       allowedCategories: [],
       selectedSymbols: [],
       selectedSymbolCount: 0,
+      signalVisibleFrom: null,
       scope: 'free_only',
       message: 'Guest mode: only free signals are visible. Login to view premium signals.'
     };
@@ -167,6 +168,7 @@ const getSignalAccessContext = async (req) => {
       allowedCategories: [],
       selectedSymbols: [],
       selectedSymbolCount: 0,
+      signalVisibleFrom: null,
       scope: 'all',
       message: null
     };
@@ -185,6 +187,7 @@ const getSignalAccessContext = async (req) => {
   const { allowedSegments, allowedCategories } =
     planStatus === 'active' ? getAllowedAccessFromPermissions(permissions) : { allowedSegments: [], allowedCategories: [] };
   const rawSelectedSymbols = getUserSelectedSymbols(req.user);
+  const signalVisibleFrom = req.user?.createdAt ? new Date(req.user.createdAt) : null;
   const selectedSymbolDocs = rawSelectedSymbols.length > 0
     ? await MasterSymbol.find({ symbol: { $in: rawSelectedSymbols } }).select('symbol segment exchange').lean()
     : [];
@@ -205,6 +208,10 @@ const getSignalAccessContext = async (req) => {
     allowedCategories,
     selectedSymbols,
     selectedSymbolCount: selectedSymbols.length,
+    signalVisibleFrom:
+      signalVisibleFrom instanceof Date && !Number.isNaN(signalVisibleFrom.getTime())
+        ? signalVisibleFrom
+        : null,
     scope: allowedSegments.length > 0 || allowedCategories.length > 0 ? 'free_and_subscribed' : 'free_only',
     message:
       planStatus === 'active'
@@ -243,6 +250,15 @@ const buildBaseFilterForAccess = (access) => {
     accessFilter = { $and: [accessFilter, selectedSymbolFilter] };
   }
 
+  if (access.mode === 'user' && access.signalVisibleFrom instanceof Date && !Number.isNaN(access.signalVisibleFrom.getTime())) {
+    accessFilter = {
+      $and: [
+        accessFilter,
+        { createdAt: { $gte: access.signalVisibleFrom } }
+      ]
+    };
+  }
+
   return accessFilter;
 };
 
@@ -257,6 +273,17 @@ const assertSignalAccess = (access, signal) => {
   ) {
     throw new ApiError(httpStatus.FORBIDDEN, 'You only receive signals for scripts selected in your watchlist.');
   }
+
+  if (
+    access.mode === 'user' &&
+    access.signalVisibleFrom instanceof Date &&
+    !Number.isNaN(access.signalVisibleFrom.getTime()) &&
+    signal?.createdAt &&
+    new Date(signal.createdAt).getTime() < access.signalVisibleFrom.getTime()
+  ) {
+    throw new ApiError(httpStatus.FORBIDDEN, 'This signal was generated before your account became active.');
+  }
+
   if (signal.isFree) return;
 
   if (access.mode === 'guest') {
