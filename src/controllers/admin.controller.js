@@ -81,6 +81,15 @@ const inferPrimarySegment = (segments) => {
     return undefined;
 };
 
+const getNextSubscriptionStartDate = async (userId) => {
+    const latest = await Subscription.findOne({ user: userId, status: 'active' }).sort({ endDate: -1 });
+    const now = new Date();
+    if (latest?.endDate && latest.endDate > now) {
+        return new Date(latest.endDate);
+    }
+    return now;
+};
+
 const createUser = catchAsync(async (req, res) => {
     console.log("Create User Payload:", JSON.stringify(req.body, null, 2)); // DEBUG LOG
     const { email, password, name, phone, tradingViewId, role, clientId, equity, walletBalance, subBrokerId, planId, status, segments } = req.body;
@@ -98,6 +107,8 @@ const createUser = catchAsync(async (req, res) => {
     }
     const preferredSegments = mapSubscriptionToPreferred(normalizedSegments);
 
+    const referralCode = Math.random().toString(36).substring(2, 8).toUpperCase();
+
     const user = await User.create({
         name,
         email,
@@ -111,6 +122,9 @@ const createUser = catchAsync(async (req, res) => {
         subBrokerId,
         status,
         ...(preferredSegments.length > 0 ? { preferredSegments } : {}),
+        referral: {
+            code: referralCode
+        },
         isEmailVerified: true // Admin created, so verify
     });
 
@@ -203,15 +217,8 @@ const assignCustomPlan = catchAsync(async (req, res) => {
         isCustom: true
     });
 
-    const currentSub = await Subscription.findOne({ user: user.id, status: 'active' });
-    if (currentSub) {
-        currentSub.status = 'expired';
-        currentSub.endDate = new Date();
-        await currentSub.save();
-    }
-
-    const startDate = new Date();
-    const endDate = new Date();
+    const startDate = await getNextSubscriptionStartDate(user.id);
+    const endDate = new Date(startDate);
     endDate.setDate(endDate.getDate() + (plan.durationDays || 30));
 
     const subscription = await Subscription.create({
@@ -222,6 +229,12 @@ const assignCustomPlan = catchAsync(async (req, res) => {
         endDate,
         transaction: null
     });
+
+    user.subscription = {
+        plan: plan.name,
+        expiresAt: endDate
+    };
+    await user.save();
 
     res.status(httpStatus.CREATED).send({
         message: 'Custom plan assigned successfully',
@@ -565,39 +578,33 @@ const updateUser = catchAsync(async (req, res) => {
     Object.assign(user, body);
     await user.save(); // Password hashing happens in pre-save if 'password' was in body
 
-    // Handle Plan Update (if planId provided and changed)
+    // Handle Plan Update (if planId provided)
     if (planId) {
-        const currentSub = await Subscription.findOne({ user: user.id, status: 'active' });
-        
-        // If no active plan OR different plan
-        if (!currentSub || currentSub.plan.toString() !== planId) {
-             const plan = await Plan.findById(planId);
-             if (plan) {
-                 // Expire old subscription
-                 if (currentSub) {
-                     currentSub.status = 'expired';
-                     currentSub.endDate = new Date();
-                     await currentSub.save();
-                 }
-
-                 // Create new subscription
-                 const startDate = new Date();
-                 const endDate = new Date();
-                 endDate.setDate(endDate.getDate() + (plan.durationDays || 30));
-
-                 await Subscription.create({
-                     user: user.id,
-                     plan: plan.id,
-                     status: 'active',
-                     startDate,
-                     endDate,
-                     transaction: null
-                 });
-             }
+        const plan = await Plan.findById(planId);
+        if (!plan) {
+            throw new ApiError(httpStatus.BAD_REQUEST, 'Plan not found');
         }
+
+        const startDate = await getNextSubscriptionStartDate(user.id);
+        const endDate = new Date(startDate);
+        endDate.setDate(endDate.getDate() + (plan.durationDays || 30));
+
+        await Subscription.create({
+            user: user.id,
+            plan: plan.id,
+            status: 'active',
+            startDate,
+            endDate,
+            transaction: null
+        });
+
+        user.subscription = {
+            plan: plan.name,
+            expiresAt: endDate
+        };
+        await user.save();
     }
 
-    res.send(user);
     res.send(user);
 });
 

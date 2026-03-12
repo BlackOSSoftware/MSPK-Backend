@@ -1,5 +1,6 @@
 import Segment from '../models/Segment.js';
 import UserSubscription from '../models/UserSubscription.js';
+import Subscription from '../models/Subscription.js';
 import AdminSetting from '../models/AdminSetting.js';
 import httpStatus from 'http-status';
 import ApiError from '../utils/ApiError.js';
@@ -19,9 +20,52 @@ const getAllSegments = async () => {
  * @returns {Promise<Array>}
  */
 const getAllSubscriptions = async () => {
-  return UserSubscription.find()
-    .populate('user_id', 'name email mobile')
-    .sort({ createdAt: -1 });
+  const now = new Date();
+
+  const [planSubs, segmentSubs] = await Promise.all([
+    Subscription.find()
+      .populate('user', 'name email lastLoginIp')
+      .populate('plan', 'name price durationDays')
+      .sort({ createdAt: -1 })
+      .lean(),
+    UserSubscription.find()
+      .populate('user_id', 'name email lastLoginIp')
+      .sort({ createdAt: -1 })
+      .lean()
+  ]);
+
+  const mappedPlanSubs = planSubs.map((sub) => {
+    const start = sub.startDate ? new Date(sub.startDate) : null;
+    const end = sub.endDate ? new Date(sub.endDate) : null;
+    let status = sub.status || 'active';
+
+    if (status === 'active') {
+      if (start && start > now) status = 'pending';
+      else if (end && end <= now) status = 'expired';
+    }
+
+    return {
+      _id: sub._id,
+      user_id: sub.user ? {
+        _id: sub.user._id,
+        name: sub.user.name,
+        email: sub.user.email,
+        lastLoginIp: sub.user.lastLoginIp
+      } : null,
+      plan_type: sub.plan?.name || 'Plan',
+      total_amount: sub.plan?.price || 0,
+      start_date: sub.startDate || null,
+      end_date: sub.endDate || null,
+      status,
+      transaction_id: sub.transaction || null,
+      createdAt: sub.createdAt || sub.startDate || null,
+      is_active: status === 'active'
+    };
+  });
+
+  const merged = [...mappedPlanSubs, ...segmentSubs];
+  merged.sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+  return merged;
 };
 
 /**

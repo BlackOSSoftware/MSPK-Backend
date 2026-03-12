@@ -123,10 +123,12 @@ const getUserActivePlan = async (user) => {
   const Subscription = (await import('../models/Subscription.js')).default;
   
   // 1. Check New Subscription Model
+  const now = new Date();
   const activeSubs = await Subscription.find({ 
       user: user._id, 
       status: 'active', 
-      endDate: { $gt: new Date() } 
+      startDate: { $lte: now },
+      endDate: { $gt: now } 
   }).populate('plan');
 
   if (activeSubs && activeSubs.length > 0) {
