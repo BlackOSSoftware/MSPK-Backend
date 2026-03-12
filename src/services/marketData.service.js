@@ -12,6 +12,7 @@ import { decrypt, encrypt } from '../utils/encryption.js';
 import cacheManager from './cacheManager.js';
 
 const INDIAN_EXCHANGES = new Set(['NSE', 'BSE', 'MCX', 'NFO', 'CDS', 'BCD']);
+const INDIA_TIMEZONE_OFFSET_SEC = 5.5 * 60 * 60;
 const SENSITIVE_KEY_PATTERN = /(api_key|api_secret|access_token)/i;
 const SYMBOLS_CACHE_VERSION_KEY = 'market_symbols_cache_version';
 const SYMBOLS_CACHE_TTL = '5m';
@@ -66,8 +67,88 @@ const resolutionToKiteInterval = (resolution) => {
     if (normalized === '45') return '60minute';
     if (normalized === '60' || normalized === '1H') return '60minute';
     if (normalized === 'D' || normalized === '1D' || normalized === 'DAY') return 'day';
+    if (normalized === 'W' || normalized === '1W' || normalized === 'WEEK') return 'day';
+    if (normalized === 'M' || normalized === '1M' || normalized === 'MN' || normalized === 'MONTH') return 'day';
 
     return 'minute';
+};
+
+const isWeeklyResolution = (resolution) => {
+    const normalized = String(resolution || '').trim().toUpperCase();
+    return normalized === 'W' || normalized === '1W' || normalized === 'WEEK';
+};
+
+const isMonthlyResolution = (resolution) => {
+    const normalized = String(resolution || '').trim().toUpperCase();
+    return normalized === 'M' || normalized === '1M' || normalized === 'MN' || normalized === 'MONTH';
+};
+
+const isAggregatedResolution = (resolution) => isWeeklyResolution(resolution) || isMonthlyResolution(resolution);
+
+const getAggregateBucketStart = (timeSec, resolution) => {
+    const shiftedDate = new Date((timeSec + INDIA_TIMEZONE_OFFSET_SEC) * 1000);
+    shiftedDate.setUTCHours(0, 0, 0, 0);
+
+    if (isWeeklyResolution(resolution)) {
+        const day = shiftedDate.getUTCDay();
+        const diff = shiftedDate.getUTCDate() - day + (day === 0 ? -6 : 1);
+        shiftedDate.setUTCDate(diff);
+    } else if (isMonthlyResolution(resolution)) {
+        shiftedDate.setUTCDate(1);
+    }
+
+    return Math.floor(shiftedDate.getTime() / 1000) - INDIA_TIMEZONE_OFFSET_SEC;
+};
+
+const aggregateCandlesForResolution = (candles = [], resolution, countOverride = null) => {
+    const safeCandles = Array.isArray(candles)
+        ? candles
+            .filter((candle) => candle && candle.time && candle.close !== undefined)
+            .sort((a, b) => a.time - b.time)
+        : [];
+
+    if (!isAggregatedResolution(resolution)) {
+        if (countOverride !== null && countOverride !== undefined) {
+            const boundedCount = Number.parseInt(countOverride, 10);
+            if (Number.isFinite(boundedCount) && boundedCount > 0) {
+                return safeCandles.slice(-boundedCount);
+            }
+        }
+        return safeCandles;
+    }
+
+    const aggregated = [];
+    let current = null;
+
+    for (const candle of safeCandles) {
+        const bucketStart = getAggregateBucketStart(candle.time, resolution);
+        if (!current || current.time !== bucketStart) {
+            current = {
+                time: bucketStart,
+                open: candle.open,
+                high: candle.high,
+                low: candle.low,
+                close: candle.close,
+                volume: toNumber(candle.volume, 0),
+            };
+            aggregated.push(current);
+            continue;
+        }
+
+        current.high = Math.max(current.high, candle.high);
+        current.low = Math.min(current.low, candle.low);
+        current.close = candle.close;
+        current.volume = toNumber(current.volume, 0) + toNumber(candle.volume, 0);
+    }
+
+    if (countOverride !== null && countOverride !== undefined) {
+        const boundedCount = Number.parseInt(countOverride, 10);
+        if (Number.isFinite(boundedCount) && boundedCount > 0) {
+            return aggregated.slice(-boundedCount);
+        }
+    }
+
+    return aggregated;
 };
 
 class MarketDataService extends EventEmitter {
@@ -1295,7 +1376,10 @@ class MarketDataService extends EventEmitter {
             if (shouldUseKite) {
                 const fromKey = Math.floor(fromTs / 30) * 30;
                 const toKey = Math.floor(toTs / 30) * 30;
-                const cacheKey = `history_${historySymbol}_${resolution}_${fromKey}_${toKey}`;
+                const countKey = countOverride !== null && countOverride !== undefined
+                    ? Number.parseInt(countOverride, 10) || 0
+                    : 0;
+                const cacheKey = `history_${historySymbol}_${resolution}_${fromKey}_${toKey}_${countKey}`;
 
                 return await cacheManager.getOrFetch(cacheKey, async () => {
                     if (this.kiteAuthBrokenUntil && Date.now() < this.kiteAuthBrokenUntil) {
@@ -1308,7 +1392,8 @@ class MarketDataService extends EventEmitter {
                         resolution,
                         new Date(fromTs * 1000),
                         new Date(toTs * 1000),
-                        kiteInstrument
+                        kiteInstrument,
+                        countOverride
                     );
 
                     return Array.isArray(data)
@@ -1363,24 +1448,27 @@ class MarketDataService extends EventEmitter {
         }
     }
 
-    async _fetchKiteHistory(symbol, resolution, from, to, instrumentTokenOverride = null) {
+    async _fetchKiteHistory(symbol, resolution, from, to, instrumentTokenOverride = null, countOverride = null) {
         const symbolDoc = this.symbols[symbol];
         const instrumentToken = instrumentTokenOverride || symbolDoc?.instrumentToken;
         if (!instrumentToken) return [];
 
-        const interval = resolutionToKiteInterval(resolution);
+        const sourceResolution = isAggregatedResolution(resolution) ? 'D' : resolution;
+        const interval = resolutionToKiteInterval(sourceResolution);
 
         const safeFromTs = parseTs(from);
         const safeToTs = parseTs(to);
 
         const adjustedFromTs = safeFromTs > safeToTs ? safeToTs - 86400 : safeFromTs;
 
-        return kiteService.getHistoricalData(
+        const candles = await kiteService.getHistoricalData(
             instrumentToken,
             interval,
             new Date(adjustedFromTs * 1000),
             new Date(safeToTs * 1000)
         );
+
+        return aggregateCandlesForResolution(candles, resolution, countOverride);
     }
 
     _resolveMarketDataHttpBase() {
