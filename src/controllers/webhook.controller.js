@@ -71,6 +71,30 @@ const roundSignalValue = (value) => Math.round(value * 100) / 100;
 
 const getSignalClosedStatuses = () => ['Closed', 'Target Hit', 'Partial Profit Book', 'Stoploss Hit'];
 
+const resolveInfoTargetLevel = (message) => {
+  const normalized = String(message || '').trim().toUpperCase();
+  if (!normalized) return null;
+  if (normalized.includes('T1') || normalized.includes('TP1')) return 'TP1';
+  if (normalized.includes('T2') || normalized.includes('TP2')) return 'TP2';
+  if (normalized.includes('T3') || normalized.includes('TP3')) return 'TP3';
+  return null;
+};
+
+const buildInfoUpdateMessage = ({ message, targetLevel, price, time }) => {
+  const normalizedMessage = String(message || '').trim().toUpperCase();
+  const label = targetLevel || normalizedMessage.replace(/_/g, ' ') || 'INFO';
+  const parts = [`${label} achieved`];
+
+  if (typeof price === 'number') {
+    parts.push(`at ${roundSignalValue(price)}`);
+  }
+  if (time) {
+    parts.push(`on ${new Date(time).toISOString()}`);
+  }
+
+  return `${parts.join(' ')}. Trade remains active.`;
+};
+
 const deriveExitPoints = ({ signal, exitPrice, totalPoints }) => {
   const resolvedTotalPoints = toFiniteNumber(totalPoints);
   const entryPrice = toFiniteNumber(signal?.entryPrice);
@@ -241,6 +265,51 @@ const receiveSignal = catchAsync(async (req, res) => {
 
     return null;
   };
+
+  if (event === 'INFO') {
+    const existing = await findSignalByWebhookId(webhookId);
+    if (!existing) {
+      return sendWebhookResponse(httpStatus.OK, { status: 'not_found', uniq_id: webhookId, symbol });
+    }
+
+    const currentPrice = toFiniteNumber(req.body.price);
+    const infoTime = req.body.time;
+    const targetLevel = resolveInfoTargetLevel(req.body.message);
+    const noteText = buildInfoUpdateMessage({
+      message: req.body.message,
+      targetLevel,
+      price: currentPrice,
+      time: infoTime,
+    });
+
+    if (existing.notes === noteText) {
+      return sendWebhookResponse(httpStatus.OK, {
+        status: 'ok',
+        signal: existing,
+        info: { targetLevel, message: req.body.message },
+      });
+    }
+
+    const updated = await signalService.updateSignalById(existing.id, {
+      notes: noteText,
+      notificationMeta: {
+        subType: 'SIGNAL_INFO',
+        data: {
+          targetLevel: targetLevel || 'INFO',
+          currentPrice,
+          updateMessage: noteText,
+          messageCode: String(req.body.message || '').trim().toUpperCase(),
+          infoTime,
+        },
+      },
+    });
+
+    return sendWebhookResponse(httpStatus.OK, {
+      status: 'ok',
+      signal: updated,
+      info: { targetLevel, message: req.body.message },
+    });
+  }
 
   if (event === 'EXIT') {
     const existing = await findSignalByWebhookId(webhookId);

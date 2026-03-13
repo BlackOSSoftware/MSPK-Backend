@@ -25,6 +25,7 @@ import {
   getUserSelectedSymbols,
   hasSelectedSignalSymbol,
 } from '../utils/userSignalSelection.js';
+import { derivePlanPermissions } from '../utils/planPermissions.js';
 import { sendToUser } from './websocket.service.js';
 
 const serializeRealtimeNotification = (notification) => ({
@@ -73,7 +74,7 @@ const mapLegacyPlanToAudienceGroups = (planName = '') => {
 
 const derivePlanSegments = (plan, authService) => {
   if (!plan) return [];
-  const permissions = Array.isArray(plan.permissions) ? plan.permissions : [];
+  const permissions = derivePlanPermissions(plan);
   const segmentsFromPerms = authService.getSegmentsFromPermissions(permissions);
   if (segmentsFromPerms.length > 0) return segmentsFromPerms;
 

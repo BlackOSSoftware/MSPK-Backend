@@ -1,12 +1,26 @@
 import { isCryptoLikeSymbol } from './signalRouting.js';
 
 const MAX_SELECTED_SYMBOLS_PER_SEGMENT = 10;
+const INDEX_SYMBOL_ALIAS_GROUPS = [
+  ['NIFTY', 'NIFTY1!', 'NIFTY50', 'NSE:NIFTY', 'NSE:NIFTY50', 'NSE:NIFTY 50', 'NSE:NIFTY 50-INDEX'],
+  ['BANKNIFTY', 'BANKNIFTY1!', 'NSE:BANKNIFTY', 'NSE:NIFTYBANK', 'NSE:NIFTY BANK', 'NSE:NIFTY BANK-INDEX'],
+  ['FINNIFTY', 'FINNIFTY1!', 'NSE:FINNIFTY', 'NSE:NIFTY FIN SERVICE', 'NSE:NIFTY FIN SERVICE-INDEX'],
+];
+
+const INDEX_SYMBOL_ALIAS_MAP = new Map(
+  INDEX_SYMBOL_ALIAS_GROUPS.flatMap((group) => group.map((symbol) => [symbol, group]))
+);
 
 const getSelectedSymbolAliases = (symbol = '') => {
   const normalized = String(symbol || '').trim().toUpperCase();
   if (!normalized) return [];
 
   const aliases = new Set([normalized]);
+  const indexAliasGroup = INDEX_SYMBOL_ALIAS_MAP.get(normalized);
+  if (indexAliasGroup) {
+    indexAliasGroup.forEach((alias) => aliases.add(alias));
+  }
+
   if (!isCryptoLikeSymbol(normalized)) {
     return Array.from(aliases);
   }

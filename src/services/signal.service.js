@@ -121,8 +121,8 @@ const scheduleCreateSideEffects = (signal, userId) => {
   });
 };
 
-const scheduleUpdateSideEffects = (signal, updateBody, signalId) => {
-  if (!updateBody.status && !updateBody.notes) return;
+const scheduleUpdateSideEffects = (signal, updateBody, signalId, notificationMeta = null) => {
+  if (!updateBody.status && !updateBody.notes && !notificationMeta?.subType) return;
 
   runDetached(`Failed side effects for updated signal ${signalId}`, async () => {
     try {
@@ -136,7 +136,13 @@ const scheduleUpdateSideEffects = (signal, updateBody, signalId) => {
       let subType = null;
       const notificationData = { ...signal.toJSON() };
 
-      if (updateBody.status === 'Target Hit') {
+      if (notificationMeta?.subType) {
+        subType = notificationMeta.subType;
+        Object.assign(notificationData, notificationMeta.data || {});
+        if (!notificationData.updateMessage && updateBody.notes) {
+          notificationData.updateMessage = updateBody.notes;
+        }
+      } else if (updateBody.status === 'Target Hit') {
         subType = 'SIGNAL_TARGET';
         notificationData.targetLevel = 'TP1';
       } else if (updateBody.status === 'Partial Profit Book') {
@@ -318,18 +324,20 @@ const updateSignalById = async (signalId, updateBody) => {
     throw new Error('Signal not found');
   }
 
-  if ((updateBody.symbol || updateBody.segment) && !updateBody.category) {
-    const merged = { ...signal.toObject(), ...updateBody };
-    updateBody.category = mapSignalToCategory(merged);
-  } else if (!signal.category && !updateBody.category) {
-    updateBody.category = mapSignalToCategory(signal);
+  const { notificationMeta = null, ...persistedUpdateBody } = updateBody || {};
+
+  if ((persistedUpdateBody.symbol || persistedUpdateBody.segment) && !persistedUpdateBody.category) {
+    const merged = { ...signal.toObject(), ...persistedUpdateBody };
+    persistedUpdateBody.category = mapSignalToCategory(merged);
+  } else if (!signal.category && !persistedUpdateBody.category) {
+    persistedUpdateBody.category = mapSignalToCategory(signal);
   }
 
-  Object.assign(signal, updateBody);
+  Object.assign(signal, persistedUpdateBody);
 
-  if (updateBody?.status && CLOSED_SIGNAL_STATUSES.includes(updateBody.status)) {
+  if (persistedUpdateBody?.status && CLOSED_SIGNAL_STATUSES.includes(persistedUpdateBody.status)) {
     if (signal.exitPrice === undefined || signal.exitPrice === null) {
-      const exitPrice = resolveExitPriceFromStatus(signal, updateBody.status);
+      const exitPrice = resolveExitPriceFromStatus(signal, persistedUpdateBody.status);
       if (typeof exitPrice === 'number') {
         signal.exitPrice = exitPrice;
       }
@@ -348,7 +356,7 @@ const updateSignalById = async (signalId, updateBody) => {
   }
 
   await signal.save();
-  scheduleUpdateSideEffects(signal, updateBody, signalId);
+  scheduleUpdateSideEffects(signal, persistedUpdateBody, signalId, notificationMeta);
   return signal;
 };
 

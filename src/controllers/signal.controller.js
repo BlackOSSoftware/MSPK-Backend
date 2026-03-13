@@ -356,7 +356,7 @@ const getSignals = catchAsync(async (req, res) => {
   }
 
   if (symbol) {
-      conditions.push({ symbol: symbol });
+      conditions.push(buildSelectedSignalFilter([symbol]));
   }
 
   if (dateFilter && dateFilter !== 'All') {

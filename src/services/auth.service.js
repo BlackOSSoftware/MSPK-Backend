@@ -2,6 +2,7 @@ import httpStatus from 'http-status';
 import User from '../models/User.js';
 import ApiError from '../utils/ApiError.js';
 import subscriptionService from './subscription.service.js';
+import { derivePlanPermissions, mapSegmentsToPermissions } from '../utils/planPermissions.js';
 
 const createUser = async (userBody) => {
   if (await User.findOne({ email: userBody.email })) {
@@ -139,9 +140,7 @@ const getUserActivePlan = async (user) => {
       activeSubs.forEach(sub => {
           if (sub.plan) {
               planNames.push(sub.plan.name);
-              if (sub.plan.permissions) {
-                  sub.plan.permissions.forEach(p => allPermissions.add(p));
-              }
+              derivePlanPermissions(sub.plan).forEach((permission) => allPermissions.add(permission));
               if (sub.endDate > latestExpiry) {
                   latestExpiry = sub.endDate;
               }
@@ -167,35 +166,11 @@ const getUserActivePlan = async (user) => {
 
   if (activeSegmentSub) {
       const segments = Array.isArray(activeSegmentSub.segments) ? activeSegmentSub.segments : [];
-      const permissions = new Set();
-
-      segments.forEach(seg => {
-          const s = String(seg || '').toUpperCase();
-          if (s === 'EQUITY') {
-              permissions.add('EQUITY_INTRA');
-              permissions.add('EQUITY_DELIVERY');
-          }
-          if (s === 'CRYPTO') {
-              permissions.add('CRYPTO');
-          }
-          if (s === 'COMMODITY') {
-              permissions.add('MCX_FUT');
-          }
-          if (s === 'FOREX') {
-              permissions.add('CURRENCY');
-          }
-          if (s === 'OPTIONS') {
-              permissions.add('NIFTY_OPT');
-              permissions.add('BANKNIFTY_OPT');
-              permissions.add('FINNIFTY_OPT');
-              permissions.add('STOCK_OPT');
-          }
-      });
 
       return {
           planId: 'segments',
           planName: segments.join(' + ') || 'Segments',
-          permissions: Array.from(permissions),
+          permissions: mapSegmentsToPermissions(segments),
           planExpiry: activeSegmentSub.end_date
       };
   }
