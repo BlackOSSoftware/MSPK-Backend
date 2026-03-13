@@ -11,6 +11,10 @@ const router = express.Router();
 router.use(auth(['admin']));
 
 router
+  .route('/users/export')
+  .get(adminController.exportUsers);
+
+router
   .route('/users')
   .get(adminController.getUsers)
   .post(validate(adminValidation.createUser), adminController.createUser);

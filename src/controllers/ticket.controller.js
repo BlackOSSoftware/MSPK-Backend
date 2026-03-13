@@ -2,6 +2,9 @@ import httpStatus from 'http-status';
 import catchAsync from '../utils/catchAsync.js';
 import Ticket from '../models/Ticket.js';
 
+const normalizeTicketStatus = (status) => (status || '').toString().trim().toLowerCase();
+const isUpdatableTicketStatus = (status) => ['pending', 'open'].includes(normalizeTicketStatus(status));
+
 const getNextTicketId = async () => {
   const lastTicket = await Ticket.findOne().sort({ createdAt: -1 });
   let nextId = 1001;
@@ -95,8 +98,8 @@ const updateTicket = catchAsync(async (req, res) => {
     return res.status(httpStatus.NOT_FOUND).send({ message: 'Ticket not found' });
   }
 
-  if (ticket.status !== 'pending') {
-    return res.status(httpStatus.BAD_REQUEST).send({ message: 'Only pending tickets can be updated.' });
+  if (!isUpdatableTicketStatus(ticket.status)) {
+    return res.status(httpStatus.BAD_REQUEST).send({ message: 'Only open or pending tickets can be updated.' });
   }
 
   ticket.status = req.body.status;
@@ -111,8 +114,8 @@ const updateEnquiry = catchAsync(async (req, res) => {
     return res.status(httpStatus.NOT_FOUND).send({ message: 'Enquiry not found' });
   }
 
-  if (enquiry.status !== 'pending') {
-    return res.status(httpStatus.BAD_REQUEST).send({ message: 'Only pending enquiries can be updated.' });
+  if (!isUpdatableTicketStatus(enquiry.status)) {
+    return res.status(httpStatus.BAD_REQUEST).send({ message: 'Only open or pending enquiries can be updated.' });
   }
 
   enquiry.status = req.body.status;

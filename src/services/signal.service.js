@@ -5,6 +5,9 @@ import { broadcastToRoles } from './websocket.service.js';
 import { getSignalAudienceGroups } from '../utils/signalRouting.js';
 
 const CLOSED_SIGNAL_STATUSES = ['Closed', 'Target Hit', 'Partial Profit Book', 'Stoploss Hit'];
+const SIGNAL_DERIVED_DATES = {
+  timezone: 'Asia/Kolkata',
+};
 
 const runDetached = (label, task) => {
   setImmediate(async () => {
@@ -236,15 +239,87 @@ const createSignal = async (signalBody, user) => {
   return signal;
 };
 
+const buildSignalDedupStages = (filter = {}) => {
+  const stages = [];
+
+  if (filter && Object.keys(filter).length > 0) {
+    stages.push({ $match: filter });
+  }
+
+  stages.push(
+    {
+      $addFields: {
+        __dedupeKey: {
+          $switch: {
+            branches: [
+              {
+                case: { $gt: [{ $strLenCP: { $ifNull: ['$uniqueId', ''] } }, 0] },
+                then: { $concat: ['UID|', '$uniqueId'] },
+              },
+              {
+                case: { $gt: [{ $strLenCP: { $ifNull: ['$webhookId', ''] } }, 0] },
+                then: { $concat: ['WH|', '$webhookId'] },
+              },
+            ],
+            default: {
+              $concat: [
+                { $ifNull: ['$symbol', ''] },
+                '|',
+                { $ifNull: ['$segment', ''] },
+                '|',
+                { $ifNull: ['$type', ''] },
+                '|',
+                { $toString: { $ifNull: ['$entryPrice', ''] } },
+                '|',
+                {
+                  $dateToString: {
+                    date: { $ifNull: ['$signalTime', '$createdAt'] },
+                    format: '%Y-%m-%dT%H:%M',
+                    timezone: SIGNAL_DERIVED_DATES.timezone,
+                  },
+                },
+                '|',
+                { $ifNull: ['$strategyName', ''] },
+              ],
+            },
+          },
+        },
+      },
+    },
+    { $sort: { createdAt: -1, _id: -1 } },
+    {
+      $group: {
+        _id: '$__dedupeKey',
+        doc: { $first: '$$ROOT' },
+      },
+    },
+    { $replaceRoot: { newRoot: '$doc' } },
+    { $project: { __dedupeKey: 0 } }
+  );
+
+  return stages;
+};
+
 const querySignals = async (filter, options) => {
   const page = options.page ? parseInt(options.page) : 1;
   const limit = options.limit ? parseInt(options.limit) : 10;
   const skip = (page - 1) * limit;
 
-  const [totalResults, results] = await Promise.all([
-    Signal.countDocuments(filter),
-    Signal.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit),
+  const baseStages = buildSignalDedupStages(filter);
+  const [countResult, results] = await Promise.all([
+    Signal.aggregate([
+      ...baseStages,
+      { $count: 'totalResults' },
+    ]),
+    Signal.aggregate([
+      ...baseStages,
+      { $sort: { createdAt: -1, _id: -1 } },
+      { $skip: skip },
+      { $limit: limit },
+    ]),
   ]);
+
+  const totalResults = countResult[0]?.totalResults || 0;
 
   const totalPages = Math.ceil(totalResults / limit);
 
@@ -260,42 +335,40 @@ const querySignals = async (filter, options) => {
 const getSignalById = async (signalId) => Signal.findById(signalId);
 
 const getSignalStats = async (filter = {}) => {
-  const pipeline = [];
-  if (filter && Object.keys(filter).length > 0) {
-    pipeline.push({ $match: filter });
-  }
-
-  pipeline.push({
-    $group: {
-      _id: null,
-      totalSignals: { $sum: 1 },
-      activeSignals: {
-        $sum: {
-          $cond: [{ $in: ['$status', ['Open', 'Active', 'Paused']] }, 1, 0],
+  const pipeline = [
+    ...buildSignalDedupStages(filter),
+    {
+      $group: {
+        _id: null,
+        totalSignals: { $sum: 1 },
+        activeSignals: {
+          $sum: {
+            $cond: [{ $in: ['$status', ['Active', 'Open', 'Paused']] }, 1, 0],
+          },
         },
-      },
-      closedSignals: {
-        $sum: {
-          $cond: [{ $in: ['$status', CLOSED_SIGNAL_STATUSES] }, 1, 0],
+        closedSignals: {
+          $sum: {
+            $cond: [{ $in: ['$status', CLOSED_SIGNAL_STATUSES] }, 1, 0],
+          },
         },
-      },
-      targetHit: {
-        $sum: {
-          $cond: [{ $eq: ['$status', 'Target Hit'] }, 1, 0],
+        targetHit: {
+          $sum: {
+            $cond: [{ $eq: ['$status', 'Target Hit'] }, 1, 0],
+          },
         },
-      },
-      partialProfit: {
-        $sum: {
-          $cond: [{ $eq: ['$status', 'Partial Profit Book'] }, 1, 0],
+        partialProfit: {
+          $sum: {
+            $cond: [{ $eq: ['$status', 'Partial Profit Book'] }, 1, 0],
+          },
         },
-      },
-      stoplossHit: {
-        $sum: {
-          $cond: [{ $eq: ['$status', 'Stoploss Hit'] }, 1, 0],
+        stoplossHit: {
+          $sum: {
+            $cond: [{ $eq: ['$status', 'Stoploss Hit'] }, 1, 0],
+          },
         },
       },
     },
-  });
+  ];
 
   const stats = await Signal.aggregate(pipeline);
   const data =
@@ -315,6 +388,157 @@ const getSignalStats = async (filter = {}) => {
   return {
     ...data,
     successRate,
+  };
+};
+
+const getSignalPeriodStats = async (filter = {}) => {
+  const now = new Date();
+  const startOfToday = new Date(now);
+  startOfToday.setHours(0, 0, 0, 0);
+
+  const startOfWeek = new Date(startOfToday);
+  const day = startOfWeek.getDay();
+  const diff = startOfWeek.getDate() - day + (day === 0 ? -6 : 1);
+  startOfWeek.setDate(diff);
+
+  const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+
+  const pipeline = [
+    ...buildSignalDedupStages(filter),
+    {
+      $group: {
+        _id: null,
+        todaySignals: {
+          $sum: {
+            $cond: [{ $gte: ['$createdAt', startOfToday] }, 1, 0],
+          },
+        },
+        weeklySignals: {
+          $sum: {
+            $cond: [{ $gte: ['$createdAt', startOfWeek] }, 1, 0],
+          },
+        },
+        monthlySignals: {
+          $sum: {
+            $cond: [{ $gte: ['$createdAt', startOfMonth] }, 1, 0],
+          },
+        },
+        planSignals: { $sum: 1 },
+      },
+    },
+  ];
+
+  const result = await Signal.aggregate(pipeline);
+  return (
+    result[0] || {
+      todaySignals: 0,
+      weeklySignals: 0,
+      monthlySignals: 0,
+      planSignals: 0,
+    }
+  );
+};
+
+const listSignalsForReport = async (filter = {}) => {
+  return Signal.aggregate([
+    ...buildSignalDedupStages(filter),
+    { $sort: { createdAt: -1, _id: -1 } },
+  ]);
+};
+
+const getSignalReport = async (filter = {}) => {
+  const signals = await listSignalsForReport(filter);
+
+  const summary = {
+    totalSignals: signals.length,
+    closedSignals: 0,
+    activeSignals: 0,
+    positiveSignals: 0,
+    negativeSignals: 0,
+    neutralSignals: 0,
+    targetHit: 0,
+    partialProfit: 0,
+    stoplossHit: 0,
+    closedWithoutPoints: 0,
+    grossProfitPoints: 0,
+    grossLossPoints: 0,
+    netPoints: 0,
+    averagePoints: 0,
+    winRate: 0,
+  };
+
+  const rows = signals.map((signal) => {
+    const resolvedExitPrice = toFiniteNumber(signal?.exitPrice);
+    const resolvedPoints = toFiniteNumber(getResolvedSignalPoints(signal));
+    const status = String(signal?.status || '').trim();
+    const isClosed = CLOSED_SIGNAL_STATUSES.includes(status);
+
+    if (isClosed) {
+      summary.closedSignals += 1;
+    } else {
+      summary.activeSignals += 1;
+    }
+
+    if (status === 'Target Hit') summary.targetHit += 1;
+    if (status === 'Partial Profit Book') summary.partialProfit += 1;
+    if (status === 'Stoploss Hit') summary.stoplossHit += 1;
+
+    if (isClosed) {
+      if (typeof resolvedPoints === 'number') {
+        if (resolvedPoints > 0) {
+          summary.positiveSignals += 1;
+          summary.grossProfitPoints += resolvedPoints;
+        } else if (resolvedPoints < 0) {
+          summary.negativeSignals += 1;
+          summary.grossLossPoints += resolvedPoints;
+        } else {
+          summary.neutralSignals += 1;
+        }
+        summary.netPoints += resolvedPoints;
+      } else {
+        summary.closedWithoutPoints += 1;
+      }
+    }
+
+    return {
+      id: String(signal?._id || ''),
+      uniqueId: signal?.uniqueId || '',
+      webhookId: signal?.webhookId || '',
+      symbol: signal?.symbol || '',
+      segment: signal?.segment || '',
+      category: signal?.category || '',
+      type: signal?.type || '',
+      status,
+      entryPrice: toFiniteNumber(signal?.entryPrice),
+      stopLoss: toFiniteNumber(signal?.stopLoss),
+      target1: toFiniteNumber(signal?.targets?.target1),
+      target2: toFiniteNumber(signal?.targets?.target2),
+      target3: toFiniteNumber(signal?.targets?.target3),
+      signalTime: signal?.signalTime || null,
+      createdAt: signal?.createdAt || null,
+      exitPrice: typeof resolvedExitPrice === 'number' ? resolvedExitPrice : null,
+      exitTime: signal?.exitTime || null,
+      totalPoints: typeof resolvedPoints === 'number' ? resolvedPoints : null,
+      exitReason: signal?.exitReason || '',
+      timeframe: signal?.timeframe || '',
+      strategyName: signal?.strategyName || '',
+      isFree: Boolean(signal?.isFree),
+      notes: signal?.notes || '',
+    };
+  });
+
+  summary.grossProfitPoints = roundSignalValue(summary.grossProfitPoints);
+  summary.grossLossPoints = roundSignalValue(summary.grossLossPoints);
+  summary.netPoints = roundSignalValue(summary.netPoints);
+
+  const settledSignals = summary.positiveSignals + summary.negativeSignals + summary.neutralSignals;
+  summary.averagePoints = settledSignals > 0 ? roundSignalValue(summary.netPoints / settledSignals) : 0;
+  summary.winRate =
+    settledSignals > 0 ? Math.round((summary.positiveSignals / settledSignals) * 100) : 0;
+
+  return {
+    summary,
+    rows,
   };
 };
 
@@ -374,6 +598,8 @@ export default {
   querySignals,
   getSignalById,
   getSignalStats,
+  getSignalPeriodStats,
+  getSignalReport,
   updateSignalById,
   deleteSignalById,
 };

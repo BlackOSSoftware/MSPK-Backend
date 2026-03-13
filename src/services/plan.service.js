@@ -3,12 +3,49 @@ import ApiError from '../utils/ApiError.js';
 import httpStatus from 'http-status';
 import { derivePlanPermissions } from '../utils/planPermissions.js';
 
-const createPlan = async (planBody) => {
-  const resolvedPermissions = derivePlanPermissions(planBody);
-  if (resolvedPermissions.length > 0) {
-      planBody.permissions = resolvedPermissions;
+const normalizeSegments = (value) => {
+  const rawValues = Array.isArray(value) ? value : [value];
+  const normalized = rawValues
+    .map((item) => String(item || '').trim().toUpperCase())
+    .filter(Boolean);
+
+  if (normalized.includes('ALL')) {
+    return ['ALL'];
   }
-  return Plan.create(planBody);
+
+  return Array.from(new Set(normalized));
+};
+
+const normalizePlanPayload = (planBody = {}) => {
+  const payload = { ...planBody };
+  const resolvedSegments = normalizeSegments(payload.segments?.length ? payload.segments : payload.segment);
+
+  if (resolvedSegments.length > 0) {
+    payload.segments = resolvedSegments;
+    payload.segment = payload.segment
+      ? String(payload.segment).trim().toUpperCase()
+      : resolvedSegments[0];
+  } else {
+    delete payload.segments;
+    if (payload.segment) {
+      payload.segment = String(payload.segment).trim().toUpperCase();
+    }
+  }
+
+  if (typeof payload.description === 'string') {
+    payload.description = payload.description.trim();
+  }
+
+  return payload;
+};
+
+const createPlan = async (planBody) => {
+  const normalizedBody = normalizePlanPayload(planBody);
+  const resolvedPermissions = derivePlanPermissions(normalizedBody);
+  if (resolvedPermissions.length > 0) {
+      normalizedBody.permissions = resolvedPermissions;
+  }
+  return Plan.create(normalizedBody);
 };
 
 const queryPlans = async (filter, options) => {
@@ -26,13 +63,14 @@ const updatePlanById = async (planId, updateBody) => {
     throw new ApiError(httpStatus.NOT_FOUND, 'Plan not found');
   }
 
+  const normalizedUpdateBody = normalizePlanPayload(updateBody);
   const resolvedPermissions = derivePlanPermissions({
     ...plan.toObject(),
-    ...updateBody,
+    ...normalizedUpdateBody,
   });
-  updateBody.permissions = resolvedPermissions;
+  normalizedUpdateBody.permissions = resolvedPermissions;
   
-  Object.assign(plan, updateBody);
+  Object.assign(plan, normalizedUpdateBody);
   await plan.save();
   return plan;
 };

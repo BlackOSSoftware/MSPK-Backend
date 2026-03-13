@@ -13,6 +13,7 @@ import { subBrokerService, announcementService } from '../services/index.js';
 import subscriptionService from '../services/subscription.service.js';
 import planService from '../services/plan.service.js';
 import subscriptionCron from '../jobs/subscriptionCron.js';
+import { buildDefaultUserMarketWatchlistState } from '../utils/defaultMarketWatchlists.js';
 
 const normalizeSubscriptionSegments = (segments) => {
     if (!Array.isArray(segments)) return [];
@@ -82,6 +83,94 @@ const inferPrimarySegment = (segments) => {
     return undefined;
 };
 
+const escapeCsvValue = (value) => `"${String(value ?? '').replace(/"/g, '""')}"`;
+
+const buildAdminUserQuery = (query = {}) => {
+    const filter = {};
+    const status = String(query.status || '').trim();
+    const search = String(query.search || '').trim();
+    const subBrokerId = String(query.subBrokerId || '').trim();
+
+    if (status && status.toLowerCase() !== 'all') {
+        filter.status = status;
+    }
+
+    if (subBrokerId && subBrokerId.toLowerCase() !== 'all') {
+        if (subBrokerId === 'DIRECT') {
+            filter.$or = [{ subBrokerId: { $exists: false } }, { subBrokerId: null }];
+        } else {
+            filter.subBrokerId = subBrokerId;
+        }
+    }
+
+    if (search) {
+        const regex = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+        const searchClause = {
+            $or: [
+                { name: regex },
+                { email: regex },
+                { clientId: regex },
+                { phone: regex },
+                { tradingViewId: regex },
+            ]
+        };
+
+        if (filter.$or) {
+            filter.$and = [{ $or: filter.$or }, searchClause];
+            delete filter.$or;
+        } else {
+            Object.assign(filter, searchClause);
+        }
+    }
+
+    return filter;
+};
+
+const enrichAdminUsers = async (users = []) => Promise.all(users.map(async (u) => {
+    const subs = await Subscription.find({ user: u.id, status: 'active' }).populate('plan');
+
+    let planNames = [];
+    let minStart = null;
+    let maxEnd = null;
+
+    if (subs.length > 0) {
+        planNames = subs.map((s) => (s.plan ? s.plan.name : 'Unknown')).filter((n) => n !== 'Unknown');
+        const starts = subs.map((s) => new Date(s.startDate).getTime()).filter((value) => !Number.isNaN(value));
+        const ends = subs.map((s) => new Date(s.endDate).getTime()).filter((value) => !Number.isNaN(value));
+
+        if (starts.length > 0) minStart = new Date(Math.min(...starts));
+        if (ends.length > 0) maxEnd = new Date(Math.max(...ends));
+    }
+
+    const hasActivePlan = subs.length > 0;
+
+    return {
+        id: u.id,
+        name: u.name,
+        email: u.email,
+        phone: u.phone || '',
+        tradingViewId: u.tradingViewId || '',
+        role: u.role,
+        ip: u.lastLoginIp,
+        plan: hasActivePlan ? planNames.join(', ') : 'Free',
+        planStatus: hasActivePlan ? 'Active' : 'Inactive',
+        subscriptionStart: minStart,
+        subscriptionExpiry: maxEnd,
+        subBrokerId: u.subBrokerId ? u.subBrokerId._id : 'DIRECT',
+        subBrokerName: u.subBrokerId ? u.subBrokerId.name : 'Direct Client',
+        status: u.status || 'Active',
+        walletBalance: u.walletBalance || 0,
+        clientId: u.clientId || `MS-${u.id.toString().slice(-4)}`,
+        equity: u.equity || 0,
+        marginUsed: u.marginUsed || 0,
+        pnl: u.pnl || 0,
+        joinDate: u.createdAt,
+        lastOtpSentAt: u.lastOtpSentAt || null,
+        lastOtpChannel: u.lastOtpChannel || null,
+        lastOtpTarget: u.lastOtpTarget || null,
+    };
+}));
+
 const getNextSubscriptionStartDate = async (userId) => {
     const latest = await Subscription.findOne({ user: userId, status: 'active' }).sort({ endDate: -1 });
     const now = new Date();
@@ -109,6 +198,7 @@ const createUser = catchAsync(async (req, res) => {
     const preferredSegments = mapSubscriptionToPreferred(normalizedSegments);
 
     const referralCode = Math.random().toString(36).substring(2, 8).toUpperCase();
+    const defaultWatchlistState = buildDefaultUserMarketWatchlistState();
 
     const user = await User.create({
         name,
@@ -122,6 +212,7 @@ const createUser = catchAsync(async (req, res) => {
         walletBalance,
         subBrokerId,
         status,
+        ...defaultWatchlistState,
         ...(preferredSegments.length > 0 ? { preferredSegments } : {}),
         referral: {
             code: referralCode
@@ -257,64 +348,62 @@ const assignCustomPlan = catchAsync(async (req, res) => {
 });
 
 const getUsers = catchAsync(async (req, res) => {
-  const users = await User.find({}, '-password').sort({ createdAt: -1 }).populate('subBrokerId', 'name');
+  const filter = buildAdminUserQuery(req.query);
+  const users = await User.find(filter, '-password').sort({ createdAt: -1 }).populate('subBrokerId', 'name');
+  const enrichedUsers = await enrichAdminUsers(users);
 
-  const enrichedUsers = await Promise.all(users.map(async (u) => {
-      // Find active subscriptions (Fetch ALL)
-      const subs = await Subscription.find({ user: u.id, status: 'active' }).populate('plan');
-      
-      // Aggregate Plan Data
-      let planNames = [];
-      let minStart = null;
-      let maxEnd = null;
+  const statusCounts = await User.aggregate([
+      { $group: { _id: '$status', count: { $sum: 1 } } }
+  ]);
 
-      if (subs.length > 0) {
-          planNames = subs.map(s => s.plan ? s.plan.name : 'Unknown').filter(n => n !== 'Unknown');
-          
-          // Calculate Dates
-          const starts = subs.map(s => new Date(s.startDate).getTime());
-          const ends = subs.map(s => new Date(s.endDate).getTime());
-          
-          if (starts.length > 0) minStart = new Date(Math.min(...starts));
-          if (ends.length > 0) maxEnd = new Date(Math.max(...ends));
-      }
+  const stats = {
+      total: await User.countDocuments(),
+      active: 0,
+      inactive: 0,
+      blocked: 0,
+  };
 
-      const hasActivePlan = subs.length > 0;
+  statusCounts.forEach((item) => {
+      if (item._id === 'Active') stats.active = item.count;
+      if (item._id === 'Inactive') stats.inactive = item.count;
+      if (item._id === 'Blocked') stats.blocked = item.count;
+  });
 
-      return {
-          id: u.id,
-          name: u.name,
-          email: u.email,
-          phone: u.phone || '',
-          tradingViewId: u.tradingViewId || '',
-          role: u.role,
-          ip: u.lastLoginIp,
-          
-          // Subscription / Plan Data
-          plan: hasActivePlan ? planNames.join(', ') : 'Free', 
-          planStatus: hasActivePlan ? 'Active' : 'Inactive',
-          subscriptionStart: minStart,
-          subscriptionExpiry: maxEnd,
+  res.send({
+      results: enrichedUsers,
+      totalResults: enrichedUsers.length,
+      stats,
+  });
+});
 
-          // Broker Data
-          subBrokerId: u.subBrokerId ? u.subBrokerId._id : 'DIRECT',
-          subBrokerName: u.subBrokerId ? u.subBrokerId.name : 'Direct Client',
+const exportUsers = catchAsync(async (req, res) => {
+  const filter = buildAdminUserQuery(req.query);
+  const users = await User.find(filter, '-password').sort({ createdAt: -1 }).populate('subBrokerId', 'name');
+  const enrichedUsers = await enrichAdminUsers(users);
 
-          // Trading Stats
-          status: u.status || 'Active', 
-          walletBalance: u.walletBalance || 0,
-          clientId: u.clientId || `MS-${u.id.toString().slice(-4)}`,
-          equity: u.equity || 0,
-          marginUsed: u.marginUsed || 0,
-          pnl: u.pnl || 0,
-          
-          joinDate: u.createdAt,
-          lastOtpSentAt: u.lastOtpSentAt || null,
-          lastOtpChannel: u.lastOtpChannel || null,
-          lastOtpTarget: u.lastOtpTarget || null,
-      };
-  }));
-  res.send(enrichedUsers);
+  const header = ['Client ID', 'Name', 'Email', 'Phone', 'Status', 'Plan', 'Plan Status', 'Subscription Start', 'Subscription Expiry', 'Sub Broker', 'IP Address', 'Join Date'];
+  const rows = [header.join(',')];
+
+  enrichedUsers.forEach((user) => {
+      rows.push([
+          escapeCsvValue(user.clientId),
+          escapeCsvValue(user.name),
+          escapeCsvValue(user.email),
+          escapeCsvValue(user.phone),
+          escapeCsvValue(user.status),
+          escapeCsvValue(user.plan),
+          escapeCsvValue(user.planStatus),
+          escapeCsvValue(user.subscriptionStart ? new Date(user.subscriptionStart).toISOString() : ''),
+          escapeCsvValue(user.subscriptionExpiry ? new Date(user.subscriptionExpiry).toISOString() : ''),
+          escapeCsvValue(user.subBrokerName),
+          escapeCsvValue(user.ip || ''),
+          escapeCsvValue(user.joinDate ? new Date(user.joinDate).toISOString() : ''),
+      ].join(','));
+  });
+
+  res.header('Content-Type', 'text/csv');
+  res.header('Content-Disposition', `attachment; filename="users_export_${Date.now()}.csv"`);
+  res.send(rows.join('\n'));
 });
 
 const getUser = catchAsync(async (req, res) => {
@@ -646,6 +735,7 @@ const sendDemoReminders = catchAsync(async (req, res) => {
 
 export default {
   getUsers,
+  exportUsers,
   createUser,
   getUser,
   getUserSignalDeliveries,

@@ -83,6 +83,20 @@ const getBlogs = catchAsync(async (req, res) => {
   if (req.query.category) {
     filter.categories = req.query.category;
   }
+  if (req.query.search) {
+    const search = req.query.search.trim();
+    if (search) {
+      const regex = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+      filter.$or = [
+        { title: regex },
+        { slug: regex },
+        { content: regex },
+        { categories: regex },
+        { 'meta.title': regex },
+        { 'meta.description': regex },
+      ];
+    }
+  }
   const options = pick(req.query, ['page', 'limit']);
   const result = await blogService.queryBlogs(filter, options);
   res.send(result);

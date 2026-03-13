@@ -104,6 +104,7 @@ const derivePlanPermissions = (planLike = {}) => {
     ...mapTextsToPermissions(planLike.features),
     ...mapTextsToPermissions([planLike.name, planLike.description]),
     ...mapSegmentsToPermissions(planLike.segment),
+    ...mapSegmentsToPermissions(planLike.segments),
   ]);
 };
 

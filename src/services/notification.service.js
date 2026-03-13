@@ -78,6 +78,13 @@ const derivePlanSegments = (plan, authService) => {
   const segmentsFromPerms = authService.getSegmentsFromPermissions(permissions);
   if (segmentsFromPerms.length > 0) return segmentsFromPerms;
 
+  if (Array.isArray(plan.segments) && plan.segments.length > 0) {
+    const normalizedSegments = plan.segments
+      .map((segment) => String(segment || '').trim().toUpperCase())
+      .filter(Boolean);
+    if (normalizedSegments.length > 0) return normalizedSegments;
+  }
+
   if (plan.segment) {
     const normalized = String(plan.segment || '').trim().toUpperCase();
     if (normalized) return [normalized];
@@ -439,6 +446,7 @@ class NotificationService {
               if (targetAudience.segments?.length > 0) {
                   // Check direct segment OR specific permissions (most sub-categories are in permissions)
                   segmentFilters.push({ segment: { $in: targetAudience.segments } });
+                  segmentFilters.push({ segments: { $in: targetAudience.segments } });
                   segmentFilters.push({ permissions: { $in: targetAudience.segments } });
               }
 

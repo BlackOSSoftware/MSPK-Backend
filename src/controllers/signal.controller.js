@@ -70,6 +70,8 @@ const getResolvedSignalPoints = (signal) => {
   return undefined;
 };
 
+const toCsvCell = (value) => `"${String(value ?? '').replace(/"/g, '""')}"`;
+
 const formatSignalResponse = (signal) => ({
   id: signal._id,
   uniqueId: signal.uniqueId,
@@ -96,6 +98,59 @@ const formatSignalResponse = (signal) => ({
   timeframe: signal.timeframe,
   metrics: signal.metrics,
 });
+
+const getStartOfDay = (date) => {
+  const next = new Date(date);
+  next.setHours(0, 0, 0, 0);
+  return next;
+};
+
+const getEndOfDay = (date) => {
+  const next = new Date(date);
+  next.setHours(23, 59, 59, 999);
+  return next;
+};
+
+const resolveSignalDateRange = ({ datePreset, dateFilter, fromDate, toDate }) => {
+  const preset = String(datePreset || dateFilter || '').trim().toLowerCase();
+  const now = new Date();
+
+  if (!preset || preset === 'all') return null;
+
+  if (preset === 'today') {
+    return { start: getStartOfDay(now), end: getEndOfDay(now) };
+  }
+
+  if (preset === 'yesterday') {
+    const day = new Date(now);
+    day.setDate(day.getDate() - 1);
+    return { start: getStartOfDay(day), end: getEndOfDay(day) };
+  }
+
+  if (preset === 'week' || preset === 'this week') {
+    const start = getStartOfDay(now);
+    const day = start.getDay();
+    const diff = start.getDate() - day + (day === 0 ? -6 : 1);
+    start.setDate(diff);
+    return { start, end: getEndOfDay(now) };
+  }
+
+  if (preset === 'month' || preset === 'this month') {
+    const start = new Date(now.getFullYear(), now.getMonth(), 1);
+    return { start, end: getEndOfDay(now) };
+  }
+
+  if (preset === 'custom') {
+    const start = fromDate ? getStartOfDay(new Date(fromDate)) : null;
+    const end = toDate ? getEndOfDay(new Date(toDate)) : null;
+    if (!start || !end || Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+      return null;
+    }
+    return { start, end };
+  }
+
+  return null;
+};
 
 const getAllowedAccessFromPermissions = (permissions = []) => {
   const perms = Array.isArray(permissions) ? permissions : [];
@@ -348,39 +403,27 @@ const getSignals = catchAsync(async (req, res) => {
   const baseFilter = buildBaseFilterForAccess(access);
 
   // 2. Build Query Filters Array
-  const { search, symbol, status, segment, type, dateFilter, signalId } = req.query;
+  const { search, symbol, status, segment, type, dateFilter, datePreset, fromDate, toDate, signalId } = req.query;
   const conditions = [baseFilter];
 
   if (search) {
-      conditions.push({ symbol: { $regex: search, $options: 'i' } });
+      conditions.push({
+        $or: [
+          { symbol: { $regex: search, $options: 'i' } },
+          { uniqueId: { $regex: search, $options: 'i' } },
+          { webhookId: { $regex: search, $options: 'i' } },
+          { strategyName: { $regex: search, $options: 'i' } },
+        ],
+      });
   }
 
   if (symbol) {
       conditions.push(buildSelectedSignalFilter([symbol]));
   }
 
-  if (dateFilter && dateFilter !== 'All') {
-      const now = new Date();
-      let start = new Date(now);
-      let end = new Date(now);
-      
-      if (dateFilter === 'Today') {
-          start.setHours(0, 0, 0, 0);
-          end.setHours(23, 59, 59, 999);
-      } else if (dateFilter === 'Yesterday') {
-          start.setDate(now.getDate() - 1);
-          start.setHours(0, 0, 0, 0);
-          end.setDate(now.getDate() - 1);
-          end.setHours(23, 59, 59, 999);
-      } else if (dateFilter === 'This Week') {
-          const day = now.getDay(); 
-          const diff = now.getDate() - day + (day === 0 ? -6 : 1); 
-          start = new Date(now.setDate(diff));
-          start.setHours(0, 0, 0, 0);
-          end.setHours(23, 59, 59, 999);
-      }
-      
-      conditions.push({ createdAt: { $gte: start, $lte: end } });
+  const dateRange = resolveSignalDateRange({ datePreset, dateFilter, fromDate, toDate });
+  if (dateRange?.start && dateRange?.end) {
+      conditions.push({ createdAt: { $gte: dateRange.start, $lte: dateRange.end } });
   }
 
   if (status && status !== 'All') {
@@ -416,7 +459,13 @@ const getSignals = catchAsync(async (req, res) => {
   const signalsData = await signalService.querySignals(filter, { page, limit });
   
   // 4. Get Visible Stats (based on access scope)
-  const stats = await signalService.getSignalStats(baseFilter);
+  const [stats, periodStats, report] = await Promise.all([
+    signalService.getSignalStats(filter),
+    signalService.getSignalPeriodStats(baseFilter),
+    String(req.query.includeReport || '').trim() === '1' && access.mode === 'admin'
+      ? signalService.getSignalReport(filter)
+      : Promise.resolve(null),
+  ]);
 
   const formattedResults = signalsData.results.map((signal) => formatSignalResponse(signal));
 
@@ -429,6 +478,7 @@ const getSignals = catchAsync(async (req, res) => {
       planName: access.planName,
       planExpiry: access.planExpiry,
       selectedSymbolCount: access.selectedSymbolCount,
+      signalVisibleFrom: access.signalVisibleFrom,
       message: access.message
       },
       results: formattedResults,
@@ -438,8 +488,162 @@ const getSignals = catchAsync(async (req, res) => {
           totalPages: signalsData.totalPages,
           totalResults: signalsData.totalResults
       },
-      stats
+      stats,
+      periodStats,
+      report
   });
+});
+
+const exportSignalReport = catchAsync(async (req, res) => {
+  const access = await getSignalAccessContext(req);
+  if (access.mode !== 'admin') {
+    throw new ApiError(httpStatus.FORBIDDEN, 'Only admins can export signal reports');
+  }
+
+  const baseFilter = buildBaseFilterForAccess(access);
+  const { search, symbol, status, segment, type, dateFilter, datePreset, fromDate, toDate, signalId } = req.query;
+  const conditions = [baseFilter];
+
+  if (search) {
+    conditions.push({
+      $or: [
+        { symbol: { $regex: search, $options: 'i' } },
+        { uniqueId: { $regex: search, $options: 'i' } },
+        { webhookId: { $regex: search, $options: 'i' } },
+        { strategyName: { $regex: search, $options: 'i' } },
+      ],
+    });
+  }
+
+  if (symbol) {
+    conditions.push(buildSelectedSignalFilter([symbol]));
+  }
+
+  const dateRange = resolveSignalDateRange({ datePreset, dateFilter, fromDate, toDate });
+  if (dateRange?.start && dateRange?.end) {
+    conditions.push({ createdAt: { $gte: dateRange.start, $lte: dateRange.end } });
+  }
+
+  if (status && status !== 'All') {
+    if (status === '!Closed') {
+      conditions.push({ status: { $nin: CLOSED_SIGNAL_STATUSES } });
+    } else if (status === 'History') {
+      conditions.push({ status: { $in: CLOSED_SIGNAL_STATUSES } });
+    } else {
+      conditions.push({ status });
+    }
+  }
+
+  if (segment && segment !== 'All') {
+    conditions.push({ segment });
+  }
+
+  if (type && type !== 'All') {
+    conditions.push({ type: type.toUpperCase() });
+  }
+
+  if (signalId) {
+    conditions.push({ _id: signalId });
+  }
+
+  if (req.query.timeframe) {
+    conditions.push({ timeframe: req.query.timeframe });
+  }
+
+  const filter = conditions.length > 1 ? { $and: conditions } : conditions[0];
+  const report = await signalService.getSignalReport(filter);
+
+  const summaryRows = [
+    ['Report Generated At', new Date().toISOString()],
+    ['Date Preset', datePreset || dateFilter || 'all'],
+    ['From Date', fromDate || ''],
+    ['To Date', toDate || ''],
+    ['Search', search || ''],
+    ['Segment', segment || 'All'],
+    ['Status', status || 'All'],
+    ['Type', type || 'All'],
+    ['Total Signals', report.summary.totalSignals],
+    ['Closed Signals', report.summary.closedSignals],
+    ['Active Signals', report.summary.activeSignals],
+    ['Winning Signals', report.summary.positiveSignals],
+    ['Losing Signals', report.summary.negativeSignals],
+    ['Neutral Signals', report.summary.neutralSignals],
+    ['Gross Profit Points', report.summary.grossProfitPoints],
+    ['Gross Loss Points', report.summary.grossLossPoints],
+    ['Net Earnings Points', report.summary.netPoints],
+    ['Average Points', report.summary.averagePoints],
+    ['Win Rate', `${report.summary.winRate}%`],
+    ['Target Hit', report.summary.targetHit],
+    ['Partial Profit Book', report.summary.partialProfit],
+    ['Stoploss Hit', report.summary.stoplossHit],
+    ['Closed Without Points', report.summary.closedWithoutPoints],
+  ];
+
+  const detailHeaders = [
+    'Signal ID',
+    'Unique ID',
+    'Webhook ID',
+    'Symbol',
+    'Segment',
+    'Category',
+    'Type',
+    'Status',
+    'Entry Price',
+    'Stop Loss',
+    'Target 1',
+    'Target 2',
+    'Target 3',
+    'Signal Time',
+    'Created At',
+    'Exit Price',
+    'Exit Time',
+    'Total Points',
+    'Exit Reason',
+    'Timeframe',
+    'Strategy Name',
+    'Is Free',
+    'Notes',
+  ];
+
+  const csvLines = [
+    ...summaryRows.map((row) => row.map((cell) => toCsvCell(cell)).join(',')),
+    '',
+    detailHeaders.map((cell) => toCsvCell(cell)).join(','),
+    ...report.rows.map((row) =>
+      [
+        row.id,
+        row.uniqueId,
+        row.webhookId,
+        row.symbol,
+        row.segment,
+        row.category,
+        row.type,
+        row.status,
+        row.entryPrice,
+        row.stopLoss,
+        row.target1,
+        row.target2,
+        row.target3,
+        row.signalTime ? new Date(row.signalTime).toISOString() : '',
+        row.createdAt ? new Date(row.createdAt).toISOString() : '',
+        row.exitPrice,
+        row.exitTime ? new Date(row.exitTime).toISOString() : '',
+        row.totalPoints,
+        row.exitReason,
+        row.timeframe,
+        row.strategyName,
+        row.isFree ? 'Yes' : 'No',
+        row.notes,
+      ].map((cell) => toCsvCell(cell)).join(',')
+    ),
+  ];
+
+  res.header('Content-Type', 'text/csv');
+  res.header(
+    'Content-Disposition',
+    `attachment; filename="signal_report_${new Date().toISOString().slice(0, 10)}.csv"`
+  );
+  res.send(csvLines.join('\n'));
 });
 
 const updateSignal = catchAsync(async (req, res) => {
@@ -572,6 +776,7 @@ export default {
   createManualSignal,
   getSignal,
   getSignals,
+  exportSignalReport,
   getSignalAnalysis,
   updateSignal,
   deleteSignal

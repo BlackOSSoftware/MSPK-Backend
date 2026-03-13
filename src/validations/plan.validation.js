@@ -1,17 +1,21 @@
 import Joi from 'joi';
 
+const segmentValue = Joi.string().trim().uppercase().min(1);
+
 const createPlan = {
   body: Joi.object().keys({
     name: Joi.string().required(),
     description: Joi.string(),
-    segment: Joi.string().required().valid('EQUITY', 'FNO', 'COMMODITY', 'CURRENCY'),
+    segment: segmentValue.optional(),
+    segments: Joi.array().items(segmentValue).min(1),
+    permissions: Joi.array().items(Joi.string().trim().uppercase().min(1)),
     price: Joi.number().required(),
     durationDays: Joi.number().integer().required(),
     features: Joi.array().items(Joi.string()),
     isActive: Joi.boolean(),
     isDemo: Joi.boolean(),
     isCustom: Joi.boolean()
-  }),
+  }).or('segment', 'segments'),
 };
 
 const getPlans = {
@@ -35,7 +39,9 @@ const updatePlan = {
     .keys({
       name: Joi.string(),
       description: Joi.string(),
-      segment: Joi.string().valid('EQUITY', 'FNO', 'COMMODITY', 'CURRENCY'),
+      segment: segmentValue,
+      segments: Joi.array().items(segmentValue).min(1),
+      permissions: Joi.array().items(Joi.string().trim().uppercase().min(1)),
       price: Joi.number(),
       durationDays: Joi.number().integer(),
       features: Joi.array().items(Joi.string()),

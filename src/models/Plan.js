@@ -9,12 +9,18 @@ const planSchema = new mongoose.Schema(
     },
     description: {
       type: String,
+      trim: true,
     },
     segment: {
       type: String,
-      enum: ['EQUITY', 'FNO', 'COMMODITY', 'CURRENCY'],
-      // required: true, // Made optional to support multi-segment plans
+      trim: true,
+      uppercase: true,
     },
+    segments: [{
+      type: String,
+      trim: true,
+      uppercase: true,
+    }],
     permissions: [{
       type: String,
       enum: [
