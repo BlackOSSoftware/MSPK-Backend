@@ -160,6 +160,7 @@ class MarketDataService extends EventEmitter {
 
         this.symbols = {};
         this.tokenMap = {};
+        this.tokenSymbolsMap = new Map();
         this.symbolCaseMap = new Map();
         this.marketDataAliasMap = new Map();
         this._symbolsCacheVersion = 1;
@@ -311,6 +312,40 @@ class MarketDataService extends EventEmitter {
             this.marketDataAliasMap.get(key).add(canonical);
             this._rememberSymbolCase(normalizedWire);
         }
+    }
+
+    _rememberTokenAlias(token, symbol) {
+        const normalizedToken = String(token || '').trim();
+        const canonical = this._getCanonicalSymbol(symbol) || this._normalizeMarketSymbol(symbol);
+        if (!normalizedToken || !canonical) return;
+
+        this.tokenMap[normalizedToken] = canonical;
+        if (!this.tokenSymbolsMap.has(normalizedToken)) {
+            this.tokenSymbolsMap.set(normalizedToken, new Set());
+        }
+        this.tokenSymbolsMap.get(normalizedToken).add(canonical);
+    }
+
+    _resolveTokenTargets(token) {
+        const normalizedToken = String(token || '').trim();
+        if (!normalizedToken) return [];
+
+        const targets = new Set();
+        const primary = this.tokenMap[normalizedToken];
+        if (primary) {
+            const canonicalPrimary = this._getCanonicalSymbol(primary) || this._normalizeMarketSymbol(primary);
+            if (canonicalPrimary) targets.add(canonicalPrimary);
+        }
+
+        const mapped = this.tokenSymbolsMap.get(normalizedToken);
+        if (mapped && mapped.size > 0) {
+            for (const symbol of mapped) {
+                const canonical = this._getCanonicalSymbol(symbol) || this._normalizeMarketSymbol(symbol);
+                if (canonical) targets.add(canonical);
+            }
+        }
+
+        return Array.from(targets);
     }
 
     _resolveMarketDataWireSymbols(symbolDoc) {
@@ -515,7 +550,7 @@ class MarketDataService extends EventEmitter {
             symbolDoc?.instrumentToken || inMemoryDoc?.instrumentToken || ''
         ).trim();
         if (existingToken) {
-            this.tokenMap[existingToken] = canonical;
+            this._rememberTokenAlias(existingToken, canonical);
             return existingToken;
         }
 
@@ -559,7 +594,7 @@ class MarketDataService extends EventEmitter {
 
                 this.symbols[canonical] = nextDoc;
                 this._rememberSymbolCase(canonical);
-                this.tokenMap[token] = canonical;
+                this._rememberTokenAlias(token, canonical);
 
                 await MasterSymbol.findOneAndUpdate(
                     { symbol: canonical },
@@ -683,6 +718,7 @@ class MarketDataService extends EventEmitter {
 
             this.symbols = {};
             this.tokenMap = {};
+            this.tokenSymbolsMap.clear();
             this.symbolCaseMap.clear();
             this.marketDataAliasMap.clear();
 
@@ -691,7 +727,7 @@ class MarketDataService extends EventEmitter {
                 this._rememberSymbolCase(doc.symbol);
 
                 if (doc.instrumentToken) {
-                    this.tokenMap[String(doc.instrumentToken)] = doc.symbol;
+                    this._rememberTokenAlias(doc.instrumentToken, doc.symbol);
                 }
 
                 if (doc.sourceSymbol) {
@@ -718,7 +754,7 @@ class MarketDataService extends EventEmitter {
         this._rememberSymbolCase(symbolDoc.symbol);
 
         if (symbolDoc.instrumentToken) {
-            this.tokenMap[String(symbolDoc.instrumentToken)] = symbolDoc.symbol;
+            this._rememberTokenAlias(symbolDoc.instrumentToken, symbolDoc.symbol);
         }
 
         if (symbolDoc.sourceSymbol) {
@@ -749,7 +785,7 @@ class MarketDataService extends EventEmitter {
                 this.symbols[symbolDoc.symbol] = symbolDoc;
                 this._rememberSymbolCase(symbolDoc.symbol);
                 if (symbolDoc.instrumentToken) {
-                    this.tokenMap[String(symbolDoc.instrumentToken)] = symbolDoc.symbol;
+                    this._rememberTokenAlias(symbolDoc.instrumentToken, symbolDoc.symbol);
                 }
             }
         }
@@ -815,8 +851,9 @@ class MarketDataService extends EventEmitter {
             .map((token) => String(token));
 
         if (kiteTokens.length > 0 && this.adapter?.isTickerConnected) {
-            this.adapter.subscribe(kiteTokens);
-            this.fetchInitialQuote(kiteTokens);
+            const uniqueKiteTokens = [...new Set(kiteTokens)];
+            this.adapter.subscribe(uniqueKiteTokens);
+            this.fetchInitialQuote(uniqueKiteTokens);
         }
 
         const bootSymbols = String(process.env.MARKET_DATA_BOOT_SYMBOLS || '')
@@ -1073,7 +1110,12 @@ class MarketDataService extends EventEmitter {
         let symbol = tick.symbol;
 
         if (source === 'kite' && tick.instrument_token) {
-            symbol = this.tokenMap[String(tick.instrument_token)] || symbol;
+            const tokenTargets = this._resolveTokenTargets(tick.instrument_token);
+            if (tokenTargets.length > 0) {
+                symbol = tokenTargets[0];
+            } else {
+                symbol = this.tokenMap[String(tick.instrument_token)] || symbol;
+            }
         }
 
         symbol = this._getCanonicalSymbol(symbol);
@@ -1082,10 +1124,33 @@ class MarketDataService extends EventEmitter {
         const lastPrice = toNumber(tick.last_price ?? tick.price ?? tick.last, NaN);
         if (!Number.isFinite(lastPrice)) return;
 
-        const targetSymbols = this._resolveAliasTargets(symbol);
-        if (targetSymbols.length === 0) {
-            targetSymbols.push(symbol);
+        const targetSymbolsSet = new Set();
+        const addTargetSymbol = (candidate) => {
+            const resolved = this._resolveAliasTargets(candidate);
+            if (resolved.length === 0) {
+                const canonical = this._getCanonicalSymbol(candidate);
+                if (canonical) targetSymbolsSet.add(canonical);
+                return;
+            }
+            for (const item of resolved) {
+                targetSymbolsSet.add(item);
+            }
+        };
+
+        if (source === 'kite' && tick.instrument_token) {
+            const tokenTargets = this._resolveTokenTargets(tick.instrument_token);
+            for (const candidate of tokenTargets) {
+                addTargetSymbol(candidate);
+            }
         }
+
+        addTargetSymbol(symbol);
+
+        if (targetSymbolsSet.size === 0) {
+            targetSymbolsSet.add(symbol);
+        }
+
+        const targetSymbols = Array.from(targetSymbolsSet);
 
         for (const targetSymbol of targetSymbols) {
             this.currentPrices[targetSymbol] = lastPrice;

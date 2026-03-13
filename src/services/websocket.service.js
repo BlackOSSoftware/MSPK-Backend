@@ -71,6 +71,14 @@ const parseWsBoolean = (value, fallback = true) => {
   return fallback;
 };
 
+const syncPipelineActiveSymbols = () => {
+  try {
+    pipeline.setActiveSymbols(Array.from(rooms.keys()).map((room) => room.toString().trim().toUpperCase()));
+  } catch (error) {
+    logger.debug(`WebSocket: Failed syncing active pipeline symbols: ${error.message}`);
+  }
+};
+
 const initWebSocket = (server) => {
   wss = new WebSocketServer({
     server,
@@ -262,6 +270,7 @@ const subscribeToRoom = async (ws, roomName) => {
     rooms.set(normalized, new Set());
   }
   rooms.get(normalized).add(ws);
+  syncPipelineActiveSymbols();
   logger.info(`WebSocket: Room Subscribed -> [${normalized}] (Total: ${rooms.get(normalized).size} clients)`);
 
   // TICK REPLAY
@@ -307,6 +316,7 @@ const unsubscribeFromRoom = (ws, roomName) => {
   if (rooms.get(normalized).size === 0) {
     rooms.delete(normalized);
   }
+  syncPipelineActiveSymbols();
   logger.debug(`WebSocket unsubscribed from room: ${normalized}`);
 };
 
@@ -319,6 +329,7 @@ const removeFromAllRooms = (ws) => {
       }
     }
   });
+  syncPipelineActiveSymbols();
 };
 
 const broadcastToRoom = (roomName, data) => {
