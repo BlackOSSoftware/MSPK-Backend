@@ -48,6 +48,54 @@ const toFiniteNumber = (value) => {
   return undefined;
 };
 
+const roundSignalValue = (value) => Math.round(value * 100) / 100;
+
+const getResolvedSignalExitPrice = (signal) => {
+  const exitPrice = toFiniteNumber(signal?.exitPrice);
+  const stopLoss = toFiniteNumber(signal?.stopLoss);
+  const entryPrice = toFiniteNumber(signal?.entryPrice);
+  const status = String(signal?.status || '').trim().toLowerCase();
+
+  if (typeof exitPrice !== 'number') {
+    if (status.includes('stop') && typeof stopLoss === 'number') return stopLoss;
+    return undefined;
+  }
+
+  if (status.includes('stop') && typeof stopLoss === 'number' && typeof entryPrice === 'number') {
+    const derivedFromExit = Math.abs(exitPrice - entryPrice);
+    const derivedFromStop = Math.abs(stopLoss - entryPrice);
+    const maxReasonableMove = Math.max(10, derivedFromStop * 5);
+
+    if (derivedFromStop > 0 && derivedFromExit > maxReasonableMove) {
+      return stopLoss;
+    }
+  }
+
+  return exitPrice;
+};
+
+const getResolvedSignalPoints = (signal) => {
+  const storedPoints = toFiniteNumber(signal?.totalPoints);
+  const entryPrice = toFiniteNumber(signal?.entryPrice);
+  const exitPrice = getResolvedSignalExitPrice(signal);
+  const signalType = String(signal?.type || 'BUY').toUpperCase();
+
+  if (
+    typeof storedPoints === 'number' &&
+    (Math.abs(storedPoints) > 0 || typeof entryPrice !== 'number' || typeof exitPrice !== 'number')
+  ) {
+    return roundSignalValue(storedPoints);
+  }
+
+  if (typeof entryPrice === 'number' && typeof exitPrice === 'number') {
+    const derivedPoints = signalType === 'SELL' ? entryPrice - exitPrice : exitPrice - entryPrice;
+    return roundSignalValue(derivedPoints);
+  }
+
+  if (typeof storedPoints === 'number') return roundSignalValue(storedPoints);
+  return undefined;
+};
+
 const resolveExitPriceFromStatus = (signal, nextStatus) => {
   const status = String(nextStatus || signal?.status || '').trim().toLowerCase();
   const entry = toFiniteNumber(signal?.entryPrice);
