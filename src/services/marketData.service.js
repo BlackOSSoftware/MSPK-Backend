@@ -10,6 +10,10 @@ import { redisClient } from './redis.service.js';
 import logger from '../config/log.js';
 import { decrypt, encrypt } from '../utils/encryption.js';
 import cacheManager from './cacheManager.js';
+import {
+    hasExplicitContractMonth,
+    isCurrentMonthContractDoc,
+} from '../utils/currentMonthContracts.js';
 
 const INDIAN_EXCHANGES = new Set(['NSE', 'BSE', 'MCX', 'NFO', 'CDS', 'BCD']);
 const INDIA_TIMEZONE_OFFSET_SEC = 5.5 * 60 * 60;
@@ -17,6 +21,9 @@ const SENSITIVE_KEY_PATTERN = /(api_key|api_secret|access_token)/i;
 const SYMBOLS_CACHE_VERSION_KEY = 'market_symbols_cache_version';
 const SYMBOLS_CACHE_TTL = '5m';
 const SYMBOL_SEARCH_CACHE_TTL = '5m';
+const CONTRACT_MONTH_TEXT_REGEX = /JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC/i;
+const CURRENT_MONTH_CONTRACT_EXCHANGES = ['MCX', 'NFO', 'CDS', 'BCD', 'NSEIX'];
+const CURRENT_MONTH_CONTRACT_SEGMENTS = ['FNO', 'COMMODITY', 'CURRENCY'];
 const KITE_HISTORY_ALIASES = new Map([
     ['BANKNIFTY', 'NSE:NIFTY BANK-INDEX'],
     ['NSE:BANKNIFTY', 'NSE:NIFTY BANK-INDEX'],
@@ -208,7 +215,13 @@ class MarketDataService extends EventEmitter {
 
         try {
             await this.initializeKiteInstruments();
-            await this.loadMasterSymbols();
+            const cleanupResult = await this.cleanupStaleDerivativeContracts();
+            if (cleanupResult.deletedCount > 0) {
+                await this.loadMasterSymbols({ forceReload: true });
+                await this.refreshSymbolsCache({ bumpVersion: true });
+            } else {
+                await this.loadMasterSymbols();
+            }
             await this.loadSettings();
             this.startStatsBroadcast();
         } catch (error) {
@@ -700,6 +713,48 @@ class MarketDataService extends EventEmitter {
             await this._bumpSymbolsCacheVersion();
         }
         await this._persistSymbolsCache();
+    }
+
+    async cleanupStaleDerivativeContracts(referenceDate = new Date()) {
+        try {
+            const candidates = await MasterSymbol.find({
+                $or: [
+                    { exchange: { $in: CURRENT_MONTH_CONTRACT_EXCHANGES } },
+                    { segment: { $in: CURRENT_MONTH_CONTRACT_SEGMENTS } },
+                    { symbol: CONTRACT_MONTH_TEXT_REGEX },
+                    { sourceSymbol: CONTRACT_MONTH_TEXT_REGEX },
+                    { name: CONTRACT_MONTH_TEXT_REGEX },
+                ],
+            })
+                .select('_id symbol name segment exchange sourceSymbol')
+                .lean();
+
+            const staleDocs = candidates.filter(
+                (doc) =>
+                    hasExplicitContractMonth(doc, referenceDate) &&
+                    !isCurrentMonthContractDoc(doc, referenceDate)
+            );
+
+            if (staleDocs.length === 0) {
+                return { deletedCount: 0, deletedSymbols: [] };
+            }
+
+            await MasterSymbol.deleteMany({
+                _id: { $in: staleDocs.map((doc) => doc._id) },
+            });
+
+            logger.warn(
+                `MARKET_DATA: Removed ${staleDocs.length} stale derivative contracts outside ${referenceDate.getUTCFullYear()}-${String(referenceDate.getUTCMonth() + 1).padStart(2, '0')}`
+            );
+
+            return {
+                deletedCount: staleDocs.length,
+                deletedSymbols: staleDocs.map((doc) => doc.symbol).slice(0, 50),
+            };
+        } catch (error) {
+            logger.error(`MARKET_DATA: Failed cleaning stale derivative contracts: ${error.message}`);
+            return { deletedCount: 0, deletedSymbols: [], error: error.message };
+        }
     }
 
     async loadMasterSymbols({ forceReload = false } = {}) {
@@ -1758,7 +1813,9 @@ class MarketDataService extends EventEmitter {
                     .limit(50)
                     .lean();
 
-                const dbMapped = dbSymbols.map((item) => ({
+                const dbMapped = dbSymbols
+                    .filter((item) => isCurrentMonthContractDoc(item))
+                    .map((item) => ({
                     symbol: item.symbol,
                     name: item.name,
                     segment: item.segment,
@@ -1801,12 +1858,14 @@ class MarketDataService extends EventEmitter {
             kiteService.setAccessToken(this.config.kite_access_token);
 
             const result = await kiteInstrumentsService.syncFromZerodha();
+            const cleanupResult = await this.cleanupStaleDerivativeContracts();
             await this.loadMasterSymbols({ forceReload: true });
             await this.refreshSymbolsCache({ bumpVersion: true });
             return {
                 synced: true,
                 provider: 'kite',
                 count: result?.count || 0,
+                removedStaleContracts: cleanupResult.deletedCount || 0,
             };
         } catch (error) {
             logger.error(`MARKET_DATA: Instrument sync failed: ${error.message}`);
