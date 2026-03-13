@@ -1,4 +1,5 @@
 import Signal from '../models/Signal.js';
+import MasterSymbol from '../models/MasterSymbol.js';
 import announcementService from './announcement.service.js';
 import logger from '../config/log.js';
 import { broadcastToRoles } from './websocket.service.js';
@@ -450,6 +451,10 @@ const getSignalPeriodStats = async (filter = {}) => {
   startOfWeek.setDate(diff);
 
   const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+  const startOfTomorrow = new Date(startOfToday);
+  startOfTomorrow.setDate(startOfTomorrow.getDate() + 1);
+  const endOfTomorrow = new Date(startOfTomorrow);
+  endOfTomorrow.setHours(23, 59, 59, 999);
 
   const pipeline = [
     ...buildSignalDedupStages(filter),
@@ -459,6 +464,20 @@ const getSignalPeriodStats = async (filter = {}) => {
         todaySignals: {
           $sum: {
             $cond: [{ $gte: ['$createdAt', startOfToday] }, 1, 0],
+          },
+        },
+        tomorrowSignals: {
+          $sum: {
+            $cond: [
+              {
+                $and: [
+                  { $gte: ['$createdAt', startOfTomorrow] },
+                  { $lte: ['$createdAt', endOfTomorrow] },
+                ],
+              },
+              1,
+              0,
+            ],
           },
         },
         weeklySignals: {
@@ -480,6 +499,7 @@ const getSignalPeriodStats = async (filter = {}) => {
   return (
     result[0] || {
       todaySignals: 0,
+      tomorrowSignals: 0,
       weeklySignals: 0,
       monthlySignals: 0,
       planSignals: 0,
@@ -496,6 +516,13 @@ const listSignalsForReport = async (filter = {}) => {
 
 const getSignalReport = async (filter = {}) => {
   const signals = await listSignalsForReport(filter);
+  const uniqueSymbols = [...new Set(signals.map((signal) => String(signal?.symbol || '').trim().toUpperCase()).filter(Boolean))];
+  const masterSymbols = uniqueSymbols.length
+    ? await MasterSymbol.find({ symbol: { $in: uniqueSymbols } }).select('symbol lotSize').lean()
+    : [];
+  const lotSizeMap = new Map(
+    masterSymbols.map((item) => [String(item.symbol || '').trim().toUpperCase(), toFiniteNumber(item.lotSize) || 1])
+  );
 
   const summary = {
     totalSignals: signals.length,
@@ -512,7 +539,12 @@ const getSignalReport = async (filter = {}) => {
     grossLossPoints: 0,
     netPoints: 0,
     averagePoints: 0,
+    grossProfitInr: 0,
+    grossLossInr: 0,
+    netInr: 0,
+    averageInr: 0,
     winRate: 0,
+    lotSizeMissing: 0,
   };
 
   const rows = signals.map((signal) => {
@@ -520,6 +552,10 @@ const getSignalReport = async (filter = {}) => {
     const resolvedPoints = toFiniteNumber(getResolvedSignalPoints(signal));
     const status = String(signal?.status || '').trim();
     const isClosed = CLOSED_SIGNAL_STATUSES.includes(status);
+    const symbolKey = String(signal?.symbol || '').trim().toUpperCase();
+    const lotSize = lotSizeMap.get(symbolKey) || 1;
+    const effectiveLotSize = toFiniteNumber(lotSize) || 1;
+    const profitInr = typeof resolvedPoints === 'number' ? roundSignalValue(resolvedPoints * effectiveLotSize) : null;
 
     if (isClosed) {
       summary.closedSignals += 1;
@@ -536,16 +572,23 @@ const getSignalReport = async (filter = {}) => {
         if (resolvedPoints > 0) {
           summary.positiveSignals += 1;
           summary.grossProfitPoints += resolvedPoints;
+          summary.grossProfitInr += profitInr || 0;
         } else if (resolvedPoints < 0) {
           summary.negativeSignals += 1;
           summary.grossLossPoints += resolvedPoints;
+          summary.grossLossInr += profitInr || 0;
         } else {
           summary.neutralSignals += 1;
         }
         summary.netPoints += resolvedPoints;
+        summary.netInr += profitInr || 0;
       } else {
         summary.closedWithoutPoints += 1;
       }
+    }
+
+    if (!lotSizeMap.has(symbolKey)) {
+      summary.lotSizeMissing += 1;
     }
 
     return {
@@ -572,15 +615,21 @@ const getSignalReport = async (filter = {}) => {
       strategyName: signal?.strategyName || '',
       isFree: Boolean(signal?.isFree),
       notes: signal?.notes || '',
+      lotSize: effectiveLotSize,
+      profitInr,
     };
   });
 
   summary.grossProfitPoints = roundSignalValue(summary.grossProfitPoints);
   summary.grossLossPoints = roundSignalValue(summary.grossLossPoints);
   summary.netPoints = roundSignalValue(summary.netPoints);
+  summary.grossProfitInr = roundSignalValue(summary.grossProfitInr);
+  summary.grossLossInr = roundSignalValue(summary.grossLossInr);
+  summary.netInr = roundSignalValue(summary.netInr);
 
   const settledSignals = summary.positiveSignals + summary.negativeSignals + summary.neutralSignals;
   summary.averagePoints = settledSignals > 0 ? roundSignalValue(summary.netPoints / settledSignals) : 0;
+  summary.averageInr = settledSignals > 0 ? roundSignalValue(summary.netInr / settledSignals) : 0;
   summary.winRate =
     settledSignals > 0 ? Math.round((summary.positiveSignals / settledSignals) * 100) : 0;
 

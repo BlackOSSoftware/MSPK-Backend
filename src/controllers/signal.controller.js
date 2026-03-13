@@ -127,6 +127,12 @@ const resolveSignalDateRange = ({ datePreset, dateFilter, fromDate, toDate }) =>
     return { start: getStartOfDay(day), end: getEndOfDay(day) };
   }
 
+  if (preset === 'tomorrow') {
+    const day = new Date(now);
+    day.setDate(day.getDate() + 1);
+    return { start: getStartOfDay(day), end: getEndOfDay(day) };
+  }
+
   if (preset === 'week' || preset === 'this week') {
     const start = getStartOfDay(now);
     const day = start.getDay();
@@ -572,11 +578,16 @@ const exportSignalReport = catchAsync(async (req, res) => {
     ['Gross Loss Points', report.summary.grossLossPoints],
     ['Net Earnings Points', report.summary.netPoints],
     ['Average Points', report.summary.averagePoints],
+    ['Gross Profit INR', report.summary.grossProfitInr],
+    ['Gross Loss INR', report.summary.grossLossInr],
+    ['Net Earnings INR', report.summary.netInr],
+    ['Average INR', report.summary.averageInr],
     ['Win Rate', `${report.summary.winRate}%`],
     ['Target Hit', report.summary.targetHit],
     ['Partial Profit Book', report.summary.partialProfit],
     ['Stoploss Hit', report.summary.stoplossHit],
     ['Closed Without Points', report.summary.closedWithoutPoints],
+    ['Lot Size Missing', report.summary.lotSizeMissing],
   ];
 
   const detailHeaders = [
@@ -598,6 +609,8 @@ const exportSignalReport = catchAsync(async (req, res) => {
     'Exit Price',
     'Exit Time',
     'Total Points',
+    'Lot Size',
+    'Profit INR',
     'Exit Reason',
     'Timeframe',
     'Strategy Name',
@@ -629,6 +642,8 @@ const exportSignalReport = catchAsync(async (req, res) => {
         row.exitPrice,
         row.exitTime ? new Date(row.exitTime).toISOString() : '',
         row.totalPoints,
+        row.lotSize,
+        row.profitInr,
         row.exitReason,
         row.timeframe,
         row.strategyName,
