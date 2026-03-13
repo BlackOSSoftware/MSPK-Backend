@@ -174,6 +174,7 @@ class MarketDataService extends EventEmitter {
 
         this.kiteTickCount = 0;
         this.kiteLatency = 0;
+        this._instrumentTokenResolutionPromises = new Map();
 
         this.marketDataTickCount = 0;
         this.marketDataLatency = 0;
@@ -505,6 +506,110 @@ class MarketDataService extends EventEmitter {
         return !symbolDoc.instrumentToken;
     }
 
+    async _ensureKiteInstrumentToken(symbolDoc) {
+        const canonical = this._getCanonicalSymbol(symbolDoc?.symbol);
+        if (!canonical) return null;
+
+        const inMemoryDoc = this.symbols[canonical] || null;
+        const existingToken = String(
+            symbolDoc?.instrumentToken || inMemoryDoc?.instrumentToken || ''
+        ).trim();
+        if (existingToken) {
+            this.tokenMap[existingToken] = canonical;
+            return existingToken;
+        }
+
+        const resolvedDoc = inMemoryDoc || symbolDoc || null;
+        if (!resolvedDoc) return null;
+        if (this._isMarketDataSymbol(resolvedDoc)) return null;
+        if (!this._isIndianSymbol(canonical, resolvedDoc)) return null;
+        if (!this.adapter || !this.config?.kite_access_token || !this.adapter.getQuote) return null;
+
+        const pending = this._instrumentTokenResolutionPromises.get(canonical);
+        if (pending) {
+            return pending;
+        }
+
+        const task = (async () => {
+            const kiteSymbol = this._toKiteQuoteSymbol(canonical, resolvedDoc);
+            if (!kiteSymbol) return null;
+
+            try {
+                const startedAt = Date.now();
+                const quoteData = await this.adapter.getQuote([kiteSymbol]);
+                this.kiteLatency = Date.now() - startedAt;
+
+                const item =
+                    quoteData?.[kiteSymbol] ||
+                    quoteData?.[canonical] ||
+                    Object.values(quoteData || {})[0] ||
+                    null;
+                const token = String(item?.instrument_token || '').trim();
+                if (!token) {
+                    logger.warn(`MARKET_DATA: Kite token resolution returned no instrument token for ${canonical}`);
+                    return null;
+                }
+
+                const nextDoc = {
+                    ...(typeof resolvedDoc?.toObject === 'function' ? resolvedDoc.toObject() : resolvedDoc),
+                    symbol: canonical,
+                    instrumentToken: token,
+                    sourceSymbol: resolvedDoc?.sourceSymbol || kiteSymbol,
+                };
+
+                this.symbols[canonical] = nextDoc;
+                this._rememberSymbolCase(canonical);
+                this.tokenMap[token] = canonical;
+
+                await MasterSymbol.findOneAndUpdate(
+                    { symbol: canonical },
+                    {
+                        $set: {
+                            instrumentToken: token,
+                            ...(resolvedDoc?.sourceSymbol ? {} : { sourceSymbol: kiteSymbol }),
+                        },
+                    },
+                    { new: false }
+                ).catch((error) => {
+                    logger.warn(
+                        `MARKET_DATA: Failed persisting resolved Kite token for ${canonical}: ${error.message}`
+                    );
+                });
+
+                if (item && Number.isFinite(toNumber(item.last_price, NaN))) {
+                    this.processLiveTicks(
+                        [
+                            {
+                                instrument_token: token,
+                                last_price: item.last_price,
+                                ohlc: item.ohlc,
+                                bid: item.depth?.buy?.[0]?.price,
+                                ask: item.depth?.sell?.[0]?.price,
+                                volume: item.volume,
+                                timestamp: new Date(),
+                            },
+                        ],
+                        'kite'
+                    );
+                }
+
+                logger.info(`MARKET_DATA: Resolved Kite instrument token for ${canonical}`);
+                return token;
+            } catch (error) {
+                logger.warn(`MARKET_DATA: Kite token resolution failed for ${canonical}: ${error.message}`);
+                return null;
+            }
+        })();
+
+        this._instrumentTokenResolutionPromises.set(canonical, task);
+
+        try {
+            return await task;
+        } finally {
+            this._instrumentTokenResolutionPromises.delete(canonical);
+        }
+    }
+
     async _getSymbolsCacheVersion() {
         if (redisClient?.status === 'ready') {
             try {
@@ -650,6 +755,13 @@ class MarketDataService extends EventEmitter {
         }
 
         if (!symbolDoc) return canonical;
+
+        if (!symbolDoc.instrumentToken) {
+            const resolvedToken = await this._ensureKiteInstrumentToken(symbolDoc);
+            if (resolvedToken) {
+                symbolDoc = this.symbols[symbolDoc.symbol] || { ...symbolDoc, instrumentToken: resolvedToken };
+            }
+        }
 
         const canUseMarketData = this._isMarketDataSymbol(symbolDoc) || !symbolDoc.instrumentToken;
         if (canUseMarketData) {
@@ -1183,10 +1295,8 @@ class MarketDataService extends EventEmitter {
 
         if (process.env.DATA_FEED_PROVIDER) {
             nextConfig.data_feed_provider = String(process.env.DATA_FEED_PROVIDER).trim().toLowerCase();
-        } else if (process.env.MARKET_DATA_WS_URL || process.env.MT5_WS_URL) {
-            nextConfig.data_feed_provider = 'market_data';
         } else if (!nextConfig.data_feed_provider) {
-            if (nextConfig.market_data_ws_url) {
+            if (process.env.MARKET_DATA_WS_URL || process.env.MT5_WS_URL || nextConfig.market_data_ws_url) {
                 nextConfig.data_feed_provider = 'market_data';
             } else if (nextConfig.kite_api_key) {
                 nextConfig.data_feed_provider = 'kite';
