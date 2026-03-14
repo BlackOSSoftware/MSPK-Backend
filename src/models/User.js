@@ -1,5 +1,6 @@
 import mongoose from 'mongoose';
 import bcrypt from 'bcryptjs';
+import ClientIdSequence from './ClientIdSequence.js';
 
 const emptyStringToUndefined = (value) => {
   if (typeof value !== 'string') {
@@ -8,6 +9,29 @@ const emptyStringToUndefined = (value) => {
 
   const normalized = value.trim();
   return normalized ? normalized : undefined;
+};
+
+const buildClientIdKey = (date) => {
+  const year = date.getFullYear();
+  const month = date.getMonth() + 1;
+  return `client-id:${year}-${String(month).padStart(2, '0')}`;
+};
+
+const generateClientId = async (date = new Date()) => {
+  const year = date.getFullYear();
+  const month = date.getMonth() + 1;
+  const sequence = await ClientIdSequence.findOneAndUpdate(
+    { key: buildClientIdKey(date) },
+    { $inc: { lastValue: 1 } },
+    {
+      new: true,
+      upsert: true,
+      setDefaultsOnInsert: true,
+    }
+  );
+
+  const runningNumber = month * 1000 + sequence.lastValue;
+  return `MSPK-C${year}-${runningNumber}`;
 };
 
 const marketNamedWatchlistSchema = new mongoose.Schema(
@@ -242,6 +266,11 @@ userSchema.pre('save', async function () {
   }
   if (typeof this.isNotificationEnabled !== 'boolean') {
     this.isNotificationEnabled = true;
+  }
+
+  if (this.isNew && !this.clientId) {
+    const createdAt = this.createdAt instanceof Date ? this.createdAt : new Date();
+    this.clientId = await generateClientId(createdAt);
   }
 
   if (!this.isModified('password')) {

@@ -27,6 +27,7 @@ import metricsRoute from './metrics.route.js';
 
 import watchlistRoute from './watchlist.routes.js';
 import webhookRoute from './webhook.route.js';
+import planEnquiryRoute from './planEnquiry.route.js';
 
 const router = express.Router();
 
@@ -142,6 +143,10 @@ const defaultRoutes = [
   {
     path: '/webhooks',
     route: webhookRoute,
+  },
+  {
+    path: '/plan-enquiries',
+    route: planEnquiryRoute,
   }
 ];
 

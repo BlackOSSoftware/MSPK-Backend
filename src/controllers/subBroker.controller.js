@@ -33,6 +33,8 @@ const getSubBrokerDetails = catchAsync(async (req, res) => {
             name: u.name,
             email: u.email,
             phone: u.phone || '',
+            subBrokerId: subBroker.id,
+            subBrokerName: subBroker.name || subBroker.company || 'Broker',
             
             // Subscription / Plan Data
             plan: (sub && sub.plan) ? sub.plan.name : (u.subscription && u.subscription.plan ? u.subscription.plan : 'Free'), 
@@ -42,6 +44,8 @@ const getSubBrokerDetails = catchAsync(async (req, res) => {
 
             // Stats
             status: u.status || 'Active', 
+            ip: u.lastLoginIp || '',
+            lastLoginIp: u.lastLoginIp || '',
             equity: u.equity || 0,
             walletBalance: u.walletBalance || 0,
             clientId: u.clientId || `MS-${u.id.toString().slice(-4)}`,
