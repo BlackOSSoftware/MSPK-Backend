@@ -1,6 +1,7 @@
 import httpStatus from 'http-status';
 import catchAsync from '../utils/catchAsync.js';
 import User from '../models/User.js';
+import SubBroker from '../models/SubBroker.js';
 import Segment from '../models/Segment.js';
 import Subscription from '../models/Subscription.js';
 import Plan from '../models/Plan.js';
@@ -97,9 +98,25 @@ const buildAdminUserQuery = (query = {}) => {
 
     if (subBrokerId && subBrokerId.toLowerCase() !== 'all') {
         if (subBrokerId === 'DIRECT') {
-            filter.$or = [{ subBrokerId: { $exists: false } }, { subBrokerId: null }];
+            filter.$and = [
+                {
+                    $or: [
+                        { subBrokerId: { $exists: false } },
+                        { subBrokerId: null }
+                    ]
+                },
+                {
+                    $or: [
+                        { 'referral.referredBy': { $exists: false } },
+                        { 'referral.referredBy': null }
+                    ]
+                }
+            ];
         } else {
-            filter.subBrokerId = subBrokerId;
+            filter.$or = [
+                { subBrokerId },
+                { 'referral.referredBy': subBrokerId }
+            ];
         }
     }
 
@@ -126,8 +143,38 @@ const buildAdminUserQuery = (query = {}) => {
     return filter;
 };
 
-const enrichAdminUsers = async (users = []) => Promise.all(users.map(async (u) => {
+const buildSubBrokerLookup = async (users = []) => {
+    const ids = Array.from(new Set(
+        (Array.isArray(users) ? users : [])
+            .flatMap((user) => [user?.subBrokerId, user?.referral?.referredBy])
+            .map((value) => String(value || '').trim())
+            .filter((value) => /^[0-9a-fA-F]{24}$/.test(value))
+    ));
+
+    if (ids.length === 0) {
+        return new Map();
+    }
+
+    const brokers = await SubBroker.find({ _id: { $in: ids } })
+        .select('name brokerId')
+        .lean();
+
+    return new Map(
+        brokers.map((broker) => [
+            String(broker._id),
+            {
+                _id: broker._id,
+                name: broker.name,
+                clientId: broker.brokerId || null,
+            },
+        ])
+    );
+};
+
+const enrichAdminUsers = async (users = [], subBrokerMap = new Map()) => Promise.all(users.map(async (u) => {
     const subs = await Subscription.find({ user: u.id, status: 'active' }).populate('plan');
+    const brokerRefId = String(u.subBrokerId || u.referral?.referredBy || '').trim();
+    const brokerUser = brokerRefId ? (subBrokerMap.get(brokerRefId) || null) : null;
 
     let planNames = [];
     let minStart = null;
@@ -157,8 +204,8 @@ const enrichAdminUsers = async (users = []) => Promise.all(users.map(async (u) =
         planStatus: hasActivePlan ? 'Active' : 'Inactive',
         subscriptionStart: minStart,
         subscriptionExpiry: maxEnd,
-        subBrokerId: u.subBrokerId ? u.subBrokerId._id : 'DIRECT',
-        subBrokerName: u.subBrokerId ? u.subBrokerId.name : 'Direct Client',
+        subBrokerId: brokerUser ? brokerUser._id : 'DIRECT',
+        subBrokerName: brokerUser ? brokerUser.name : 'Direct Client',
         status: u.status || 'Active',
         walletBalance: u.walletBalance || 0,
         clientId: u.clientId || `MS-${u.id.toString().slice(-4)}`,
@@ -336,8 +383,9 @@ const assignCustomPlan = catchAsync(async (req, res) => {
 
 const getUsers = catchAsync(async (req, res) => {
   const filter = buildAdminUserQuery(req.query);
-  const users = await User.find(filter, '-password').sort({ createdAt: -1 }).populate('subBrokerId', 'name');
-  const enrichedUsers = await enrichAdminUsers(users);
+  const users = await User.find(filter, '-password').sort({ createdAt: -1 });
+  const subBrokerMap = await buildSubBrokerLookup(users);
+  const enrichedUsers = await enrichAdminUsers(users, subBrokerMap);
 
   const statusCounts = await User.aggregate([
       { $group: { _id: '$status', count: { $sum: 1 } } }
@@ -365,8 +413,9 @@ const getUsers = catchAsync(async (req, res) => {
 
 const exportUsers = catchAsync(async (req, res) => {
   const filter = buildAdminUserQuery(req.query);
-  const users = await User.find(filter, '-password').sort({ createdAt: -1 }).populate('subBrokerId', 'name');
-  const enrichedUsers = await enrichAdminUsers(users);
+  const users = await User.find(filter, '-password').sort({ createdAt: -1 });
+  const subBrokerMap = await buildSubBrokerLookup(users);
+  const enrichedUsers = await enrichAdminUsers(users, subBrokerMap);
 
   const header = ['Client ID', 'Name', 'Email', 'Phone', 'Status', 'Plan', 'Plan Status', 'Subscription Start', 'Subscription Expiry', 'Sub Broker', 'IP Address', 'Join Date'];
   const rows = [header.join(',')];
