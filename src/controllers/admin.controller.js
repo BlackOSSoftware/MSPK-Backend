@@ -14,7 +14,10 @@ import { subBrokerService, announcementService } from '../services/index.js';
 import subscriptionService from '../services/subscription.service.js';
 import planService from '../services/plan.service.js';
 import subscriptionCron from '../jobs/subscriptionCron.js';
-import { buildDefaultUserMarketWatchlistState } from '../utils/defaultMarketWatchlists.js';
+import {
+    buildDefaultUserMarketWatchlistState,
+    resolveDefaultNewUserWatchlistSymbols,
+} from '../utils/defaultMarketWatchlists.js';
 
 const normalizeSubscriptionSegments = (segments) => {
     if (!Array.isArray(segments)) return [];
@@ -282,7 +285,8 @@ const createUser = catchAsync(async (req, res) => {
     const preferredSegments = mapSubscriptionToPreferred(normalizedSegments);
 
     const referralCode = Math.random().toString(36).substring(2, 8).toUpperCase();
-    const defaultWatchlistState = buildDefaultUserMarketWatchlistState();
+    const defaultWatchlistSymbols = await resolveDefaultNewUserWatchlistSymbols();
+    const defaultWatchlistState = buildDefaultUserMarketWatchlistState(defaultWatchlistSymbols);
 
     const user = await User.create({
         name,
@@ -443,7 +447,9 @@ const exportUsers = catchAsync(async (req, res) => {
 });
 
 const getUser = catchAsync(async (req, res) => {
-  const user = await User.findById(req.params.userId).populate('subBrokerId', 'name clientId');
+  const user = await User.findById(req.params.userId)
+    .populate('subBrokerId', 'name clientId')
+    .populate('referral.referredBy', 'name email phone clientId referral.code');
   if (!user) {
     throw new ApiError(httpStatus.NOT_FOUND, 'User not found');
   }
@@ -470,6 +476,21 @@ const getUser = catchAsync(async (req, res) => {
 
   // Fetch all subscriptions for history
   const history = await Subscription.find({ user: user.id }).sort({ createdAt: -1 }).populate('plan');
+  const referredUsers = await User.find({ 'referral.referredBy': user._id })
+    .select('name email phone clientId createdAt status referral.code')
+    .sort({ createdAt: -1 })
+    .lean();
+
+  const referredByUser = user.referral?.referredBy
+    ? {
+        id: user.referral.referredBy._id,
+        name: user.referral.referredBy.name || 'Unknown User',
+        email: user.referral.referredBy.email || '',
+        phone: user.referral.referredBy.phone || '',
+        clientId: user.referral.referredBy.clientId || '',
+        referralCode: user.referral.referredBy.referral?.code || '',
+      }
+    : null;
 
   const enrichedUser = {
       id: user.id,
@@ -484,6 +505,18 @@ const getUser = catchAsync(async (req, res) => {
       isEmailVerified: Boolean(user.isEmailVerified),
       isPhoneVerified: Boolean(user.isPhoneVerified),
       preferredSegments: Array.isArray(user.preferredSegments) ? user.preferredSegments : [],
+      referralCode: user.referral?.code || '',
+      referredByUser,
+      referredUsers: referredUsers.map((refUser) => ({
+          id: refUser._id,
+          name: refUser.name || 'Unnamed User',
+          email: refUser.email || '',
+          phone: refUser.phone || '',
+          clientId: refUser.clientId || '',
+          joinDate: refUser.createdAt || null,
+          status: refUser.status || 'Active',
+          referralCode: refUser.referral?.code || '',
+      })),
       profile: {
           city: user.profile?.city || '',
           state: user.profile?.state || '',

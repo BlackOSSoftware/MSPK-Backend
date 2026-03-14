@@ -3,7 +3,10 @@ import User from '../models/User.js';
 import ApiError from '../utils/ApiError.js';
 import subscriptionService from './subscription.service.js';
 import { derivePlanPermissions, mapSegmentsToPermissions } from '../utils/planPermissions.js';
-import { buildDefaultUserMarketWatchlistState } from '../utils/defaultMarketWatchlists.js';
+import {
+  buildDefaultUserMarketWatchlistState,
+  resolveDefaultNewUserWatchlistSymbols,
+} from '../utils/defaultMarketWatchlists.js';
 
 const createUser = async (userBody) => {
   if (await User.findOne({ email: userBody.email })) {
@@ -72,7 +75,8 @@ const createUser = async (userBody) => {
   if (city && !profile.city) {
       profile.city = city;
   }
-  const defaultWatchlistState = buildDefaultUserMarketWatchlistState();
+  const defaultWatchlistSymbols = await resolveDefaultNewUserWatchlistSymbols();
+  const defaultWatchlistState = buildDefaultUserMarketWatchlistState(defaultWatchlistSymbols);
 
   let user;
   try {
