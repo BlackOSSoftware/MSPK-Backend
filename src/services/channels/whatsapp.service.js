@@ -430,6 +430,122 @@ const sendText = async (rawConfig = null, { to, text, title, message, priority }
   throw new Error('Plain text WhatsApp send is not supported for the configured provider');
 };
 
+const sendUltraMsgImage = async (resolvedConfig, { to, mediaUrl, caption }) => {
+  const recipient = normalizeRecipient(to, 'ultramsg', resolvedConfig.defaultCountryCode);
+
+  if (!recipient) {
+    throw new Error('Valid WhatsApp recipient is required');
+  }
+
+  const url = `${resolvedConfig.ultramsg.baseUrl}/${resolvedConfig.ultramsg.instanceId}/messages/image`;
+  const payload = new URLSearchParams({
+    token: resolvedConfig.ultramsg.token,
+    to: recipient,
+    image: mediaUrl,
+    caption: caption || '',
+    priority: String(resolvedConfig.ultramsg.priority),
+  });
+
+  const response = await axios.post(url, payload.toString(), {
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    timeout: getRequestTimeoutMs(),
+  });
+
+  logger.info(`WhatsApp UltraMsg image send accepted for ${recipient}`);
+
+  return {
+    provider: 'ultramsg',
+    to: recipient,
+    raw: response.data,
+    queued: Boolean(response.data?.queue || response.data?.queued),
+    messageId: extractMessageId(response.data),
+  };
+};
+
+const sendMetaImage = async (resolvedConfig, { to, mediaUrl, caption }) => {
+  const recipient = normalizeRecipient(to, 'meta', resolvedConfig.defaultCountryCode);
+
+  if (!recipient || isChatId(recipient)) {
+    throw new Error('Meta WhatsApp provider requires a valid phone number');
+  }
+
+  const url = `https://graph.facebook.com/v17.0/${resolvedConfig.meta.phoneNumberId}/messages`;
+  const payload = {
+    messaging_product: 'whatsapp',
+    recipient_type: 'individual',
+    to: recipient,
+    type: 'image',
+    image: {
+      link: mediaUrl,
+      ...(caption ? { caption } : {}),
+    },
+  };
+
+  const sendRequest = async (token) =>
+    axios.post(url, payload, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      timeout: getRequestTimeoutMs(),
+    });
+
+  let response;
+  try {
+    response = await sendRequest(resolvedConfig.meta.accessToken);
+  } catch (error) {
+    const providerError = error?.response?.data?.error;
+    if (providerError?.code === 190) {
+      const fallbackToken = resolvedConfig.meta.fallbackAccessToken;
+      if (!fallbackToken) {
+        throw new Error(
+          'WhatsApp Meta access token has expired or is invalid. Update whatsapp_config.meta.accessToken or WHATSAPP_ACCESS_TOKEN.'
+        );
+      }
+      response = await sendRequest(fallbackToken);
+    } else {
+      throw error;
+    }
+  }
+
+  logger.info(`WhatsApp Meta image send accepted for ${recipient}`);
+
+  return {
+    provider: 'meta',
+    to: recipient,
+    raw: response.data,
+    queued: false,
+    messageId: extractMessageId(response.data),
+  };
+};
+
+const sendMedia = async (
+  rawConfig = null,
+  { to, mediaUrl, caption, title, message } = {}
+) => {
+  const resolvedConfig = resolveWhatsAppConfig(rawConfig);
+  if (!isConfigured(resolvedConfig)) {
+    throw new Error('WhatsApp channel is not configured');
+  }
+
+  const finalCaption = buildWhatsAppText({ text: caption, title, message });
+
+  if (resolvedConfig.provider === 'ultramsg') {
+    return sendUltraMsgImage(resolvedConfig, { to, mediaUrl, caption: finalCaption });
+  }
+
+  if (resolvedConfig.provider === 'meta') {
+    return sendMetaImage(resolvedConfig, { to, mediaUrl, caption: finalCaption });
+  }
+
+  return sendText(resolvedConfig, {
+    to,
+    text: [finalCaption, mediaUrl].filter(Boolean).join('\n\n'),
+  });
+};
+
 const sendNotification = async (
   rawConfig = null,
   { to, text, title, message, signal = null, announcement = null, priority } = {}
@@ -460,4 +576,5 @@ export default {
   validateChannel,
   sendNotification,
   sendText,
+  sendMedia,
 };

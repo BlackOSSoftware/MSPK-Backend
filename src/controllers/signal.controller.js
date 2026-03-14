@@ -9,6 +9,7 @@ import {
   getUserSelectedSymbols,
   hasSelectedSignalSymbol,
 } from '../utils/userSignalSelection.js';
+import { resolveSymbolSegmentGroup } from '../utils/marketSegmentResolver.js';
 
 const toFiniteNumber = (value) => {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
@@ -23,6 +24,20 @@ const toFiniteNumber = (value) => {
 
 const roundSignalValue = (value) => Math.round(value * 100) / 100;
 const CLOSED_SIGNAL_STATUSES = ['Closed', 'Target Hit', 'Partial Profit Book', 'Stoploss Hit'];
+
+const resolveSignalDisplaySegment = (signal) => {
+  const category = String(signal?.category || '').trim().toUpperCase();
+  if (['NIFTY_OPT', 'BANKNIFTY_OPT', 'FINNIFTY_OPT', 'STOCK_OPT'].includes(category)) return 'FNO';
+  if (category === 'MCX_FUT') return 'COMMODITY';
+  if (category === 'CURRENCY') return 'CURRENCY';
+  if (category === 'CRYPTO') return 'CRYPTO';
+  return resolveSymbolSegmentGroup({
+    symbol: signal?.symbol,
+    segment: signal?.segment,
+    exchange: signal?.exchange,
+    name: signal?.symbol,
+  });
+};
 
 const getResolvedSignalExitPrice = (signal) => {
   const exitPrice = toFiniteNumber(signal?.exitPrice);
@@ -88,7 +103,7 @@ const formatSignalResponse = (signal) => ({
   totalPoints: getResolvedSignalPoints(signal),
   exitReason: signal.exitReason,
   exitTime: signal.exitTime,
-  segment: signal.segment,
+  segment: resolveSignalDisplaySegment(signal),
   category: signal.category,
   targets: signal.targets,
   isFree: signal.isFree,

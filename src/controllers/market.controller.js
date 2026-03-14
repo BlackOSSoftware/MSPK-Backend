@@ -7,6 +7,12 @@ import MasterSymbol from '../models/MasterSymbol.js';
 import config from '../config/config.js';
 import logger from '../config/log.js';
 import { buildMasterSymbolId } from '../utils/masterSymbolId.js';
+import {
+    decorateSymbolSegment,
+    matchesSegmentGroup,
+    normalizeUpper,
+    resolveSymbolSegmentGroup,
+} from '../utils/marketSegmentResolver.js';
 import { SEED_SYMBOLS } from '../config/seedSymbols.js';
 import { DEFAULT_MARKET_WATCHLIST_TEMPLATES } from '../config/defaultMarketWatchlistTemplates.js';
 import {
@@ -62,7 +68,7 @@ const resolutionToSeconds = (resolution) => {
 
 const escapeRegex = (value = '') => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-const buildSymbolFilter = (query = {}) => {
+const buildSymbolFilter = (query = {}, { ignoreSegment = false } = {}) => {
     const clauses = [];
     const search = String(query.search || '').trim();
     const segment = String(query.segment || '').trim();
@@ -78,7 +84,7 @@ const buildSymbolFilter = (query = {}) => {
         )
     );
 
-    if (segment) clauses.push({ segment });
+    if (segment && !ignoreSegment) clauses.push({ segment: normalizeUpper(segment) });
     if (watchlist !== undefined) clauses.push({ isWatchlist: watchlist });
     if (isActive !== undefined) clauses.push({ isActive });
 
@@ -115,7 +121,7 @@ const buildSymbolFilter = (query = {}) => {
 };
 
 const enrichSymbol = (symbolLike) => {
-    const symbol = typeof symbolLike?.toObject === 'function' ? symbolLike.toObject() : { ...symbolLike };
+    const symbol = decorateSymbolSegment(typeof symbolLike?.toObject === 'function' ? symbolLike.toObject() : { ...symbolLike });
     symbol.lastPrice = marketDataService.getBestLivePrice(symbol.symbol, symbol, symbol.lastPrice || 0);
     symbol.ltp = symbol.lastPrice;
 
@@ -125,6 +131,18 @@ const enrichSymbol = (symbolLike) => {
     }
 
     return symbol;
+};
+
+const normalizeSymbolPayload = (payload = {}) => {
+    const nextPayload = payload;
+    if (nextPayload.symbol) {
+        nextPayload.symbol = normalizeUpper(nextPayload.symbol);
+    }
+    if (nextPayload.exchange) {
+        nextPayload.exchange = normalizeUpper(nextPayload.exchange);
+    }
+    nextPayload.segment = resolveSymbolSegmentGroup(nextPayload);
+    return nextPayload;
 };
 
 const hydrateInstrumentToken = async (payload = {}, previousSymbol = '') => {
@@ -1414,6 +1432,7 @@ const updateSegment = catchAsync(async (req, res) => {
 import kiteInstrumentsService from '../services/kiteInstruments.service.js';
 
 const createSymbol = catchAsync(async (req, res) => {
+    normalizeSymbolPayload(req.body);
     await hydrateInstrumentToken(req.body);
 
     const symbol = new MasterSymbol(req.body);
@@ -1437,6 +1456,7 @@ const updateSymbol = catchAsync(async (req, res) => {
 
     const previousSymbol = symbol.symbol;
     Object.assign(symbol, req.body);
+    normalizeSymbolPayload(symbol);
     await hydrateInstrumentToken(symbol, previousSymbol);
     symbol.symbolId = buildMasterSymbolId(symbol);
     await symbol.save();
@@ -1471,19 +1491,31 @@ const getSegments = catchAsync(async (req, res) => {
 });
 
 const getSymbols = catchAsync(async (req, res) => {
-    const filter = buildSymbolFilter(req.query);
-    const sort = { isActive: -1, segment: 1, symbol: 1 };
+    const requestedSegment = normalizeUpper(req.query.segment);
+    const filter = buildSymbolFilter(req.query, { ignoreSegment: true });
     const paginated = String(req.query.paginated || '').trim().toLowerCase() === 'true';
 
+    const applySegmentFilter = (docs = []) =>
+        docs
+            .map(enrichSymbol)
+            .filter((doc) => matchesSegmentGroup(doc, requestedSegment))
+            .sort((left, right) => {
+                const activeDiff = Number(Boolean(right.isActive)) - Number(Boolean(left.isActive));
+                if (activeDiff !== 0) return activeDiff;
+                const segmentDiff = String(left.segmentGroup || left.segment || '').localeCompare(String(right.segmentGroup || right.segment || ''));
+                if (segmentDiff !== 0) return segmentDiff;
+                return String(left.symbol || '').localeCompare(String(right.symbol || ''));
+            });
+
     if (!paginated) {
-        const symbols = await MasterSymbol.find(filter).sort(sort).lean();
-        return res.send(symbols.map(enrichSymbol));
+        const symbols = await MasterSymbol.find(filter).lean();
+        return res.send(applySegmentFilter(symbols));
     }
 
     const requestedPage = parseIntegerQuery(req.query.page, 1, 1, 100000);
     const limit = parseIntegerQuery(req.query.limit, 20, 1, 200);
-    const [total, overallTotal, activeTotal, inactiveTotal, withSymbolIdTotal, withoutSymbolIdTotal] = await Promise.all([
-        MasterSymbol.countDocuments(filter),
+    const [allMatchingDocs, overallTotal, activeTotal, inactiveTotal, withSymbolIdTotal, withoutSymbolIdTotal] = await Promise.all([
+        MasterSymbol.find(filter).lean(),
         MasterSymbol.countDocuments(),
         MasterSymbol.countDocuments({ isActive: true }),
         MasterSymbol.countDocuments({ isActive: false }),
@@ -1497,13 +1529,15 @@ const getSymbols = catchAsync(async (req, res) => {
         })
     ]);
 
+    const filteredSymbols = applySegmentFilter(allMatchingDocs);
+    const total = filteredSymbols.length;
     const totalPages = Math.max(Math.ceil(total / limit), 1);
     const page = Math.min(requestedPage, totalPages);
     const skip = (page - 1) * limit;
-    const symbols = await MasterSymbol.find(filter).sort(sort).skip(skip).limit(limit).lean();
+    const symbols = filteredSymbols.slice(skip, skip + limit);
 
     res.send({
-        results: symbols.map(enrichSymbol),
+        results: symbols,
         pagination: {
             page,
             limit,
@@ -1760,7 +1794,7 @@ const searchInstruments = catchAsync(async (req, res) => {
         }
     }
 
-    res.send(instruments);
+    res.send(instruments.map((item) => decorateSymbolSegment(item)));
 });
 
 const syncInstruments = catchAsync(async (req, res) => {

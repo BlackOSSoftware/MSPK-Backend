@@ -151,7 +151,8 @@ const enrichAdminUsers = async (users = []) => Promise.all(users.map(async (u) =
         phone: u.phone || '',
         tradingViewId: u.tradingViewId || '',
         role: u.role,
-        ip: u.lastLoginIp,
+        ip: u.lastLoginIp || '',
+        lastLoginIp: u.lastLoginIp || '',
         plan: hasActivePlan ? planNames.join(', ') : 'Free',
         planStatus: hasActivePlan ? 'Active' : 'Inactive',
         subscriptionStart: minStart,
@@ -178,6 +179,42 @@ const getNextSubscriptionStartDate = async (userId) => {
         return new Date(latest.endDate);
     }
     return now;
+};
+
+const assignPlanWithCommission = async ({ user, plan, adminCreated = true }) => {
+    const startDate = await getNextSubscriptionStartDate(user.id);
+    const endDate = new Date(startDate);
+    endDate.setDate(endDate.getDate() + (plan.durationDays || 30));
+
+    const transaction = await transactionService.createTransaction({
+        user: user.id,
+        amount: plan.price,
+        currency: 'INR',
+        type: 'DEBIT',
+        purpose: 'SUBSCRIPTION',
+        status: 'success',
+        paymentGateway: 'MANUAL_ADMIN',
+        metadata: { planId: plan.id, planName: plan.name, adminCreated }
+    });
+
+    const subscription = await Subscription.create({
+        user: user.id,
+        plan: plan.id,
+        status: 'active',
+        startDate,
+        endDate,
+        transaction: transaction.id
+    });
+
+    user.subscription = {
+        plan: plan.name,
+        expiresAt: endDate
+    };
+    await user.save();
+
+    await subBrokerService.recordCommission(transaction, user, plan);
+
+    return { transaction, subscription, startDate, endDate };
 };
 
 const createUser = catchAsync(async (req, res) => {
@@ -228,44 +265,7 @@ const createUser = catchAsync(async (req, res) => {
     if (planId) {
         const plan = await Plan.findById(planId);
         if (plan) {
-            const startDate = new Date();
-            const endDate = new Date();
-            endDate.setDate(endDate.getDate() + (plan.durationDays || 30));
-
-            // Create Manual Transaction
-            const transaction = await transactionService.createTransaction({
-                user: user.id,
-                amount: plan.price,
-                currency: 'INR',
-                type: 'DEBIT',
-                purpose: 'SUBSCRIPTION',
-                status: 'success',
-                paymentGateway: 'MANUAL_ADMIN',
-                metadata: { planId: plan.id, planName: plan.name, adminCreated: true }
-            });
-
-            await Subscription.create({
-                user: user.id,
-                plan: plan.id,
-                status: 'active',
-                startDate,
-                endDate,
-                transaction: transaction.id
-            });
-
-            // Trigger Commission Record
-            try {
-                await subBrokerService.recordCommission(transaction, user, plan);
-            } catch (err) {
-                console.error("Commission Recording Failed:", err);
-            }
-
-            // Update legacy user subscription field for consistency
-            user.subscription = {
-                plan: plan.name,
-                expiresAt: endDate
-            };
-            await user.save();
+            await assignPlanWithCommission({ user, plan, adminCreated: true });
         }
     }
 
@@ -313,20 +313,7 @@ const assignCustomPlan = catchAsync(async (req, res) => {
     const endDate = new Date(startDate);
     endDate.setDate(endDate.getDate() + (plan.durationDays || 30));
 
-    const subscription = await Subscription.create({
-        user: user.id,
-        plan: plan.id,
-        status: 'active',
-        startDate,
-        endDate,
-        transaction: null
-    });
-
-    user.subscription = {
-        plan: plan.name,
-        expiresAt: endDate
-    };
-    await user.save();
+    const { subscription } = await assignPlanWithCommission({ user, plan, adminCreated: true });
 
     res.status(httpStatus.CREATED).send({
         message: 'Custom plan assigned successfully',
@@ -443,6 +430,7 @@ const getUser = catchAsync(async (req, res) => {
       tradingViewId: user.tradingViewId || '',
       role: user.role,
       ip: user.lastLoginIp || '',
+      lastLoginIp: user.lastLoginIp || '',
       currentDeviceId: user.currentDeviceId || '',
       isEmailVerified: Boolean(user.isEmailVerified),
       isPhoneVerified: Boolean(user.isPhoneVerified),
@@ -674,25 +662,7 @@ const updateUser = catchAsync(async (req, res) => {
         if (!plan) {
             throw new ApiError(httpStatus.BAD_REQUEST, 'Plan not found');
         }
-
-        const startDate = await getNextSubscriptionStartDate(user.id);
-        const endDate = new Date(startDate);
-        endDate.setDate(endDate.getDate() + (plan.durationDays || 30));
-
-        await Subscription.create({
-            user: user.id,
-            plan: plan.id,
-            status: 'active',
-            startDate,
-            endDate,
-            transaction: null
-        });
-
-        user.subscription = {
-            plan: plan.name,
-            expiresAt: endDate
-        };
-        await user.save();
+        await assignPlanWithCommission({ user, plan, adminCreated: true });
     }
 
     res.send(user);

@@ -10,6 +10,7 @@ import { redisClient } from './redis.service.js';
 import logger from '../config/log.js';
 import { decrypt, encrypt } from '../utils/encryption.js';
 import cacheManager from './cacheManager.js';
+import { decorateSymbolSegment } from '../utils/marketSegmentResolver.js';
 import {
     hasExplicitContractMonth,
     isCurrentMonthContractDoc,
@@ -1824,7 +1825,8 @@ class MarketDataService extends EventEmitter {
                     lotSize: item.lotSize || 1,
                     tickSize: item.tickSize || 0.01,
                     instrumentToken: item.instrumentToken || null,
-                }));
+                }))
+                    .map((item) => decorateSymbolSegment(item));
 
                 return dbMapped.slice(0, 50);
             }, SYMBOL_SEARCH_CACHE_TTL);

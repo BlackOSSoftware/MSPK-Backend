@@ -11,6 +11,7 @@ const SENSITIVE_KEYS = [
     'data_feed_access_token',
     'kite_api_secret',
     'kite_access_token',
+    'kite_login_password',
     'market_data_api_key',
     'mt5_ws_api_key'
 ];

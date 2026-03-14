@@ -76,7 +76,21 @@ const getMyCommissions = catchAsync(async (req, res) => {
 });
 
 const processPayout = catchAsync(async (req, res) => {
-    const result = await subBrokerService.processPayout(req.params.subBrokerId);
+    if (!req.file) {
+        return res.status(httpStatus.BAD_REQUEST).send({ message: 'Payout screenshot proof is required' });
+    }
+
+    const payoutProof = req.file ? req.file.path.replace(/\\/g, '/') : null;
+    const payoutNote = typeof req.body?.note === 'string' ? req.body.note.trim() : '';
+    const host = req.get('host');
+    const protocol = req.protocol || 'http';
+    const proofUrl = payoutProof && host ? `${protocol}://${host}/${payoutProof}` : '';
+    const result = await subBrokerService.processPayout(req.params.subBrokerId, {
+        payoutProof,
+        payoutNote,
+        processedBy: req.user?._id || null,
+        proofUrl,
+    });
     res.send({ message: 'Payout processed successfully', result });
 });
 

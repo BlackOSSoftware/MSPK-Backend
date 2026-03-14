@@ -30,6 +30,29 @@ const commissionSchema = new mongoose.Schema(
       enum: ['PENDING', 'PAID'],
       default: 'PENDING',
     },
+    payoutProof: {
+      type: String,
+      default: null,
+    },
+    payoutNote: {
+      type: String,
+      trim: true,
+      default: null,
+    },
+    payoutBatchId: {
+      type: String,
+      trim: true,
+      default: null,
+    },
+    payoutProcessedAt: {
+      type: Date,
+      default: null,
+    },
+    payoutProcessedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      default: null,
+    },
   },
   {
     timestamps: true,

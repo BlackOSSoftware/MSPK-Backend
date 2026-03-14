@@ -4,6 +4,7 @@ import announcementService from './announcement.service.js';
 import logger from '../config/log.js';
 import { broadcastToRoles } from './websocket.service.js';
 import { getSignalAudienceGroups } from '../utils/signalRouting.js';
+import { resolveSymbolSegmentGroup } from '../utils/marketSegmentResolver.js';
 
 const CLOSED_SIGNAL_STATUSES = ['Closed', 'Target Hit', 'Partial Profit Book', 'Stoploss Hit'];
 const SIGNAL_DERIVED_DATES = {
@@ -225,6 +226,32 @@ const scheduleUpdateSideEffects = (signal, updateBody, signalId, notificationMet
 
 const signalCreationGuard = new Map();
 
+const hydrateSignalSegment = async (signalBody = {}) => {
+  const normalizedSymbol = String(signalBody?.symbol || '').trim().toUpperCase();
+  if (!normalizedSymbol) return signalBody;
+
+  const masterSymbol = await MasterSymbol.findOne({ symbol: normalizedSymbol })
+    .select('symbol segment exchange subsegment name sourceSymbol')
+    .lean();
+
+  if (masterSymbol) {
+    signalBody.symbol = normalizedSymbol;
+    signalBody.segment = resolveSymbolSegmentGroup(masterSymbol);
+    return signalBody;
+  }
+
+  if (signalBody.segment) {
+    signalBody.segment = resolveSymbolSegmentGroup({
+      symbol: normalizedSymbol,
+      segment: signalBody.segment,
+      exchange: signalBody.exchange,
+      name: signalBody.name,
+    });
+  }
+
+  return signalBody;
+};
+
 setInterval(() => {
   const now = Date.now();
   const fiveMinutesAgo = now - 5 * 60 * 1000;
@@ -236,6 +263,7 @@ setInterval(() => {
 }, 5 * 60 * 1000);
 
 const createSignal = async (signalBody, user) => {
+  await hydrateSignalSegment(signalBody);
   if (signalBody.uniqueId) {
     signalBody.uniqueId = String(signalBody.uniqueId).trim();
     const existing = await Signal.findOne({ uniqueId: signalBody.uniqueId });
@@ -646,6 +674,13 @@ const updateSignalById = async (signalId, updateBody) => {
   }
 
   const { notificationMeta = null, ...persistedUpdateBody } = updateBody || {};
+  if (persistedUpdateBody.symbol || persistedUpdateBody.segment) {
+    await hydrateSignalSegment(persistedUpdateBody);
+  }
+  const previousStatus = String(signal.status || '').trim();
+  const nextStatus = String(persistedUpdateBody?.status || '').trim();
+  const isReopeningToActive =
+    nextStatus === 'Active' && CLOSED_SIGNAL_STATUSES.includes(previousStatus);
 
   if ((persistedUpdateBody.symbol || persistedUpdateBody.segment) && !persistedUpdateBody.category) {
     const merged = { ...signal.toObject(), ...persistedUpdateBody };
@@ -674,6 +709,13 @@ const updateSignalById = async (signalId, updateBody) => {
     if (!signal.exitTime) {
       signal.exitTime = new Date();
     }
+  }
+
+  if (isReopeningToActive) {
+    signal.exitPrice = undefined;
+    signal.totalPoints = undefined;
+    signal.exitReason = undefined;
+    signal.exitTime = undefined;
   }
 
   await signal.save();

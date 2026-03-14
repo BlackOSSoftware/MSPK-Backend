@@ -2,6 +2,8 @@ import SubBroker from '../models/SubBroker.js';
 import User from '../models/User.js';
 import Commission from '../models/Commission.js';
 import httpStatus from 'http-status';
+import Setting from '../models/Setting.js';
+import whatsappChannelService from './channels/whatsapp.service.js';
 
 /**
  * Create a sub-broker
@@ -171,11 +173,84 @@ const recordCommission = async (transaction, user, plan) => {
     }
 };
 
-const processPayout = async (subBrokerId) => {
-    return Commission.updateMany(
+const processPayout = async (subBrokerId, options = {}) => {
+    const { payoutProof = null, payoutNote = '', processedBy = null, proofUrl = '' } = options;
+    const subBroker = await SubBroker.findById(subBrokerId);
+    if (!subBroker) {
+        const error = new Error('SubBroker not found');
+        error.statusCode = httpStatus.NOT_FOUND;
+        throw error;
+    }
+
+    const pendingCommissions = await Commission.find({ subBroker: subBrokerId, status: 'PENDING' });
+    if (pendingCommissions.length === 0) {
+        return {
+            updatedCount: 0,
+            totalAmount: 0,
+            payoutProof: payoutProof || null,
+        };
+    }
+
+    const payoutBatchId = `PO-${Date.now()}`;
+    const payoutProcessedAt = new Date();
+    const totalAmount = pendingCommissions.reduce((sum, item) => sum + (item.amount || 0), 0);
+
+    const result = await Commission.updateMany(
         { subBroker: subBrokerId, status: 'PENDING' },
-        { status: 'PAID' }
+        {
+            $set: {
+                status: 'PAID',
+                payoutProof: payoutProof || null,
+                payoutNote: payoutNote || null,
+                payoutBatchId,
+                payoutProcessedAt,
+                payoutProcessedBy: processedBy || null,
+            }
+        }
     );
+
+    const waSetting = await Setting.findOne({ key: 'whatsapp_config' }).lean();
+    const waConfig = waSetting?.value || null;
+    const payoutCaption = [
+        'MSPK Trade Solutions',
+        'Sub-broker payout update',
+        `Hello ${subBroker.name},`,
+        `Your payout of INR ${totalAmount.toLocaleString('en-IN')} has been completed successfully.`,
+        'We have attached the payment screenshot for your confirmation.',
+        payoutNote ? `Reference note: ${payoutNote}` : '',
+        'Thank you for growing with MSPK.',
+    ].filter(Boolean).join('\n\n');
+
+    if (subBroker.phone && whatsappChannelService.isConfigured(waConfig)) {
+        try {
+            if (proofUrl) {
+                await whatsappChannelService.sendMedia(waConfig, {
+                    to: subBroker.phone,
+                    mediaUrl: proofUrl,
+                    caption: payoutCaption,
+                    title: 'Payout processed',
+                    message: payoutCaption,
+                });
+            } else {
+                await whatsappChannelService.sendText(waConfig, {
+                    to: subBroker.phone,
+                    text: payoutCaption,
+                    title: 'Payout processed',
+                    message: payoutCaption,
+                });
+            }
+        } catch (error) {
+            console.error('Failed to send payout WhatsApp notification', error);
+        }
+    }
+
+    return {
+        updatedCount: result.modifiedCount || 0,
+        totalAmount,
+        payoutBatchId,
+        payoutProcessedAt,
+        payoutProof: payoutProof || null,
+    };
 };
 
 export default {

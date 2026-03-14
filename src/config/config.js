@@ -7,10 +7,26 @@ const __dirname = path.dirname(__filename);
 
 dotenv.config({ path: path.join(__dirname, '../../.env') });
 
+const parseTrustProxy = (value, env) => {
+  if (value === undefined || value === null || value === '') {
+    return env === 'production' ? 1 : false;
+  }
+
+  const normalized = String(value).trim().toLowerCase();
+  if (['true', '1', 'yes'].includes(normalized)) return 1;
+  if (['false', '0', 'no'].includes(normalized)) return false;
+
+  const numeric = Number(normalized);
+  if (Number.isInteger(numeric) && numeric >= 0) return numeric;
+
+  return value;
+};
+
 export default {
   env: process.env.NODE_ENV || 'development',
   port: process.env.PORT || 5000,
   frontendUrl: process.env.FRONTEND_URL || 'http://localhost:5173',
+  trustProxy: parseTrustProxy(process.env.TRUST_PROXY, process.env.NODE_ENV || 'development'),
   mongoose: {
     url: process.env.MONGO_URI ,
     options: {

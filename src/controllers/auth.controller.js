@@ -5,6 +5,7 @@ import { redisClient } from '../services/redis.service.js'; // Direct client acc
 import User from '../models/User.js';
 import FCMToken from '../models/FCMToken.js';
 import telegramService from '../services/channels/telegram.service.js';
+import { isLoopbackClientIp, resolveClientIp } from '../utils/requestIp.js';
 
 const buildTelegramPayload = (userObject) => ({
   connected: Boolean(userObject?.telegramChatId),
@@ -198,14 +199,21 @@ const verifyOtp = catchAsync(async (req, res) => {
 });
 
 const login = catchAsync(async (req, res) => {
-  const { email, password, deviceId } = req.body;
+  const { email, password, deviceId, ip: clientReportedIp } = req.body;
   // Destructure service response
   const { user, planDetails } = await authService.loginUserWithEmailAndPassword(email, password);
+  const resolvedClientIp = resolveClientIp(req);
+  const normalizedClientReportedIp =
+    typeof clientReportedIp === 'string' && clientReportedIp.trim() ? clientReportedIp.trim() : null;
+  const effectiveLoginIp =
+    resolvedClientIp && !isLoopbackClientIp(resolvedClientIp)
+      ? resolvedClientIp
+      : (normalizedClientReportedIp || resolvedClientIp);
   
   // Single Session & IP Tracking Logic
   user.currentDeviceId = deviceId || 'unknown';
   user.tokenVersion = (user.tokenVersion || 0) + 1;
-  user.lastLoginIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress || req.ip;
+  user.lastLoginIp = effectiveLoginIp;
   await user.save(); // Now works because 'user' is a Mongoose doc
 
   const tokens = await tokenService.generateAuthTokens(user);

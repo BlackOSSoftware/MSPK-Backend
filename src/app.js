@@ -10,6 +10,7 @@ import webhookRoute from './routes/webhook.route.js';
 import marketController from './controllers/market.controller.js';
 
 const app = express();
+app.set('trust proxy', config.trustProxy);
 
 const allowedOrigins = [
   'http://localhost:5173',
