@@ -10,36 +10,9 @@ import {
   normalizeSignalSegment,
   normalizeSignalSymbol,
 } from '../utils/signalRouting.js';
+import { buildTimeframeQuery, normalizeSignalTimeframe } from '../utils/timeframe.js';
 
 const escapeRegex = (value = '') => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-
-const normalizeTimeframe = (timeframe) => {
-  if (timeframe === null || timeframe === undefined) return timeframe;
-  const tf = String(timeframe).trim();
-  if (!tf) return tf;
-  const normalized = tf.toUpperCase();
-
-  if (normalized === 'S') return 'Scalp';
-  if (/^\d+S$/.test(normalized)) return `${normalized.slice(0, -1)}s`;
-  if (/^\d+M$/.test(normalized)) return `${normalized.slice(0, -1)}m`;
-  if (/^\d+H$/.test(normalized)) return `${normalized.slice(0, -1)}h`;
-  if (['D', '1D', 'DAY'].includes(normalized)) return '1D';
-  if (['W', '1W', 'WEEK'].includes(normalized)) return '1W';
-  if (['MO', 'MON', 'MONTH', '1MO', '1MON', '1MONTH'].includes(normalized)) return '1M';
-
-  if (/^\d+$/.test(normalized)) {
-    const amount = Number(normalized);
-    if (!Number.isFinite(amount) || amount <= 0) return tf;
-    if (amount < 60) return `${amount}m`;
-    if (amount < 1440 && amount % 60 === 0) return `${amount / 60}h`;
-    if (amount === 1440) return '1D';
-    if (amount === 10080) return '1W';
-    if (amount === 43200) return '1M';
-    return `${amount}m`;
-  }
-
-  return tf;
-};
 
 const parseBoolean = (value) => {
   if (value === undefined || value === null) return undefined;
@@ -193,6 +166,7 @@ const receiveSignal = catchAsync(async (req, res) => {
     : normalizeSignalSegment(req.body.segment, symbol);
   const isFreeFromPayload = parseBoolean(req.body.is_free ?? req.body.isFree ?? req.body.free);
   const isFree = isFreeFromPayload ?? false;
+  const normalizedTimeframe = normalizeSignalTimeframe(req.body.timeframe);
 
   const sendWebhookResponse = (status, payload) => {
     logger.info(
@@ -219,6 +193,9 @@ const receiveSignal = catchAsync(async (req, res) => {
     if (!webhookId) return null;
     const id = String(webhookId).trim();
     const baseFilter = symbol ? { symbol, segment } : { segment };
+    const timeframeFilter = buildTimeframeQuery('timeframe', normalizedTimeframe);
+    const buildScopedFilters = (filter) =>
+      timeframeFilter ? [{ ...filter, ...timeframeFilter }, filter] : [filter];
 
     // 1) If webhook sends our MongoDB _id
     if (mongoose.Types.ObjectId.isValid(id)) {
@@ -227,39 +204,47 @@ const receiveSignal = catchAsync(async (req, res) => {
     }
 
     // 2) Match by the caller-provided ID first.
-    const byExternalId = await Signal.findOne({
-      ...baseFilter,
-      $or: [{ uniqueId: id }, { webhookId: id }],
-      status: { $nin: getSignalClosedStatuses() },
-    }).sort({ createdAt: -1 });
-    if (byExternalId) return byExternalId;
+    for (const scopedFilter of buildScopedFilters(baseFilter)) {
+      const byExternalId = await Signal.findOne({
+        ...scopedFilter,
+        $or: [{ uniqueId: id }, { webhookId: id }],
+        status: { $nin: getSignalClosedStatuses() },
+      }).sort({ createdAt: -1 });
+      if (byExternalId) return byExternalId;
+    }
 
     if (symbol) {
+      for (const scopedFilter of buildScopedFilters({ symbol })) {
         const byLegacySymbolOnly = await Signal.findOne({
-          symbol,
+          ...scopedFilter,
           $or: [{ uniqueId: id }, { webhookId: id }],
           status: { $nin: getSignalClosedStatuses() },
         }).sort({ createdAt: -1 });
-      if (byLegacySymbolOnly) return byLegacySymbolOnly;
+        if (byLegacySymbolOnly) return byLegacySymbolOnly;
+      }
     }
 
     // 3) If already closed (idempotent EXIT), match on exit_time too.
     if (req.body.exit_time) {
       const exitTime = new Date(req.body.exit_time);
-      const byClosed = await Signal.findOne({
-        ...baseFilter,
-        $or: [{ uniqueId: id }, { webhookId: id }],
-        exitTime,
-      }).sort({ createdAt: -1 });
-      if (byClosed) return byClosed;
-
-      if (symbol) {
-        const byLegacyClosed = await Signal.findOne({
-          symbol,
+      for (const scopedFilter of buildScopedFilters(baseFilter)) {
+        const byClosed = await Signal.findOne({
+          ...scopedFilter,
           $or: [{ uniqueId: id }, { webhookId: id }],
           exitTime,
         }).sort({ createdAt: -1 });
-        if (byLegacyClosed) return byLegacyClosed;
+        if (byClosed) return byClosed;
+      }
+
+      if (symbol) {
+        for (const scopedFilter of buildScopedFilters({ symbol })) {
+          const byLegacyClosed = await Signal.findOne({
+            ...scopedFilter,
+            $or: [{ uniqueId: id }, { webhookId: id }],
+            exitTime,
+          }).sort({ createdAt: -1 });
+          if (byLegacyClosed) return byLegacyClosed;
+        }
       }
     }
 
@@ -361,7 +346,6 @@ const receiveSignal = catchAsync(async (req, res) => {
     return sendWebhookResponse(httpStatus.OK, { status: 'ok', signal: updated });
   }
 
-  const normalizedTimeframe = normalizeTimeframe(req.body.timeframe);
   const normalizedType = String(req.body.trade_type || '').trim().toUpperCase();
 
   const signalBody = {

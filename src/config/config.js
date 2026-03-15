@@ -65,6 +65,15 @@ export default {
     webhookBaseUrl: process.env.TELEGRAM_WEBHOOK_BASE_URL || '',
     webhookSecret: process.env.TELEGRAM_WEBHOOK_SECRET || '',
   },
+  notifications: {
+    signalConcurrency: Number.parseInt(process.env.NOTIFICATION_SIGNAL_CONCURRENCY || '10', 10),
+    workerConcurrency: Number.parseInt(process.env.NOTIFICATION_WORKER_CONCURRENCY || '20', 10),
+    jobBatchSize: Number.parseInt(process.env.NOTIFICATION_JOB_BATCH_SIZE || '200', 10),
+    jobAttempts: Number.parseInt(process.env.NOTIFICATION_JOB_ATTEMPTS || '3', 10),
+    jobBackoffMs: Number.parseInt(process.env.NOTIFICATION_JOB_BACKOFF_MS || '1000', 10),
+    jobRetentionSeconds: Number.parseInt(process.env.NOTIFICATION_JOB_RETENTION_SECONDS || '3600', 10),
+    settingsCacheMs: Number.parseInt(process.env.NOTIFICATION_SETTINGS_CACHE_MS || '15000', 10),
+  },
   whatsapp: {
     provider: process.env.WHATSAPP_PROVIDER || '',
     defaultCountryCode:

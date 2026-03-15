@@ -10,6 +10,7 @@ import {
   hasSelectedSignalSymbol,
 } from '../utils/userSignalSelection.js';
 import { resolveSymbolSegmentGroup } from '../utils/marketSegmentResolver.js';
+import { buildTimeframeQuery, normalizeSignalTimeframe } from '../utils/timeframe.js';
 
 const toFiniteNumber = (value) => {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
@@ -110,7 +111,7 @@ const formatSignalResponse = (signal) => ({
   notes: signal.notes,
   strategyId: signal.strategyId,
   strategyName: signal.strategyName,
-  timeframe: signal.timeframe,
+  timeframe: normalizeSignalTimeframe(signal.timeframe) || signal.timeframe,
   metrics: signal.metrics,
 });
 
@@ -470,7 +471,10 @@ const getSignals = catchAsync(async (req, res) => {
   }
 
   if (req.query.timeframe) {
-      conditions.push({ timeframe: req.query.timeframe });
+      const timeframeFilter = buildTimeframeQuery('timeframe', req.query.timeframe);
+      if (timeframeFilter) {
+        conditions.push(timeframeFilter);
+      }
   }
 
   // Final Composite Filter
@@ -568,7 +572,10 @@ const exportSignalReport = catchAsync(async (req, res) => {
   }
 
   if (req.query.timeframe) {
-    conditions.push({ timeframe: req.query.timeframe });
+    const timeframeFilter = buildTimeframeQuery('timeframe', req.query.timeframe);
+    if (timeframeFilter) {
+      conditions.push(timeframeFilter);
+    }
   }
 
   const filter = conditions.length > 1 ? { $and: conditions } : conditions[0];

@@ -24,6 +24,30 @@ const connection = {
   port: config.redis.port,
 };
 
+const settingsCache = {
+  expiresAt: 0,
+  value: null,
+};
+
+const loadSettings = async () => {
+  const ttl = Number.isFinite(config.notifications?.settingsCacheMs)
+    ? Math.max(config.notifications.settingsCacheMs, 0)
+    : 0;
+  const now = Date.now();
+
+  if (ttl > 0 && settingsCache.value && settingsCache.expiresAt > now) {
+    return settingsCache.value;
+  }
+
+  const settings = await Setting.find({
+    key: { $in: ['telegram_config', 'whatsapp_config', 'push_config', 'email_config', 'notification_templates'] }
+  }).lean();
+
+  settingsCache.value = settings;
+  settingsCache.expiresAt = now + ttl;
+  return settings;
+};
+
 const escapeHtml = (value = '') =>
   String(value)
     .replace(/&/g, '&amp;')
@@ -124,10 +148,8 @@ const notificationWorker = new Worker('notifications', async (job) => {
   } = job.data;
   
   try {
-      // Fetch System Settings
-      const settings = await Setting.find({
-          key: { $in: ['telegram_config', 'whatsapp_config', 'push_config', 'email_config', 'notification_templates'] }
-      });
+      // Fetch System Settings (cached)
+      const settings = await loadSettings();
       
       const getSetting = (key) => {
           const s = settings.find(s => s.key === key);
@@ -294,7 +316,7 @@ const notificationWorker = new Worker('notifications', async (job) => {
   } catch (error) {
       logger.error(`Failed to process notification job ${job.id}`, error);
   }
-}, { connection });
+}, { connection, concurrency: Number.isFinite(config.notifications?.workerConcurrency) ? config.notifications.workerConcurrency : 20 });
 
 notificationWorker.on('completed', (job) => {
   logger.debug(`Job ${job.id} completed`);

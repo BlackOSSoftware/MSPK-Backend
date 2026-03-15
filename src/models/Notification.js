@@ -41,6 +41,10 @@ const notificationSchema = mongoose.Schema(
       type: Object, // Optional payload (e.g. signalId, ticketId)
       default: {}
     },
+    dedupKey: {
+      type: String,
+      trim: true,
+    },
     link: {
       type: String, // Optional redirect URL
     },
@@ -49,6 +53,8 @@ const notificationSchema = mongoose.Schema(
     timestamps: true,
   }
 );
+
+notificationSchema.index({ dedupKey: 1 }, { unique: true, sparse: true });
 
 const Notification = mongoose.model('Notification', notificationSchema);
 

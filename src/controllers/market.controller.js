@@ -895,12 +895,12 @@ const getTickers = catchAsync(async (req, res) => {
                  allowedExchanges = [];
 
                  if (perms.includes('COMMODITY') || perms.includes('MCX_FUT')) {
-                    allowedSegments.push('COMMODITY');
-                    allowedExchanges.push('MCX');
+                    allowedSegments.push('COMMODITY', 'COMEX');
+                    allowedExchanges.push('MCX', 'COMEX');
                  }
                  if (perms.includes('EQUITY_INTRA') || perms.includes('EQUITY_DELIVERY')) {
                     allowedSegments.push('EQUITY', 'INDICES');
-                    allowedExchanges.push('NSE', 'BSE');
+                    allowedExchanges.push('NSE');
                  }
                  if (perms.includes('NIFTY_OPT') || perms.includes('BANKNIFTY_OPT')) {
                     allowedSegments.push('FNO', 'INDICES');
@@ -1744,12 +1744,12 @@ const searchInstruments = catchAsync(async (req, res) => {
 
                 // 1. Map Permissions to Allowed Data Segments/Exchanges
                 if (perms.includes('COMMODITY') || perms.includes('MCX_FUT')) {
-                    allowedSegments.push('COMMODITY');
-                    allowedExchanges.push('MCX'); 
+                    allowedSegments.push('COMMODITY', 'COMEX');
+                    allowedExchanges.push('MCX', 'COMEX'); 
                 }
                 if (perms.includes('EQUITY_INTRA') || perms.includes('EQUITY_DELIVERY')) {
                     allowedSegments.push('EQUITY', 'INDICES');
-                    allowedExchanges.push('NSE', 'BSE');
+                    allowedExchanges.push('NSE');
                 }
                 if (perms.includes('NIFTY_OPT') || perms.includes('BANKNIFTY_OPT')) {
                     allowedSegments.push('FNO', 'INDICES'); 

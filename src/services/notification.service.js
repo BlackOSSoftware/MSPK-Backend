@@ -1,4 +1,5 @@
 import config from '../config/config.js';
+import crypto from 'crypto';
 import logger from '../config/log.js';
 import { redisSubscriber } from './redis.service.js';
 import '../models/Plan.js';
@@ -48,6 +49,96 @@ const emitRealtimeNotifications = (notificationDocs = []) => {
       payload: serializeRealtimeNotification(notification),
     });
   });
+};
+
+const hashKey = (value) =>
+  crypto.createHash('sha1').update(String(value ?? '')).digest('hex');
+
+const normalizeEventTime = (value) => {
+  if (!value) return '';
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return date.toISOString();
+};
+
+const normalizeIdentifier = (value) => {
+  if (!value) return '';
+  if (typeof value === 'object' && value.$oid) return String(value.$oid);
+  return String(value);
+};
+
+const buildSignalEventKey = (signal = {}) => {
+  const subType = String(signal?.subType || 'SIGNAL_NEW').trim().toUpperCase();
+  const primaryId = signal?._id || signal?.id || signal?.uniqueId;
+  const baseId = primaryId
+    ? normalizeIdentifier(primaryId)
+    : [
+        signal?.symbol,
+        signal?.segment,
+        signal?.timeframe,
+        signal?.type,
+        signal?.entryPrice,
+      ]
+        .filter((value) => value !== undefined && value !== null)
+        .join('|');
+
+  const eventTime =
+    signal?.exitTime ||
+    signal?.updatedAt ||
+    signal?.signalTime ||
+    signal?.createdAt ||
+    '';
+
+  return `SIGNAL|${subType}|${String(baseId || '').trim()}|${normalizeEventTime(eventTime)}`;
+};
+
+const buildNotificationDedupKey = (signalEventKey, userId) =>
+  `SIG|${hashKey(`${signalEventKey}|${userId}`)}`;
+
+const buildJobId = (signalEventKey, userId, channel) =>
+  `sig_${hashKey(`${signalEventKey}|${userId}|${channel}`)}`;
+
+const isJobExistsError = (error) =>
+  error?.name === 'JobExistsError' ||
+  error?.code === 'ERR_JOB_EXISTS' ||
+  /already exists/i.test(error?.message || '');
+
+const addJobsInBatches = async (jobs, batchSize = 200) => {
+  let added = 0;
+  let skipped = 0;
+  let failed = 0;
+  const failureSamples = [];
+
+  for (let index = 0; index < jobs.length; index += batchSize) {
+    const batch = jobs.slice(index, index + batchSize);
+    const results = await Promise.allSettled(
+      batch.map((job) => notificationQueue.add(job.name, job.data, job.opts))
+    );
+
+    results.forEach((result, idx) => {
+      if (result.status === 'fulfilled') {
+        added += 1;
+        return;
+      }
+      if (isJobExistsError(result.reason)) {
+        skipped += 1;
+        return;
+      }
+      failed += 1;
+      if (failureSamples.length < 5) {
+        const err = result.reason;
+        failureSamples.push({
+          name: batch[idx]?.name,
+          code: err?.code || err?.name || 'UNKNOWN',
+          message: err?.message || String(err),
+        });
+      }
+    });
+
+    await yieldToEventLoop();
+  }
+
+  return { added, skipped, failed, failureSamples };
 };
 
 const mapLegacyPlanToAudienceGroups = (planName = '') => {
@@ -111,6 +202,16 @@ const yieldToEventLoop = () =>
 
 class NotificationService {
   constructor() {
+    this.signalQueue = [];
+    this.activeSignalTasks = 0;
+    const concurrency = Number.isFinite(config.notifications?.signalConcurrency)
+      ? config.notifications.signalConcurrency
+      : 10;
+    this.signalConcurrency = Math.max(concurrency, 1);
+    this.settingsCache = { value: null, expiresAt: 0 };
+    this.settingsCacheMs = Number.isFinite(config.notifications?.settingsCacheMs)
+      ? Math.max(config.notifications.settingsCacheMs, 0)
+      : 15000;
     this.init();
   }
 
@@ -126,7 +227,7 @@ class NotificationService {
         if (channel === 'signals') {
             try {
                 const signal = JSON.parse(message);
-                this.scheduleNotifications(signal);
+                this.enqueueSignal(signal);
             } catch (err) {
                 logger.error('Notification Service Error', err);
             }
@@ -136,15 +237,49 @@ class NotificationService {
     logger.info('Notification Service started (Listening for Signals)');
   }
 
+  enqueueSignal(signal) {
+    this.signalQueue.push(signal);
+    this.drainSignalQueue();
+  }
+
+  drainSignalQueue() {
+    while (this.activeSignalTasks < this.signalConcurrency && this.signalQueue.length > 0) {
+      const signal = this.signalQueue.shift();
+      this.activeSignalTasks += 1;
+      this.scheduleNotifications(signal)
+        .catch((error) => logger.error('Failed to process queued signal notification', error))
+        .finally(() => {
+          this.activeSignalTasks -= 1;
+          this.drainSignalQueue();
+        });
+    }
+  }
+
+  async getSettings() {
+    const now = Date.now();
+    if (this.settingsCacheMs > 0 && this.settingsCache.value && this.settingsCache.expiresAt > now) {
+      return this.settingsCache.value;
+    }
+
+    const settings = await Setting.find({
+      key: { $in: ['telegram_config', 'whatsapp_config', 'push_config', 'email_config', 'notification_templates'] }
+    }).lean();
+
+    this.settingsCache = {
+      value: settings,
+      expiresAt: now + this.settingsCacheMs,
+    };
+
+    return settings;
+  }
+
   async scheduleNotifications(signal) {
       try {
           const debugBroadcastAll =
               String(process.env.DEBUG_SIGNAL_BROADCAST_ALL || '').trim().toLowerCase() === 'true';
 
           // Fetch Global Notification Settings
-          const settings = await Setting.find({ 
-              key: { $in: ['telegram_config', 'whatsapp_config', 'push_config', 'email_config', 'notification_templates'] } 
-          });
+          const settings = await this.getSettings();
           const getSetting = (key) => {
               const s = settings.find(s => s.key === key);
               return s ? s.value : null;
@@ -322,9 +457,29 @@ class NotificationService {
           let whatsappSkippedNoPhone = 0;
           let whatsappSkippedDisabled = 0;
           let whatsappSkippedGlobal = 0;
+          const signalEventKey = buildSignalEventKey(signal);
+          const jobRetentionSeconds = Number.isFinite(config.notifications?.jobRetentionSeconds)
+            ? Math.max(config.notifications.jobRetentionSeconds, 60)
+            : 3600;
+          const jobAttempts = Number.isFinite(config.notifications?.jobAttempts)
+            ? Math.max(config.notifications.jobAttempts, 1)
+            : 3;
+          const jobBackoffMs = Number.isFinite(config.notifications?.jobBackoffMs)
+            ? Math.max(config.notifications.jobBackoffMs, 0)
+            : 1000;
+          const jobBatchSize = Number.isFinite(config.notifications?.jobBatchSize)
+            ? Math.max(config.notifications.jobBatchSize, 50)
+            : 200;
 
-          const promises = eligibleUsers.map((user) => {
-              const jobs = [];
+          const baseJobOptions = {
+              attempts: jobAttempts,
+              backoff: { type: 'exponential', delay: jobBackoffMs },
+              removeOnComplete: { age: jobRetentionSeconds },
+              removeOnFail: { age: jobRetentionSeconds },
+          };
+
+          const jobs = [];
+          eligibleUsers.forEach((user) => {
               const userId = user._id.toString();
 
               if (
@@ -332,19 +487,19 @@ class NotificationService {
                   user.isNotificationEnabled !== false &&
                   user.telegramChatId
               ) {
-                  jobs.push(notificationQueue.add('send-telegram', {
-                      type: 'telegram',
-                      userId,
-                      signal
-                  }, { removeOnComplete: true }));
+                  jobs.push({
+                      name: 'send-telegram',
+                      data: { type: 'telegram', userId, signal },
+                      opts: { ...baseJobOptions, jobId: buildJobId(signalEventKey, userId, 'telegram') }
+                  });
               }
 
               if (pushConfig && pushConfig.enabled && user.isNotificationEnabled !== false) {
-                  jobs.push(notificationQueue.add('send-push', {
-                      type: 'push',
-                      userId,
-                      signal
-                  }, { removeOnComplete: true }));
+                  jobs.push({
+                      name: 'send-push',
+                      data: { type: 'push', userId, signal },
+                      opts: { ...baseJobOptions, jobId: buildJobId(signalEventKey, userId, 'push') }
+                  });
               }
 
               if (!whatsappEnabled) {
@@ -355,26 +510,30 @@ class NotificationService {
                   whatsappSkippedNoPhone += 1;
               } else {
                   whatsappScheduled += 1;
-                  jobs.push(notificationQueue.add('send-whatsapp', {
-                      type: 'whatsapp',
-                      userId,
-                      signal
-                  }, { removeOnComplete: true }));
+                  jobs.push({
+                      name: 'send-whatsapp',
+                      data: { type: 'whatsapp', userId, signal },
+                      opts: { ...baseJobOptions, jobId: buildJobId(signalEventKey, userId, 'whatsapp') }
+                  });
               }
 
               if (emailEnabled && user.isEmailAlertEnabled !== false && user.email) {
-                  jobs.push(notificationQueue.add('send-email-signal', {
-                      type: 'email',
-                      userId,
-                      email: user.email,
-                      signal
-                  }, { removeOnComplete: true }));
+                  jobs.push({
+                      name: 'send-email-signal',
+                      data: { type: 'email', userId, email: user.email, signal },
+                      opts: { ...baseJobOptions, jobId: buildJobId(signalEventKey, userId, 'email') }
+                  });
               }
-              
-              return jobs;
           });
 
-          await Promise.all(promises.flat());
+          if (jobs.length > 0) {
+              const jobSummary = await addJobsInBatches(jobs, jobBatchSize);
+              if (jobSummary.failed > 0) {
+                  logger.warn('[ALERT] Notification queue job failures', jobSummary);
+              } else if (jobSummary.skipped > 0) {
+                  logger.debug('[ALERT] Duplicate notification jobs skipped', jobSummary);
+              }
+          }
 
           if (eligibleUsers.length > 0 && whatsappScheduled === 0) {
               logger.warn('[ALERT] No WhatsApp recipients for signal', {
@@ -406,12 +565,27 @@ class NotificationService {
               message: renderedSignalNotification.body,
               type: 'SIGNAL',
               data: { signalId: signal._id },
-              link: `/signals` 
+              link: `/signals`,
+              dedupKey: buildNotificationDedupKey(signalEventKey, user._id),
           }));
 
           if (notificationDocs.length > 0) {
-              const createdNotifications = await Notification.insertMany(notificationDocs);
-              emitRealtimeNotifications(createdNotifications);
+              const ops = notificationDocs.map((doc) => ({
+                  updateOne: {
+                      filter: { dedupKey: doc.dedupKey },
+                      update: { $setOnInsert: doc },
+                      upsert: true
+                  }
+              }));
+              const bulkResult = await Notification.bulkWrite(ops, { ordered: false });
+              const upserted = bulkResult?.getUpsertedIds
+                  ? bulkResult.getUpsertedIds()
+                  : Object.values(bulkResult?.upsertedIds || {});
+              const upsertedIds = upserted.map((entry) => entry?._id || entry);
+              if (upsertedIds.length > 0) {
+                  const createdNotifications = await Notification.find({ _id: { $in: upsertedIds } });
+                  emitRealtimeNotifications(createdNotifications);
+              }
           }
 
 

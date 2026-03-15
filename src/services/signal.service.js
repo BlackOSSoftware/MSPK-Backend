@@ -5,6 +5,7 @@ import logger from '../config/log.js';
 import { broadcastToRoles } from './websocket.service.js';
 import { getSignalAudienceGroups } from '../utils/signalRouting.js';
 import { resolveSymbolSegmentGroup } from '../utils/marketSegmentResolver.js';
+import { normalizeSignalTimeframe } from '../utils/timeframe.js';
 
 const CLOSED_SIGNAL_STATUSES = ['Closed', 'Target Hit', 'Partial Profit Book', 'Stoploss Hit'];
 const SIGNAL_DERIVED_DATES = {
@@ -263,6 +264,11 @@ setInterval(() => {
 }, 5 * 60 * 1000);
 
 const createSignal = async (signalBody, user) => {
+  if (signalBody.timeframe !== undefined) {
+    const normalizedTimeframe = normalizeSignalTimeframe(signalBody.timeframe);
+    signalBody.timeframe = normalizedTimeframe || signalBody.timeframe;
+  }
+
   await hydrateSignalSegment(signalBody);
   if (signalBody.uniqueId) {
     signalBody.uniqueId = String(signalBody.uniqueId).trim();
@@ -271,10 +277,13 @@ const createSignal = async (signalBody, user) => {
   }
 
   const normalizedSymbol = signalBody.symbol?.toUpperCase().trim();
+  const normalizedSegment = String(signalBody.segment || '').trim().toUpperCase();
+  const normalizedTimeframe = normalizeSignalTimeframe(signalBody.timeframe) || 'NA';
+  const normalizedType = String(signalBody.type || '').trim().toUpperCase();
   const normalizedPrice = Math.round(parseFloat(signalBody.entryPrice) * 100) / 100;
   const dedupKey = signalBody.uniqueId
     ? `UID_${signalBody.uniqueId}`
-    : `${normalizedSymbol}_${signalBody.type}_${normalizedPrice}`;
+    : `${normalizedSymbol}_${normalizedSegment}_${normalizedTimeframe}_${normalizedType}_${normalizedPrice}`;
   const now = Date.now();
 
   if (signalCreationGuard.has(dedupKey)) {
@@ -335,7 +344,18 @@ const buildSignalDedupStages = (filter = {}) => {
               },
               {
                 case: { $gt: [{ $strLenCP: { $ifNull: ['$webhookId', ''] } }, 0] },
-                then: { $concat: ['WH|', '$webhookId'] },
+                then: {
+                  $concat: [
+                    'WH|',
+                    '$webhookId',
+                    '|',
+                    { $ifNull: ['$symbol', ''] },
+                    '|',
+                    { $ifNull: ['$segment', ''] },
+                    '|',
+                    { $ifNull: ['$timeframe', ''] },
+                  ],
+                },
               },
             ],
             default: {
@@ -345,6 +365,8 @@ const buildSignalDedupStages = (filter = {}) => {
                 { $ifNull: ['$segment', ''] },
                 '|',
                 { $ifNull: ['$type', ''] },
+                '|',
+                { $ifNull: ['$timeframe', ''] },
                 '|',
                 { $toString: { $ifNull: ['$entryPrice', ''] } },
                 '|',
@@ -639,7 +661,7 @@ const getSignalReport = async (filter = {}) => {
       exitTime: signal?.exitTime || null,
       totalPoints: typeof resolvedPoints === 'number' ? resolvedPoints : null,
       exitReason: signal?.exitReason || '',
-      timeframe: signal?.timeframe || '',
+      timeframe: normalizeSignalTimeframe(signal?.timeframe) || signal?.timeframe || '',
       strategyName: signal?.strategyName || '',
       isFree: Boolean(signal?.isFree),
       notes: signal?.notes || '',
@@ -674,6 +696,10 @@ const updateSignalById = async (signalId, updateBody) => {
   }
 
   const { notificationMeta = null, ...persistedUpdateBody } = updateBody || {};
+  if (persistedUpdateBody.timeframe !== undefined) {
+    const normalizedTimeframe = normalizeSignalTimeframe(persistedUpdateBody.timeframe);
+    persistedUpdateBody.timeframe = normalizedTimeframe || persistedUpdateBody.timeframe;
+  }
   if (persistedUpdateBody.symbol || persistedUpdateBody.segment) {
     await hydrateSignalSegment(persistedUpdateBody);
   }
