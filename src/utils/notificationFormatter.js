@@ -1,3 +1,5 @@
+import { normalizeSignalTimeframe } from './timeframe.js';
+
 const numberFormatter = new Intl.NumberFormat('en-IN', {
   maximumFractionDigits: 2,
 });
@@ -30,6 +32,8 @@ export const formatPointsLabel = (value) => {
 export const getSignalTemplateKey = (signal) => signal?.subType || 'SIGNAL_NEW';
 
 export const buildSignalTemplateData = (signal = {}) => {
+  const normalizedTimeframe =
+    normalizeSignalTimeframe(signal.timeframe) || String(signal.timeframe || '').trim();
   const entryPrice = toFiniteNumber(signal.entryPrice);
   const stopLoss = toFiniteNumber(signal.stopLoss);
   const target1 = toFiniteNumber(signal.targets?.target1);
@@ -51,6 +55,7 @@ export const buildSignalTemplateData = (signal = {}) => {
 
   return {
     symbol: signal.symbol || '-',
+    timeframe: normalizedTimeframe || '-',
     type: signal.type || '-',
     entryPrice: formatNotificationNumber(entryPrice),
     stopLoss: formatNotificationNumber(stopLoss),
