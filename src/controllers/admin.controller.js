@@ -14,10 +14,6 @@ import { subBrokerService, announcementService } from '../services/index.js';
 import subscriptionService from '../services/subscription.service.js';
 import planService from '../services/plan.service.js';
 import subscriptionCron from '../jobs/subscriptionCron.js';
-import {
-    buildDefaultUserMarketWatchlistState,
-    resolveDefaultNewUserWatchlistSymbols,
-} from '../utils/defaultMarketWatchlists.js';
 
 const normalizeSubscriptionSegments = (segments) => {
     if (!Array.isArray(segments)) return [];
@@ -285,8 +281,6 @@ const createUser = catchAsync(async (req, res) => {
     const preferredSegments = mapSubscriptionToPreferred(normalizedSegments);
 
     const referralCode = Math.random().toString(36).substring(2, 8).toUpperCase();
-    const defaultWatchlistSymbols = await resolveDefaultNewUserWatchlistSymbols();
-    const defaultWatchlistState = buildDefaultUserMarketWatchlistState(defaultWatchlistSymbols);
 
     const user = await User.create({
         name,
@@ -300,7 +294,6 @@ const createUser = catchAsync(async (req, res) => {
         walletBalance,
         subBrokerId,
         status,
-        ...defaultWatchlistState,
         ...(preferredSegments.length > 0 ? { preferredSegments } : {}),
         referral: {
             code: referralCode

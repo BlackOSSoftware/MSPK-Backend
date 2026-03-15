@@ -347,14 +347,18 @@ const buildInitialMarketWatchlists = (rawWatchlists = [], fallbackSymbols = []) 
     });
 
     if (watchlists.length === 0) {
-        watchlists.push({
-            id: createMarketWatchlistId(),
-            name: DEFAULT_MARKET_WATCHLIST_NAME,
-            symbols: normalizeSelectedSymbols(fallbackSymbols),
-            isDefault: true,
-            createdAt: new Date(),
-            updatedAt: new Date(),
-        });
+        const normalizedFallback = normalizeSelectedSymbols(fallbackSymbols);
+        if (normalizedFallback.length > 0) {
+            const now = new Date();
+            watchlists.push({
+                id: createMarketWatchlistId(),
+                name: DEFAULT_MARKET_WATCHLIST_NAME,
+                symbols: normalizedFallback,
+                isDefault: true,
+                createdAt: now,
+                updatedAt: now,
+            });
+        }
     }
 
     return watchlists;
@@ -626,10 +630,6 @@ const resolveUserMarketWatchlistsState = async (user) => {
     initialWatchlists = stripped.watchlists;
     const forcedActiveWatchlistId = stripped.activeWatchlistId;
 
-    if (initialWatchlists.length === 0) {
-        initialWatchlists = buildInitialMarketWatchlists([], []);
-    }
-
     const allSymbols = normalizeSelectedSymbols(initialWatchlists.flatMap((item) => item.symbols));
     const symbolDocs = allSymbols.length
         ? await MasterSymbol.find({ symbol: { $in: allSymbols } })
@@ -849,10 +849,6 @@ const deleteUserWatchlist = catchAsync(async (req, res) => {
     }
 
     const { watchlists, activeWatchlistId } = await resolveUserMarketWatchlistsState(user);
-    if (watchlists.length <= 1) {
-        throw new ApiError(httpStatus.BAD_REQUEST, 'At least one watchlist is required');
-    }
-
     const index = watchlists.findIndex((item) => item.id === watchlistId);
     if (index === -1) {
         throw new ApiError(httpStatus.NOT_FOUND, 'Watchlist not found');
@@ -962,6 +958,9 @@ const getUserWatchlist = catchAsync(async (req, res) => {
         ? watchlists.find((item) => item.id === requestedWatchlistId) || null
         : activeWatchlist;
     if (!targetWatchlist) {
+        if (!requestedWatchlistId && watchlists.length === 0) {
+            return res.send([]);
+        }
         throw new ApiError(httpStatus.NOT_FOUND, 'Watchlist not found');
     }
 

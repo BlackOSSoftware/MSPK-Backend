@@ -9,17 +9,6 @@ const getWatchlists = catchAsync(async (req, res) => {
     .populate('signals')
     .sort({ createdAt: 1 });
 
-  // Create default if none exist
-  if (watchlists.length === 0) {
-    const defaultList = await Watchlist.create({
-      user: req.user._id,
-      name: 'Watchlist 1',
-      isDefault: true,
-      signals: []
-    });
-    watchlists = [defaultList];
-  }
-
   res.json(watchlists);
 });
 
@@ -58,11 +47,6 @@ const deleteWatchlist = catchAsync(async (req, res) => {
   if (!watchlist) {
     res.status(404);
     throw new Error('Watchlist not found');
-  }
-
-  if (watchlist.isDefault) {
-    res.status(400);
-    throw new Error('Cannot delete default watchlist');
   }
 
   await watchlist.deleteOne();
