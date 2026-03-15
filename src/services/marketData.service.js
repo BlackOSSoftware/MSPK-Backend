@@ -11,6 +11,7 @@ import logger from '../config/log.js';
 import { decrypt, encrypt } from '../utils/encryption.js';
 import cacheManager from './cacheManager.js';
 import { decorateSymbolSegment } from '../utils/marketSegmentResolver.js';
+import { dedupeSymbols } from '../utils/marketSymbolDedupe.js';
 import {
     hasExplicitContractMonth,
     isCurrentMonthContractDoc,
@@ -1828,7 +1829,7 @@ class MarketDataService extends EventEmitter {
                 }))
                     .map((item) => decorateSymbolSegment(item));
 
-                return dbMapped.slice(0, 50);
+                return dedupeSymbols(dbMapped).slice(0, 50);
             }, SYMBOL_SEARCH_CACHE_TTL);
         } catch (error) {
             logger.error(`MARKET_DATA: Search failed: ${error.message}`);

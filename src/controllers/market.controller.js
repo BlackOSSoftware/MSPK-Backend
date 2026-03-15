@@ -13,6 +13,7 @@ import {
     normalizeUpper,
     resolveSymbolSegmentGroup,
 } from '../utils/marketSegmentResolver.js';
+import { dedupeSymbols } from '../utils/marketSymbolDedupe.js';
 import { SEED_SYMBOLS } from '../config/seedSymbols.js';
 import { DEFAULT_MARKET_WATCHLIST_TEMPLATES } from '../config/defaultMarketWatchlistTemplates.js';
 import {
@@ -1499,17 +1500,18 @@ const getSymbols = catchAsync(async (req, res) => {
     const paginated = String(req.query.paginated || '').trim().toLowerCase() === 'true';
 
     const applySegmentFilter = (docs = []) => {
-        return docs
+        const filtered = docs
             .map(enrichSymbol)
             .filter((doc) => matchesSegmentGroup(doc, requestedSegment))
-            .filter((doc) => (requestedSegment === 'FNO' ? isCurrentMonthContractDoc(doc) : true))
-            .sort((left, right) => {
-                const activeDiff = Number(Boolean(right.isActive)) - Number(Boolean(left.isActive));
-                if (activeDiff !== 0) return activeDiff;
-                const segmentDiff = String(left.segmentGroup || left.segment || '').localeCompare(String(right.segmentGroup || right.segment || ''));
-                if (segmentDiff !== 0) return segmentDiff;
-                return String(left.symbol || '').localeCompare(String(right.symbol || ''));
-            });
+            .filter((doc) => (requestedSegment === 'FNO' ? isCurrentMonthContractDoc(doc) : true));
+
+        return dedupeSymbols(filtered).sort((left, right) => {
+            const activeDiff = Number(Boolean(right.isActive)) - Number(Boolean(left.isActive));
+            if (activeDiff !== 0) return activeDiff;
+            const segmentDiff = String(left.segmentGroup || left.segment || '').localeCompare(String(right.segmentGroup || right.segment || ''));
+            if (segmentDiff !== 0) return segmentDiff;
+            return String(left.symbol || '').localeCompare(String(right.symbol || ''));
+        });
     };
 
     if (!paginated) {
