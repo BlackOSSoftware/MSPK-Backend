@@ -23,8 +23,8 @@ const SYMBOLS_CACHE_VERSION_KEY = 'market_symbols_cache_version';
 const SYMBOLS_CACHE_TTL = '5m';
 const SYMBOL_SEARCH_CACHE_TTL = '5m';
 const CONTRACT_MONTH_TEXT_REGEX = /JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC/i;
-const CURRENT_MONTH_CONTRACT_EXCHANGES = ['MCX', 'NFO', 'CDS', 'BCD', 'NSEIX'];
-const CURRENT_MONTH_CONTRACT_SEGMENTS = ['FNO', 'COMMODITY', 'CURRENCY'];
+const CURRENT_MONTH_CONTRACT_EXCHANGES = ['MCX', 'COMEX', 'NYMEX', 'NFO', 'CDS', 'BCD', 'NSEIX'];
+const CURRENT_MONTH_CONTRACT_SEGMENTS = ['FNO', 'COMMODITY', 'COMEX', 'CURRENCY'];
 const KITE_HISTORY_ALIASES = new Map([
     ['BANKNIFTY', 'NSE:NIFTY BANK-INDEX'],
     ['NSE:BANKNIFTY', 'NSE:NIFTY BANK-INDEX'],
@@ -1867,6 +1867,7 @@ class MarketDataService extends EventEmitter {
                 synced: true,
                 provider: 'kite',
                 count: result?.count || 0,
+                nfoFutures: result?.nfoFutures || 0,
                 removedStaleContracts: cleanupResult.deletedCount || 0,
             };
         } catch (error) {

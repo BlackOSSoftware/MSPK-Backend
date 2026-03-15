@@ -8,6 +8,8 @@ const FOREX_CODES = new Set([
 
 const INDEX_HINTS = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'SENSEX', 'BANKEX', 'VIX', 'INDEX'];
 const COMMODITY_REGEX = /(?:CRUDE|WTI|BRENT|USOIL|UKOIL|XAU|XAG|GOLD|SILVER|NATURAL GAS|NG|COPPER|ALUMINIUM|ZINC|LEAD|NICKEL|MENTHA|COTTON|GUAR|JEERA|SOY|WHEAT|CORN|SUGAR)/i;
+const COMEX_EXCHANGES = new Set(['COMEX', 'NYMEX']);
+const COMEX_SUBSEGMENTS = new Set(['ENERGY', 'METALS', 'AGRICULTURE', 'FUTURES_OTHER', 'RATES_FUTURES']);
 
 const isCryptoLikeSymbol = (symbol = '') => {
   const normalized = normalizeUpper(symbol).replace(/(\.P|PERP)$/i, '');
@@ -49,10 +51,27 @@ const resolveSymbolSegmentGroup = (symbolDoc = {}) => {
     return 'CRYPTO';
   }
 
+  const isComexSegment = COMEX_EXCHANGES.has(segment);
+  const isComexExchange = COMEX_EXCHANGES.has(exchange);
+  const isComexCommodityHint = COMEX_SUBSEGMENTS.has(subsegment) || isCommodityLikeSymbol(symbol, name);
+
+  if (isComexExchange || (isComexSegment && isComexCommodityHint)) {
+    return 'COMEX';
+  }
+
   if (
-    ['COMMODITY', 'MCX', 'COMEX', 'NYMEX'].includes(segment) ||
-    ['MCX', 'COMEX', 'NYMEX'].includes(exchange) ||
-    ['ENERGY', 'METALS', 'AGRICULTURE'].includes(subsegment) ||
+    isCommodityLikeSymbol(symbol, name) &&
+    exchange &&
+    exchange !== 'MCX' &&
+    exchange !== 'NSE' &&
+    exchange !== 'BSE'
+  ) {
+    return 'COMEX';
+  }
+
+  if (
+    ['COMMODITY', 'MCX'].includes(segment) ||
+    exchange === 'MCX' ||
     isCommodityLikeSymbol(symbol, name)
   ) {
     return 'COMMODITY';
@@ -86,6 +105,10 @@ const resolveSymbolSegmentGroup = (symbolDoc = {}) => {
     ['NSE', 'BSE'].includes(exchange)
   ) {
     return 'EQUITY';
+  }
+
+  if (isComexSegment && !isComexCommodityHint && !isComexExchange) {
+    return exchange || 'OTHER';
   }
 
   return segment || exchange || 'OTHER';

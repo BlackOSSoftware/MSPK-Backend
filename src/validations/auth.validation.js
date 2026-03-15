@@ -18,16 +18,16 @@ const register = {
     tradingViewId: Joi.string().optional().allow(''),
     segments: Joi.array().items(
       Joi.string().valid(
-        'nse', 'all', 'option', 'options', 'mcx', 'forex', 'crypto',
-        'NSE', 'ALL', 'OPTION', 'OPTIONS', 'MCX', 'FOREX', 'CRYPTO',
-        'equity', 'commodity', 'EQUITY', 'COMMODITY'
+        'nse', 'all', 'option', 'options', 'mcx', 'comex', 'forex', 'crypto',
+        'NSE', 'ALL', 'OPTION', 'OPTIONS', 'MCX', 'COMEX', 'FOREX', 'CRYPTO',
+        'equity', 'commodity', 'comex', 'EQUITY', 'COMMODITY', 'COMEX'
       )
     ).optional(),
     preferredSegments: Joi.array().items(
       Joi.string().valid(
-        'nse', 'all', 'option', 'options', 'mcx', 'forex', 'crypto',
-        'NSE', 'ALL', 'OPTION', 'OPTIONS', 'MCX', 'FOREX', 'CRYPTO',
-        'equity', 'commodity', 'EQUITY', 'COMMODITY'
+        'nse', 'all', 'option', 'options', 'mcx', 'comex', 'forex', 'crypto',
+        'NSE', 'ALL', 'OPTION', 'OPTIONS', 'MCX', 'COMEX', 'FOREX', 'CRYPTO',
+        'equity', 'commodity', 'comex', 'EQUITY', 'COMMODITY', 'COMEX'
       )
     ).optional(),
     selectedPlanId: Joi.string().optional().allow(''),

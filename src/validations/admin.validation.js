@@ -29,9 +29,9 @@ const createUser = {
     segments: Joi.array().items(
       Joi.string().valid(
         'ALL',
-        'EQUITY', 'OPTIONS', 'FNO', 'COMMODITY', 'FOREX', 'CURRENCY', 'CRYPTO', 'BTST',
+        'EQUITY', 'OPTIONS', 'FNO', 'COMMODITY', 'COMEX', 'FOREX', 'CURRENCY', 'CRYPTO', 'BTST',
         'all',
-        'equity', 'options', 'fno', 'commodity', 'forex', 'currency', 'crypto', 'btst'
+        'equity', 'options', 'fno', 'commodity', 'comex', 'forex', 'currency', 'crypto', 'btst'
       )
     ).optional(),
     
@@ -58,9 +58,9 @@ const updateUser = {
       segments: Joi.array().items(
         Joi.string().valid(
           'ALL',
-          'EQUITY', 'OPTIONS', 'FNO', 'COMMODITY', 'FOREX', 'CURRENCY', 'CRYPTO', 'BTST',
+          'EQUITY', 'OPTIONS', 'FNO', 'COMMODITY', 'COMEX', 'FOREX', 'CURRENCY', 'CRYPTO', 'BTST',
           'all',
-          'equity', 'options', 'fno', 'commodity', 'forex', 'currency', 'crypto', 'btst'
+          'equity', 'options', 'fno', 'commodity', 'comex', 'forex', 'currency', 'crypto', 'btst'
         )
       ).optional(),
       status: Joi.string().valid('Active', 'Inactive', 'Suspended', 'Blocked'), // Includes new statuses
@@ -74,11 +74,11 @@ const assignCustomPlan = {
   body: Joi.object().keys({
       name: Joi.string().required(),
       description: Joi.string().allow(''),
-      segment: Joi.string().valid('EQUITY', 'FNO', 'COMMODITY', 'CURRENCY').optional().allow(''),
+      segment: Joi.string().valid('EQUITY', 'FNO', 'COMMODITY', 'COMEX', 'CURRENCY').optional().allow(''),
       segments: Joi.array().items(
         Joi.string().valid(
-          'EQUITY', 'FNO', 'COMMODITY', 'CURRENCY', 'CRYPTO', 'FOREX', 'OPTIONS',
-          'equity', 'fno', 'commodity', 'currency', 'crypto', 'forex', 'options'
+          'EQUITY', 'FNO', 'COMMODITY', 'COMEX', 'CURRENCY', 'CRYPTO', 'FOREX', 'OPTIONS',
+          'equity', 'fno', 'commodity', 'comex', 'currency', 'crypto', 'forex', 'options'
         )
       ).optional(),
       price: Joi.number().min(0).required(),

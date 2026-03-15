@@ -22,6 +22,7 @@ import {
     limitSelectedSymbolsPerSegment,
     normalizeSelectedSymbols,
 } from '../utils/userSignalSelection.js';
+import { isCurrentMonthContractDoc } from '../utils/currentMonthContracts.js';
 
 // Seed Data (Standard Set)
 import marketDataService from '../services/marketData.service.js';
@@ -217,6 +218,7 @@ const enrichMarketSymbols = (symbols) => {
             symbol: s.symbol,
             name: s.name,
             segment: s.segment,
+            segmentGroup: resolveSymbolSegmentGroup(s),
             exchange: s.exchange,
             provider: s.provider || null,
             price: live,
@@ -1384,6 +1386,7 @@ const SEED_SEGMENTS = [
     { name: 'Indices', code: 'INDICES' },
     { name: 'Futures & Options', code: 'FNO' },
     { name: 'Commodity', code: 'COMMODITY' },
+    { name: 'COMEX', code: 'COMEX' },
     { name: 'Currency', code: 'CURRENCY' },
     { name: 'BTST (Buy Today Sell Tomorrow)', code: 'BTST' }
 ];
@@ -1495,10 +1498,11 @@ const getSymbols = catchAsync(async (req, res) => {
     const filter = buildSymbolFilter(req.query, { ignoreSegment: true });
     const paginated = String(req.query.paginated || '').trim().toLowerCase() === 'true';
 
-    const applySegmentFilter = (docs = []) =>
-        docs
+    const applySegmentFilter = (docs = []) => {
+        return docs
             .map(enrichSymbol)
             .filter((doc) => matchesSegmentGroup(doc, requestedSegment))
+            .filter((doc) => (requestedSegment === 'FNO' ? isCurrentMonthContractDoc(doc) : true))
             .sort((left, right) => {
                 const activeDiff = Number(Boolean(right.isActive)) - Number(Boolean(left.isActive));
                 if (activeDiff !== 0) return activeDiff;
@@ -1506,6 +1510,7 @@ const getSymbols = catchAsync(async (req, res) => {
                 if (segmentDiff !== 0) return segmentDiff;
                 return String(left.symbol || '').localeCompare(String(right.symbol || ''));
             });
+    };
 
     if (!paginated) {
         const symbols = await MasterSymbol.find(filter).lean();

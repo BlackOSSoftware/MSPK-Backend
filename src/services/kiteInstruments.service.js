@@ -50,6 +50,16 @@ const buildAllowMap = () => {
     return map;
 };
 
+const isCurrentMonthExpiry = (expiry, referenceDate = new Date()) => {
+    if (!expiry) return false;
+    const expiryDate = expiry instanceof Date ? expiry : new Date(expiry);
+    if (Number.isNaN(expiryDate.getTime())) return false;
+    return (
+        expiryDate.getUTCFullYear() === referenceDate.getUTCFullYear() &&
+        expiryDate.getUTCMonth() === referenceDate.getUTCMonth()
+    );
+};
+
 class KiteInstrumentsService {
     constructor() {
         this.instruments = null;
@@ -75,7 +85,9 @@ class KiteInstrumentsService {
             }
 
             let synced = 0;
+            let nfoFuturesSynced = 0;
             const missing = new Set(allowMap.keys());
+            const referenceDate = new Date();
 
             for (const inst of instruments) {
                 const key = toUpper(`${inst.exchange}:${inst.tradingsymbol}`);
@@ -112,14 +124,55 @@ class KiteInstrumentsService {
                 synced += 1;
             }
 
+            for (const inst of instruments) {
+                const exchange = toUpper(inst.exchange);
+                if (exchange !== 'NFO') continue;
+
+                const instrumentType = toUpper(inst.instrument_type || inst.instrumentType);
+                if (!instrumentType.includes('FUT')) continue;
+                if (!isCurrentMonthExpiry(inst.expiry, referenceDate)) continue;
+
+                const tradingsymbol = toUpper(inst.tradingsymbol);
+                if (!tradingsymbol) continue;
+
+                const symbol = `${exchange}:${tradingsymbol}`;
+                const payload = {
+                    symbol,
+                    name: inst.name || tradingsymbol,
+                    segment: 'FNO',
+                    exchange,
+                    provider: 'kite',
+                    sourceSymbol: symbol,
+                    lotSize: inst.lot_size || 1,
+                    tickSize: inst.tick_size || 0.05,
+                    instrumentToken: String(inst.instrument_token),
+                    isActive: true,
+                    isWatchlist: false,
+                };
+
+                const doc = await MasterSymbol.findOneAndUpdate(
+                    { symbol: payload.symbol },
+                    { $set: payload },
+                    { upsert: true, new: true, setDefaultsOnInsert: true }
+                );
+
+                if (!doc.symbolId) {
+                    doc.symbolId = buildMasterSymbolId(doc);
+                    await doc.save();
+                }
+
+                nfoFuturesSynced += 1;
+            }
+
             if (missing.size > 0) {
                 logger.warn(`KITE_SYNC: Missing ${missing.size} symbols from allowlist`);
             }
 
             await this.loadIntoMemory();
             logger.info(`KITE_SYNC: Successfully synced ${synced} instruments into MongoDB`);
+            logger.info(`KITE_SYNC: Synced ${nfoFuturesSynced} current-month NFO futures`);
 
-            return { count: synced, missing: Array.from(missing) };
+            return { count: synced, missing: Array.from(missing), nfoFutures: nfoFuturesSynced };
         } catch (error) {
             logger.error(`KITE_SYNC: Sync failed: ${error.message}`);
             throw error;

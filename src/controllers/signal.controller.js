@@ -181,7 +181,7 @@ const getAllowedAccessFromPermissions = (permissions = []) => {
 
   // Map Permissions to Segments/Categories
   if (perms.includes('COMMODITY') || perms.includes('MCX_FUT')) {
-    allowedSegments.push('COMMODITY', 'MCX');
+    allowedSegments.push('COMMODITY', 'COMEX', 'MCX');
     allowedCategories.push('MCX_FUT');
   }
   if (perms.includes('EQUITY_INTRA') || perms.includes('EQUITY_DELIVERY')) {
