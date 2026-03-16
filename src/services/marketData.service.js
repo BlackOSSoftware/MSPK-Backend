@@ -186,6 +186,10 @@ class MarketDataService extends EventEmitter {
         this.kiteLatency = 0;
         this._instrumentTokenResolutionPromises = new Map();
 
+        this._kiteMcxFuturesIndex = null;
+        this._kiteMcxFuturesIndexBuiltAtMs = 0;
+        this._kiteMcxFuturesIndexPromise = null;
+
         this.marketDataTickCount = 0;
         this.marketDataLatency = 0;
 
@@ -210,6 +214,115 @@ class MarketDataService extends EventEmitter {
         this.maxQueuedTicks = Number.isFinite(configuredMaxQueuedTicks) && configuredMaxQueuedTicks > 0
             ? configuredMaxQueuedTicks
             : 50000;
+    }
+
+    async _getKiteMcxFuturesIndex() {
+        const nowMs = Date.now();
+        const ttlMs = 12 * 60 * 60 * 1000; // 12h
+
+        if (
+            this._kiteMcxFuturesIndex &&
+            nowMs - this._kiteMcxFuturesIndexBuiltAtMs < ttlMs
+        ) {
+            return this._kiteMcxFuturesIndex;
+        }
+
+        if (this._kiteMcxFuturesIndexPromise) {
+            return this._kiteMcxFuturesIndexPromise;
+        }
+
+        if (!this.adapter || typeof this.adapter.getInstruments !== 'function') {
+            return this._kiteMcxFuturesIndex || new Map();
+        }
+
+        this._kiteMcxFuturesIndexPromise = (async () => {
+            try {
+                const instruments = await this.adapter.getInstruments();
+                const index = new Map();
+
+                for (const inst of Array.isArray(instruments) ? instruments : []) {
+                    const exchange = String(inst?.exchange || '').trim().toUpperCase();
+                    if (exchange !== 'MCX') continue;
+
+                    const instrumentType = String(inst?.instrument_type || inst?.instrumentType || '').trim().toUpperCase();
+                    const segment = String(inst?.segment || '').trim().toUpperCase();
+                    const isFut = instrumentType.includes('FUT') || segment.includes('FUT');
+                    if (!isFut) continue;
+
+                    const nameKey = this._normalizeMarketSymbol(inst?.name || '');
+                    const tradingSymbol = this._normalizeMarketSymbol(inst?.tradingsymbol || '');
+                    const token = String(inst?.instrument_token ?? inst?.instrumentToken ?? '').trim();
+                    if (!nameKey || !tradingSymbol || !token) continue;
+
+                    const expiryRaw = inst?.expiry;
+                    const expiryDate = expiryRaw instanceof Date ? expiryRaw : new Date(expiryRaw);
+                    const expiry = Number.isNaN(expiryDate.getTime()) ? null : expiryDate;
+
+                    if (!index.has(nameKey)) {
+                        index.set(nameKey, []);
+                    }
+
+                    index.get(nameKey).push({
+                        tradingsymbol: tradingSymbol,
+                        instrument_token: token,
+                        expiry,
+                    });
+                }
+
+                for (const list of index.values()) {
+                    list.sort((left, right) => {
+                        const leftTime = left.expiry ? left.expiry.getTime() : Number.POSITIVE_INFINITY;
+                        const rightTime = right.expiry ? right.expiry.getTime() : Number.POSITIVE_INFINITY;
+                        return leftTime - rightTime;
+                    });
+                }
+
+                this._kiteMcxFuturesIndex = index;
+                this._kiteMcxFuturesIndexBuiltAtMs = Date.now();
+                return index;
+            } catch (error) {
+                logger.warn(`MARKET_DATA: Failed loading MCX futures index from Kite: ${error.message}`);
+                return this._kiteMcxFuturesIndex || new Map();
+            } finally {
+                this._kiteMcxFuturesIndexPromise = null;
+            }
+        })();
+
+        return this._kiteMcxFuturesIndexPromise;
+    }
+
+    async _resolveKiteMcxContinuousFuture(symbolDoc, canonicalSymbol) {
+        const exchange = String(symbolDoc?.exchange || canonicalSymbol?.split?.(':')?.[0] || '').trim().toUpperCase();
+        if (exchange !== 'MCX') return null;
+
+        // A symbol like "MCX:CRUDEOILM" is a continuous/root ticker, not a tradable contract in Kite.
+        // Resolve to the nearest-expiry future contract to fetch quotes / subscribe.
+        // Important: ignore `sourceSymbol` when deciding whether this is a contract doc, because `sourceSymbol`
+        // may already point to a specific expiry contract even when the canonical symbol is a continuous/root.
+        if (hasExplicitContractMonth({ symbol: canonicalSymbol, name: symbolDoc?.name })) {
+            return null;
+        }
+
+        const normalized = this._normalizeMarketSymbol(canonicalSymbol);
+        const base = normalized.includes(':') ? normalized.split(':').slice(1).join(':') : normalized;
+        const baseKey = this._normalizeMarketSymbol(base);
+        const nameKey = this._normalizeMarketSymbol(symbolDoc?.name || '');
+
+        const index = await this._getKiteMcxFuturesIndex();
+        const candidates =
+            index.get(baseKey) ||
+            (nameKey ? index.get(nameKey) : null) ||
+            [];
+        if (candidates.length === 0) return null;
+
+        const now = new Date();
+        const picked = candidates.find((item) => item.expiry && item.expiry >= now) || candidates[0];
+        if (!picked?.tradingsymbol || !picked?.instrument_token) return null;
+
+        return {
+            kiteSymbol: `MCX:${picked.tradingsymbol}`,
+            instrumentToken: String(picked.instrument_token).trim(),
+        };
     }
 
     async init() {
@@ -561,19 +674,38 @@ class MarketDataService extends EventEmitter {
         if (!canonical) return null;
 
         const inMemoryDoc = this.symbols[canonical] || null;
-        const existingToken = String(
-            symbolDoc?.instrumentToken || inMemoryDoc?.instrumentToken || ''
-        ).trim();
-        if (existingToken) {
-            this._rememberTokenAlias(existingToken, canonical);
-            return existingToken;
-        }
-
         const resolvedDoc = inMemoryDoc || symbolDoc || null;
         if (!resolvedDoc) return null;
         if (this._isMarketDataSymbol(resolvedDoc)) return null;
         if (!this._isIndianSymbol(canonical, resolvedDoc)) return null;
         if (!this.adapter || !this.config?.kite_access_token || !this.adapter.getQuote) return null;
+
+        const exchange = String(resolvedDoc?.exchange || canonical.split(':')[0] || '').trim().toUpperCase();
+        const isMcxContinuousRoot = exchange === 'MCX' && !hasExplicitContractMonth({ symbol: canonical, name: resolvedDoc?.name });
+
+        const existingToken = String(symbolDoc?.instrumentToken || inMemoryDoc?.instrumentToken || '').trim();
+        if (existingToken) {
+            // MCX continuous/root symbols should always track the near-expiry contract. Tokens change each expiry,
+            // so we validate against the current near-expiry token before reusing a persisted token.
+            if (!isMcxContinuousRoot) {
+                this._rememberTokenAlias(existingToken, canonical);
+                return existingToken;
+            }
+
+            try {
+                const desired = await this._resolveKiteMcxContinuousFuture(resolvedDoc, canonical);
+                const desiredToken = String(desired?.instrumentToken || '').trim();
+                if (desiredToken && desiredToken === existingToken) {
+                    this._rememberTokenAlias(existingToken, canonical);
+                    return existingToken;
+                }
+                // Token looks stale (or couldn't validate), fall through to resolve via quote below.
+            } catch (error) {
+                // If validation fails, reuse the existing token rather than breaking subscriptions.
+                this._rememberTokenAlias(existingToken, canonical);
+                return existingToken;
+            }
+        }
 
         const pending = this._instrumentTokenResolutionPromises.get(canonical);
         if (pending) {
@@ -581,12 +713,21 @@ class MarketDataService extends EventEmitter {
         }
 
         const task = (async () => {
-            const kiteSymbol = this._toKiteQuoteSymbol(canonical, resolvedDoc);
-            if (!kiteSymbol) return null;
+            const primaryKiteSymbol = this._toKiteQuoteSymbol(canonical, resolvedDoc);
+            if (!primaryKiteSymbol) return null;
 
             try {
                 const startedAt = Date.now();
-                const quoteData = await this.adapter.getQuote([kiteSymbol]);
+                let kiteSymbol = primaryKiteSymbol;
+                let mcxFallback = null;
+
+                if (isMcxContinuousRoot) {
+                    mcxFallback = await this._resolveKiteMcxContinuousFuture(resolvedDoc, canonical);
+                    if (mcxFallback?.kiteSymbol) {
+                        kiteSymbol = mcxFallback.kiteSymbol;
+                    }
+                }
+                let quoteData = await this.adapter.getQuote([kiteSymbol]);
                 this.kiteLatency = Date.now() - startedAt;
 
                 const item =
@@ -594,7 +735,28 @@ class MarketDataService extends EventEmitter {
                     quoteData?.[canonical] ||
                     Object.values(quoteData || {})[0] ||
                     null;
-                const token = String(item?.instrument_token || '').trim();
+                let token = String(item?.instrument_token || '').trim();
+
+                if (!token) {
+                    const fallback = mcxFallback || await this._resolveKiteMcxContinuousFuture(resolvedDoc, canonical);
+                    if (fallback?.kiteSymbol) {
+                        kiteSymbol = fallback.kiteSymbol;
+                        const retryStartedAt = Date.now();
+                        quoteData = await this.adapter.getQuote([kiteSymbol]);
+                        this.kiteLatency = Date.now() - retryStartedAt;
+
+                        const retryItem =
+                            quoteData?.[kiteSymbol] ||
+                            Object.values(quoteData || {})[0] ||
+                            null;
+                        token = String(retryItem?.instrument_token || fallback.instrumentToken || '').trim();
+
+                        if (retryItem) {
+                            // Swap in retry result for downstream processing.
+                            quoteData = { [kiteSymbol]: retryItem };
+                        }
+                    }
+                }
                 if (!token) {
                     logger.warn(`MARKET_DATA: Kite token resolution returned no instrument token for ${canonical}`);
                     return null;
@@ -604,27 +766,30 @@ class MarketDataService extends EventEmitter {
                     ...(typeof resolvedDoc?.toObject === 'function' ? resolvedDoc.toObject() : resolvedDoc),
                     symbol: canonical,
                     instrumentToken: token,
-                    sourceSymbol: resolvedDoc?.sourceSymbol || kiteSymbol,
+                    // For MCX continuous/root tickers we always map to the current near-expiry contract in memory.
+                    sourceSymbol: isMcxContinuousRoot ? kiteSymbol : (resolvedDoc?.sourceSymbol || kiteSymbol),
                 };
 
                 this.symbols[canonical] = nextDoc;
                 this._rememberSymbolCase(canonical);
                 this._rememberTokenAlias(token, canonical);
 
-                await MasterSymbol.findOneAndUpdate(
-                    { symbol: canonical },
-                    {
-                        $set: {
-                            instrumentToken: token,
-                            ...(resolvedDoc?.sourceSymbol ? {} : { sourceSymbol: kiteSymbol }),
+                if (!isMcxContinuousRoot) {
+                    await MasterSymbol.findOneAndUpdate(
+                        { symbol: canonical },
+                        {
+                            $set: {
+                                instrumentToken: token,
+                                ...(resolvedDoc?.sourceSymbol ? {} : { sourceSymbol: kiteSymbol }),
+                            },
                         },
-                    },
-                    { new: false }
-                ).catch((error) => {
-                    logger.warn(
-                        `MARKET_DATA: Failed persisting resolved Kite token for ${canonical}: ${error.message}`
-                    );
-                });
+                        { new: false }
+                    ).catch((error) => {
+                        logger.warn(
+                            `MARKET_DATA: Failed persisting resolved Kite token for ${canonical}: ${error.message}`
+                        );
+                    });
+                }
 
                 if (item && Number.isFinite(toNumber(item.last_price, NaN))) {
                     this.processLiveTicks(
@@ -731,11 +896,15 @@ class MarketDataService extends EventEmitter {
                 .select('_id symbol name segment exchange sourceSymbol')
                 .lean();
 
-            const staleDocs = candidates.filter(
-                (doc) =>
-                    hasExplicitContractMonth(doc, referenceDate) &&
-                    !isCurrentMonthContractDoc(doc, referenceDate)
-            );
+            const staleDocs = candidates.filter((doc) => {
+                // Only treat docs as explicit contracts if their *canonical* symbol/name encodes a month,
+                // not if their `sourceSymbol` happens to point at a specific expiry (e.g. MCX continuous roots).
+                const contractLike = { symbol: doc.symbol, name: doc.name };
+                return (
+                    hasExplicitContractMonth(contractLike, referenceDate) &&
+                    !isCurrentMonthContractDoc(contractLike, referenceDate)
+                );
+            });
 
             if (staleDocs.length === 0) {
                 return { deletedCount: 0, deletedSymbols: [] };
@@ -849,9 +1018,14 @@ class MarketDataService extends EventEmitter {
 
         if (!symbolDoc) return canonical;
 
-        if (!symbolDoc.instrumentToken) {
+        const exchange = String(symbolDoc?.exchange || canonical.split(':')[0] || '').trim().toUpperCase();
+        const isMcxContinuousRoot =
+            exchange === 'MCX' &&
+            !hasExplicitContractMonth({ symbol: canonical, name: symbolDoc?.name });
+
+        if (!symbolDoc.instrumentToken || isMcxContinuousRoot) {
             const resolvedToken = await this._ensureKiteInstrumentToken(symbolDoc);
-            if (resolvedToken) {
+            if (resolvedToken && resolvedToken !== symbolDoc.instrumentToken) {
                 symbolDoc = this.symbols[symbolDoc.symbol] || { ...symbolDoc, instrumentToken: resolvedToken };
             }
         }
@@ -1589,20 +1763,18 @@ class MarketDataService extends EventEmitter {
         const toTs = parseTs(to, Math.floor(Date.now() / 1000));
         try {
             const symbolDoc = this.symbols[historySymbol] || this.symbols[canonical] || null;
-            const kiteInstrument =
-                symbolDoc?.instrumentToken ||
-                kiteInstrumentsService.getInstrumentBySymbol(historySymbol)?.instrument_token ||
-                kiteInstrumentsService.getInstrumentBySymbol(canonical)?.instrument_token ||
-                null;
+            const isIndianSymbol = this._isIndianSymbol(historySymbol, symbolDoc);
             const canUseKite = Boolean(
-                kiteInstrument &&
                 this.config.kite_api_key &&
                 this.config.kite_api_secret &&
                 this.config.kite_access_token
             );
+            // Only prefer Kite when (a) the symbol is clearly Indian (NSE/BSE/MCX/NFO/...) OR
+            // (b) we have a symbol doc that indicates this is not a market-data (MT5) symbol.
+            // This avoids mistakenly routing unknown non-Indian symbols to Kite.
             const shouldUseKite = canUseKite && (
-                this._isIndianSymbol(historySymbol, symbolDoc) ||
-                !this._isMarketDataSymbol(symbolDoc)
+                isIndianSymbol ||
+                (symbolDoc && !this._isMarketDataSymbol(symbolDoc))
             );
 
             if (shouldUseKite) {
@@ -1613,28 +1785,89 @@ class MarketDataService extends EventEmitter {
                     : 0;
                 const cacheKey = `history_${historySymbol}_${resolution}_${fromKey}_${toKey}_${countKey}`;
 
-                return await cacheManager.getOrFetch(cacheKey, async () => {
-                    if (this.kiteAuthBrokenUntil && Date.now() < this.kiteAuthBrokenUntil) {
-                        logger.warn(`MARKET_DATA: Skipping Kite history for ${historySymbol}; auth cooldown active`);
-                        return [];
+                const cached = await cacheManager.get(cacheKey);
+                if (Array.isArray(cached) && cached.length > 0) {
+                    return cached.filter((candle) => candle && candle.time && candle.close !== undefined);
+                }
+
+                if (this.kiteAuthBrokenUntil && Date.now() < this.kiteAuthBrokenUntil) {
+                    logger.warn(`MARKET_DATA: Skipping Kite history for ${historySymbol}; auth cooldown active`);
+                    return [];
+                }
+
+                // History requests may come in before `init()` finishes (server starts listening without awaiting it),
+                // or with live feed disabled. Ensure Kite is usable for REST history fetches.
+                try {
+                    if (this.adapter !== kiteService) {
+                        this.adapter = kiteService;
                     }
+                    if (!kiteService.kite || kiteService.apiKey !== this.config.kite_api_key) {
+                        kiteService.initialize(this.config.kite_api_key, this.config.kite_api_secret);
+                    }
+                    if (this.config.kite_access_token && kiteService.accessToken !== this.config.kite_access_token) {
+                        kiteService.setAccessToken(this.config.kite_access_token);
+                    }
+                } catch (error) {
+                    logger.warn(`MARKET_DATA: Failed ensuring Kite client for history: ${error.message}`);
+                }
 
-                    const data = await this._fetchKiteHistory(
-                        historySymbol,
-                        resolution,
-                        new Date(fromTs * 1000),
-                        new Date(toTs * 1000),
-                        kiteInstrument,
-                        countOverride
-                    );
+                let kiteInstrument =
+                    symbolDoc?.instrumentToken ||
+                    kiteInstrumentsService.getInstrumentBySymbol(historySymbol)?.instrument_token ||
+                    kiteInstrumentsService.getInstrumentBySymbol(canonical)?.instrument_token ||
+                    null;
 
-                    return Array.isArray(data)
-                        ? data.filter((candle) => candle && candle.time && candle.close !== undefined)
-                        : [];
-                }, '24h');
+                // For most user-added NSE/MCX symbols we won't have an instrument token stored upfront.
+                // Resolve the token on-demand so charts don't render empty.
+                if (!kiteInstrument) {
+                    const exchangeFallback = String(
+                        canonical.includes(':')
+                            ? canonical.split(':')[0]
+                            : historySymbol.includes(':')
+                                ? historySymbol.split(':')[0]
+                                : symbolDoc?.exchange || ''
+                    )
+                        .trim()
+                        .toUpperCase();
+
+                    const tokenDoc = symbolDoc || {
+                        symbol: canonical,
+                        ...(exchangeFallback ? { exchange: exchangeFallback } : {}),
+                    };
+
+                    const resolvedToken = await this._ensureKiteInstrumentToken(tokenDoc);
+                    if (resolvedToken) {
+                        kiteInstrument = resolvedToken;
+                    }
+                }
+
+                if (!kiteInstrument) {
+                    logger.warn(`MARKET_DATA: Unable to resolve Kite instrument token for history ${historySymbol}`);
+                    return [];
+                }
+
+                const data = await this._fetchKiteHistory(
+                    historySymbol,
+                    resolution,
+                    new Date(fromTs * 1000),
+                    new Date(toTs * 1000),
+                    kiteInstrument,
+                    countOverride
+                );
+
+                const filtered = Array.isArray(data)
+                    ? data.filter((candle) => candle && candle.time && candle.close !== undefined)
+                    : [];
+
+                // Avoid caching empty arrays: history may be empty due to transient auth/token issues.
+                if (filtered.length > 0) {
+                    await cacheManager.set(cacheKey, filtered, '24h');
+                }
+
+                return filtered;
             }
 
-            if (this._isIndianSymbol(historySymbol, symbolDoc)) {
+            if (isIndianSymbol) {
                 logger.warn(`MARKET_DATA: Skipping MT5 history for Indian symbol ${historySymbol}`);
                 return [];
             }
@@ -1816,7 +2049,7 @@ class MarketDataService extends EventEmitter {
                     .lean();
 
                 const dbMapped = dbSymbols
-                    .filter((item) => isCurrentMonthContractDoc(item))
+                    .filter((item) => isCurrentMonthContractDoc({ symbol: item.symbol, name: item.name }))
                     .map((item) => ({
                     symbol: item.symbol,
                     name: item.name,

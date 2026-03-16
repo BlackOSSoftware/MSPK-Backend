@@ -348,17 +348,15 @@ const buildInitialMarketWatchlists = (rawWatchlists = [], fallbackSymbols = []) 
 
     if (watchlists.length === 0) {
         const normalizedFallback = normalizeSelectedSymbols(fallbackSymbols);
-        if (normalizedFallback.length > 0) {
-            const now = new Date();
-            watchlists.push({
-                id: createMarketWatchlistId(),
-                name: DEFAULT_MARKET_WATCHLIST_NAME,
-                symbols: normalizedFallback,
-                isDefault: true,
-                createdAt: now,
-                updatedAt: now,
-            });
-        }
+        const now = new Date();
+        watchlists.push({
+            id: createMarketWatchlistId(),
+            name: DEFAULT_MARKET_WATCHLIST_NAME,
+            symbols: normalizedFallback,
+            isDefault: true,
+            createdAt: now,
+            updatedAt: now,
+        });
     }
 
     return watchlists;
