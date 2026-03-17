@@ -86,10 +86,52 @@ const resolveSymbolSegmentGroup = (symbolDoc = {}) => {
     return 'CRYPTO';
   }
 
+  const isMcx = exchange === 'MCX' || segment === 'MCX';
+
+  // For explicitly Indian symbols (Kite instruments or prefixed "NSE:...", "MCX:..." etc),
+  // segment should be decided primarily by exchange. Avoid "name keyword" false-positives like
+  // "Oil & Natural Gas Corporation" getting bucketed as COMEX/COMMODITY.
+  if (isExplicitIndianExchange) {
+    if (isMcx) {
+      return 'COMMODITY';
+    }
+
+    if (
+      ['CURRENCY', 'FOREX', 'CDS', 'BCD', 'FX', 'CUR'].includes(segment) ||
+      ['FOREX', 'CDS', 'BCD'].includes(exchange) ||
+      isForexPair(symbol)
+    ) {
+      return 'CURRENCY';
+    }
+
+    if (
+      ['INDICES', 'INDEX', 'NSEIX'].includes(segment) ||
+      exchange === 'NSEIX' ||
+      isIndexLikeSymbol(symbol, name)
+    ) {
+      return 'INDICES';
+    }
+
+    if (
+      ['FNO', 'FO', 'NFO', 'OPTIONS', 'OPTION', 'FUTURES'].includes(segment) ||
+      exchange === 'NFO'
+    ) {
+      return 'FNO';
+    }
+
+    if (
+      ['EQUITY', 'EQ', 'CM', 'NSE', 'BSE'].includes(segment) ||
+      ['NSE', 'BSE'].includes(exchange)
+    ) {
+      return 'EQUITY';
+    }
+
+    return segment || exchange || 'OTHER';
+  }
+
   const isComexSegment = COMEX_EXCHANGES.has(segment);
   const isComexExchange = COMEX_EXCHANGES.has(exchange);
 
-  const isMcx = exchange === 'MCX' || segment === 'MCX';
   if (isMcx) {
     return 'COMMODITY';
   }
@@ -99,15 +141,8 @@ const resolveSymbolSegmentGroup = (symbolDoc = {}) => {
   }
 
   const isCommodityHint = isCommodityLikeSymbol(symbol, name);
-  if (isCommodityHint && !isExplicitIndianExchange) {
-    // Outside MCX, commodity-like symbols belong to the global COMEX bucket (e.g. XAUUSD, XAGUSD, USOIL).
-    return 'COMEX';
-  }
-
-  if (
-    ['COMMODITY', 'MCX'].includes(segment)
-  ) {
-    // If something was stored as COMMODITY but is not explicitly MCX, treat it as COMEX (global commodities).
+  if (isCommodityHint) {
+    // Commodity-like symbols that are not explicitly Indian MCX belong to the global COMEX bucket (e.g. XAUUSD, XAGUSD, USOIL).
     return 'COMEX';
   }
 
@@ -139,10 +174,6 @@ const resolveSymbolSegmentGroup = (symbolDoc = {}) => {
     ['NSE', 'BSE'].includes(exchange)
   ) {
     return 'EQUITY';
-  }
-
-  if (isComexSegment && !isComexCommodityHint && !isComexExchange) {
-    return exchange || 'OTHER';
   }
 
   return segment || exchange || 'OTHER';
