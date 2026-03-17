@@ -84,6 +84,24 @@ const resolutionToKiteInterval = (resolution) => {
     return 'minute';
 };
 
+const resolutionToSeconds = (resolution) => {
+    const normalized = String(resolution || '').trim().toUpperCase();
+
+    if (normalized === 'D' || normalized === '1D' || normalized === 'DAY') return 24 * 60 * 60;
+    if (normalized === 'W' || normalized === '1W' || normalized === 'WEEK') return 7 * 24 * 60 * 60;
+    if (normalized === 'M' || normalized === '1M' || normalized === 'MN' || normalized === 'MONTH') return 30 * 24 * 60 * 60;
+    if (normalized === '1H' || normalized === '60') return 60 * 60;
+    if (normalized.endsWith('H')) {
+        const hours = Number.parseInt(normalized.replace('H', ''), 10);
+        if (Number.isFinite(hours) && hours > 0) return hours * 60 * 60;
+    }
+
+    const minutes = Number.parseInt(normalized, 10);
+    if (Number.isFinite(minutes) && minutes > 0) return minutes * 60;
+
+    return 60;
+};
+
 const isWeeklyResolution = (resolution) => {
     const normalized = String(resolution || '').trim().toUpperCase();
     return normalized === 'W' || normalized === '1W' || normalized === 'WEEK';
@@ -1881,10 +1899,21 @@ class MarketDataService extends EventEmitter {
                     return [];
                 }
 
+                const requestedCount = Number.parseInt(countOverride, 10) || 0;
+                let effectiveFromTs = fromTs;
+                if (requestedCount > 0) {
+                    const sourceResolution = isAggregatedResolution(resolution) ? 'D' : resolution;
+                    const intervalSeconds = resolutionToSeconds(sourceResolution);
+                    const isIntraday = intervalSeconds < 24 * 60 * 60;
+                    const lookbackMultiplier = isIndianSymbol && isIntraday ? 6 : 2;
+                    const minimumLookbackSeconds = Math.max(intervalSeconds * requestedCount * lookbackMultiplier, 24 * 60 * 60);
+                    effectiveFromTs = Math.min(fromTs, Math.max(0, toTs - minimumLookbackSeconds));
+                }
+
                 const data = await this._fetchKiteHistory(
                     historySymbol,
                     resolution,
-                    new Date(fromTs * 1000),
+                    new Date(effectiveFromTs * 1000),
                     new Date(toTs * 1000),
                     kiteInstrument,
                     countOverride

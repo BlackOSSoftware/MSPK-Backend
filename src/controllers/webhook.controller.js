@@ -1,7 +1,6 @@
 import httpStatus from 'http-status';
 import mongoose from 'mongoose';
 import Signal from '../models/Signal.js';
-import MasterSymbol from '../models/MasterSymbol.js';
 import catchAsync from '../utils/catchAsync.js';
 import logger from '../config/log.js';
 import { signalService } from '../services/index.js';
@@ -10,10 +9,8 @@ import {
   normalizeSignalSegment,
   normalizeSignalSymbol,
 } from '../utils/signalRouting.js';
-import { expandSelectedSymbols } from '../utils/userSignalSelection.js';
+import { resolveBestMasterSymbol } from '../utils/masterSymbolResolver.js';
 import { buildTimeframeQuery, normalizeSignalTimeframe } from '../utils/timeframe.js';
-
-const escapeRegex = (value = '') => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 const parseBoolean = (value) => {
   if (value === undefined || value === null) return undefined;
@@ -129,35 +126,7 @@ const getWebhookSymbolInput = (body = {}) =>
 const looksLikeMasterSymbolId = (value) => /-[a-f0-9]{24}$/i.test(String(value || '').trim());
 
 const resolveMasterSymbol = async (input, { symbolIdRequested = false } = {}) => {
-  const rawInput = String(input || '').trim();
-  if (!rawInput) return null;
-
-  const normalizedSymbol = normalizeSignalSymbol(rawInput);
-  const symbolAliases = Array.from(new Set([normalizedSymbol, ...expandSelectedSymbols([normalizedSymbol])]));
-
-  const bySymbol = await MasterSymbol.findOne({ symbol: { $in: symbolAliases } }).lean();
-  if (bySymbol) return bySymbol;
-
-  const bySourceSymbol = await MasterSymbol.findOne({ sourceSymbol: { $in: symbolAliases } }).lean();
-  if (bySourceSymbol) return bySourceSymbol;
-
-  const byName = await MasterSymbol.findOne({ name: new RegExp(`^${escapeRegex(rawInput)}$`, 'i') }).lean();
-  if (byName) return byName;
-
-  if (!symbolIdRequested && !mongoose.Types.ObjectId.isValid(rawInput)) {
-    return null;
-  }
-
-  const filters = [{ symbol: { $in: symbolAliases } }, { sourceSymbol: { $in: symbolAliases } }];
-
-  if (mongoose.Types.ObjectId.isValid(rawInput)) {
-    filters.unshift({ _id: rawInput });
-  }
-
-  filters.unshift({ symbolId: new RegExp(`^${escapeRegex(rawInput)}$`, 'i') });
-  filters.push({ name: new RegExp(`^${escapeRegex(rawInput)}$`, 'i') });
-
-  return MasterSymbol.findOne({ $or: filters }).lean();
+  return resolveBestMasterSymbol(input, { symbolIdRequested });
 };
 
 const receiveSignal = catchAsync(async (req, res) => {

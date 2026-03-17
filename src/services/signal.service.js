@@ -6,7 +6,7 @@ import { broadcastToRoles } from './websocket.service.js';
 import { getSignalAudienceGroups } from '../utils/signalRouting.js';
 import { resolveSymbolSegmentGroup } from '../utils/marketSegmentResolver.js';
 import { normalizeSignalTimeframe } from '../utils/timeframe.js';
-import { expandSelectedSymbols } from '../utils/userSignalSelection.js';
+import { resolveBestMasterSymbol } from '../utils/masterSymbolResolver.js';
 
 const CLOSED_SIGNAL_STATUSES = ['Closed', 'Target Hit', 'Partial Profit Book', 'Stoploss Hit'];
 const SIGNAL_DERIVED_DATES = {
@@ -232,17 +232,7 @@ const hydrateSignalSegment = async (signalBody = {}) => {
   const normalizedSymbol = String(signalBody?.symbol || '').trim().toUpperCase();
   if (!normalizedSymbol) return signalBody;
 
-  const symbolAliases = Array.from(new Set([normalizedSymbol, ...expandSelectedSymbols([normalizedSymbol])]));
-
-  const masterSymbol = await MasterSymbol.findOne({
-    $or: [
-      { symbol: { $in: symbolAliases } },
-      { sourceSymbol: { $in: symbolAliases } },
-      { name: new RegExp(`^${normalizedSymbol.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') },
-    ],
-  })
-    .select('symbol segment exchange subsegment name sourceSymbol')
-    .lean();
+  const masterSymbol = await resolveBestMasterSymbol(normalizedSymbol);
 
   if (masterSymbol) {
     signalBody.symbol = String(masterSymbol.symbol || normalizedSymbol).trim().toUpperCase();

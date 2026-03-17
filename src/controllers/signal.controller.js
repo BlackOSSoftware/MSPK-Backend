@@ -10,6 +10,7 @@ import {
   getUserSelectedSymbols,
   hasSelectedSignalSymbol,
 } from '../utils/userSignalSelection.js';
+import { pickBestMasterSymbol } from '../utils/masterSymbolResolver.js';
 import { resolveSymbolSegmentGroup } from '../utils/marketSegmentResolver.js';
 import { buildTimeframeQuery, normalizeSignalTimeframe } from '../utils/timeframe.js';
 
@@ -127,13 +128,13 @@ const resolveSignalMasterSymbols = async (signals = []) => {
     const normalizedRaw = normalizeSignalLookupKey(rawSymbol);
     const aliases = new Set(expandSelectedSymbols([rawSymbol]).map((item) => normalizeSignalLookupKey(item)));
     aliases.add(normalizedRaw);
-
-    const resolved = masterSymbols.find((doc) => {
+    const candidates = masterSymbols.filter((doc) => {
       const symbol = normalizeSignalLookupKey(doc?.symbol);
       const sourceSymbol = normalizeSignalLookupKey(doc?.sourceSymbol);
       const name = normalizeSignalLookupKey(doc?.name);
       return aliases.has(symbol) || aliases.has(sourceSymbol) || name === normalizedRaw;
     });
+    const resolved = pickBestMasterSymbol(rawSymbol, candidates);
 
     if (resolved) {
       resolvedByRawSymbol.set(normalizedRaw, resolved);
