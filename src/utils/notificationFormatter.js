@@ -68,7 +68,8 @@ const formatSignalTimestamp = (value) => {
   });
 };
 
-export const getSignalTemplateKey = (signal) => signal?.subType || 'SIGNAL_NEW';
+export const getSignalTemplateKey = (signal) =>
+  String(signal?.subType || 'SIGNAL_NEW').trim().toUpperCase();
 
 export const buildSignalTemplateData = (signal = {}) => {
   const normalizedTimeframe =

@@ -16,6 +16,50 @@ import {
   renderNotificationTemplate,
 } from '../utils/notificationFormatter.js';
 
+const getMsg91TemplateId = (key) => {
+  if (!key) return '';
+  return String(process.env[`MSG91_TEMPLATE_${key}`] || '').trim();
+};
+
+const extractTemplateKeys = (template = {}) => {
+  const keys = new Set();
+  const pushMatches = (text = '') => {
+    const regex = /{{\s*([a-zA-Z0-9_]+)\s*}}/g;
+    let match = null;
+    while ((match = regex.exec(String(text))) !== null) {
+      keys.add(match[1]);
+    }
+  };
+
+  pushMatches(template.title);
+  pushMatches(template.body);
+  return Array.from(keys);
+};
+
+const buildTemplateVariables = (templateKey, templateVars = {}, activeTemplates = {}) => {
+  const template = activeTemplates?.[templateKey];
+  const keys = template ? extractTemplateKeys(template) : [];
+  if (keys.length === 0) {
+    return { ...templateVars };
+  }
+
+  const vars = {};
+  keys.forEach((key) => {
+    const value = templateVars?.[key];
+    vars[key] = value !== undefined && value !== null ? String(value) : '';
+  });
+  return vars;
+};
+
+const buildTemplateVariablesFromKeys = (keys = [], templateVars = {}) => {
+  const vars = {};
+  keys.forEach((key) => {
+    const value = templateVars?.[key];
+    vars[key] = value !== undefined && value !== null ? String(value) : '';
+  });
+  return vars;
+};
+
 // Ensure Firebase is initialized in worker context
 initializeFirebase();
 
@@ -181,25 +225,30 @@ const notificationWorker = new Worker('notifications', async (job) => {
       let title = 'Notification';
       let message = '';
       let html = '';
+      let templateId = '';
+      let templateVars = null;
       
       if (signal) {
-          const data = buildSignalTemplateData(signal);
+          const signalData = buildSignalTemplateData(signal);
           const templateKey = getSignalTemplateKey(signal);
-          const rendered = renderNotificationTemplate(activeTemplates, templateKey, data);
+          const rendered = renderNotificationTemplate(activeTemplates, templateKey, signalData);
           title = rendered.title;
           message = rendered.body;
           html = buildEmailHtml(title, message);
+          templateId = getMsg91TemplateId(templateKey);
+          templateVars = buildTemplateVariables(templateKey, signalData, activeTemplates);
       } else if (announcement) {
           // Determine subtype
           let templateKey = 'ANNOUNCEMENT';
           if (announcement.type === 'ECONOMIC') templateKey = 'ECONOMIC_ALERT';
           if (announcement.type === 'REMINDER') templateKey = 'PLAN_EXPIRY_REMINDER';
-          if (announcement.type === 'TICKET_REPLY') templateKey = 'TICKET_REPLY';
           
           const rendered = renderNotificationTemplate(activeTemplates, templateKey, announcement);
           title = rendered.title;
           message = rendered.body;
           html = buildEmailHtml(title, message);
+          templateId = getMsg91TemplateId(templateKey);
+          templateVars = buildTemplateVariables(templateKey, announcement, activeTemplates);
       } else if (notification && !isEmailJob) {
           title = notification.title || notification?.notification?.title || 'Notification';
           message =
@@ -213,6 +262,19 @@ const notificationWorker = new Worker('notifications', async (job) => {
           title = rendered.subject;
           message = rendered.text;
           html = rendered.html;
+          if (template === 'pre-expiry-reminder') {
+              templateId = getMsg91TemplateId('PRE_EXPIRY_REMINDER');
+              templateVars = buildTemplateVariablesFromKeys(
+                ['userName', 'planName', 'daysLeft', 'expiryDate', 'renewLink'],
+                data || {}
+              );
+          } else if (template === 'subscription-expired') {
+              templateId = getMsg91TemplateId('SUBSCRIPTION_EXPIRED');
+              templateVars = buildTemplateVariablesFromKeys(
+                ['userName', 'planName', 'renewLink'],
+                data || {}
+              );
+          }
       } else {
           logger.warn('Unknown notification payload');
           return;
@@ -301,12 +363,19 @@ const notificationWorker = new Worker('notifications', async (job) => {
           }
       }
       else if (type === 'email') {
-          const emailConfig = getSetting('email_config') || {};
-          const emailEnabled = emailConfig.enabled !== false;
           const recipientEmail = email || user?.email;
 
-          if (emailEnabled && recipientEmail) {
-              await emailService.sendEmail(recipientEmail, title, message, html || buildEmailHtml(title, message));
+          if (recipientEmail) {
+              if (templateId) {
+                  const sent = await emailService.sendEmailTemplate(recipientEmail, templateId, templateVars || {});
+                  if (!sent) {
+                      logger.warn(`[EmailWorker] Template send failed, falling back to raw email. Template=${templateId}`);
+                      await emailService.sendEmail(recipientEmail, title, message, html || buildEmailHtml(title, message));
+                  }
+              } else {
+                  logger.warn('[EmailWorker] Missing templateId. Falling back to raw email.');
+                  await emailService.sendEmail(recipientEmail, title, message, html || buildEmailHtml(title, message));
+              }
           } else {
               logger.debug(`Skipping Email for job ${job.id} - disabled or recipient missing`);
           }

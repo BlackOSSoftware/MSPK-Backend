@@ -52,11 +52,5 @@ export default {
     PLAN_EXPIRY_REMINDER: {
         title: "Plan Expiry Reminder",
         body: "Your subscription for {{planName}} is expiring in {{daysLeft}} days. Renew now to continue services."
-    },
-
-    // Support
-    TICKET_REPLY: {
-        title: "New Reply: Ticket #{{ticketId}}",
-        body: "Admin: {{message}}"
     }
 };

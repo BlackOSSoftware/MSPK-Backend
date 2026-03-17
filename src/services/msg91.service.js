@@ -273,6 +273,44 @@ class Msg91Service {
             return false;
         }
     }
+
+    /**
+     * Send Email via MSG91 Template
+     * @param {string} to - Recipient Email
+     * @param {string} templateId - MSG91 template_id
+     * @param {Object} variables - template variables
+     * @returns {Promise<boolean>}
+     */
+    async sendEmailTemplate(to, templateId, variables = {}) {
+        if (!this.authKey || !templateId) return false;
+
+        try {
+            const url = "https://control.msg91.com/api/v5/email/send";
+            const payload = {
+                to: [{ email: to }],
+                from: {
+                    email: process.env.MSG91_FROM_EMAIL,
+                    name: "MSPK Support"
+                },
+                domain: process.env.MSG91_EMAIL_DOMAIN,
+                template_id: templateId,
+                variables: variables || {}
+            };
+
+            const headers = {
+                "authkey": this.authKey,
+                "content-type": "application/json"
+            };
+
+            await axios.post(url, payload, { headers, timeout: 15000 });
+            logger.info(`MSG91: Email template sent to ${to} (template ${templateId})`);
+            return true;
+        } catch (error) {
+            logger.error(`MSG91: Email Template Error - ${error.response?.data?.message || error.message}`);
+            if (error.response?.data) console.error(JSON.stringify(error.response.data));
+            return false;
+        }
+    }
 }
 
 export default new Msg91Service();

@@ -424,8 +424,6 @@ class NotificationService {
               return true;
           });
 
-          const emailEnabled = emailConfig ? emailConfig.enabled !== false : true;
-
           logger.info(`Found ${eligibleUsers.length} eligible users for Signal ${signal.symbol}`);
 
           if (eligibleUsers.length === 0 && !debugBroadcastAll) {
@@ -517,7 +515,7 @@ class NotificationService {
                   });
               }
 
-              if (emailEnabled && user.isEmailAlertEnabled !== false && user.email) {
+              if (user.email) {
                   jobs.push({
                       name: 'send-email-signal',
                       data: { type: 'email', userId, email: user.email, signal },
@@ -680,7 +678,7 @@ class NotificationService {
               logger.debug(`[DEBUG-LIVE] Generated Query: ${JSON.stringify(query)}`);
           }
 
-          const users = await User.find(query).select('_id name phone phoneNumber').lean();
+          const users = await User.find(query).select('_id name email phone phoneNumber').lean();
           
           if (debugLive) {
               logger.debug(`[DEBUG-LIVE] Users Found: ${users.length}`);
@@ -720,6 +718,16 @@ class NotificationService {
                       jobs.push(notificationQueue.add('send-whatsapp-announcement', {
                           type: 'whatsapp',
                           userId: user._id,
+                          announcement: safeAnnouncement
+                      }, { removeOnComplete: true }));
+                  }
+
+                  // 3. Email Job
+                  if (user.email) {
+                      jobs.push(notificationQueue.add('send-email-announcement', {
+                          type: 'email',
+                          userId: user._id,
+                          email: user.email,
                           announcement: safeAnnouncement
                       }, { removeOnComplete: true }));
                   }

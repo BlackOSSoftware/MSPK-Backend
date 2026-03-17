@@ -82,6 +82,17 @@ const sendEmailOtp = async (to, otp) => {
     return msg91Service.sendEmailOtp(to, otp);
 };
 
+/**
+ * Send Email via MSG91 Template
+ * @param {string} to
+ * @param {string} templateId
+ * @param {Object} variables
+ * @returns {Promise<boolean>}
+ */
+const sendEmailTemplate = async (to, templateId, variables = {}) => {
+    return msg91Service.sendEmailTemplate(to, templateId, variables);
+};
+
 
 const sendPushNotification = async (tokens, title, body) => {
     // Keeping this placeholder wrapper for consistency
@@ -92,5 +103,6 @@ const sendPushNotification = async (tokens, title, body) => {
 export {
   sendEmail,
   sendEmailOtp,
+  sendEmailTemplate,
   sendPushNotification,
 };
