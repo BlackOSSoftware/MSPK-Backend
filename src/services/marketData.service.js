@@ -2481,6 +2481,13 @@ class MarketDataService extends EventEmitter {
             addCandidate('UKOIL');
         }
 
+        for (const candidate of Array.from(candidates)) {
+            const usdUsdtAlias = this._getUsdUsdtAlias(candidate);
+            if (usdUsdtAlias) {
+                addCandidate(usdUsdtAlias);
+            }
+        }
+
         for (const candidate of candidates) {
             const exact = this._getMarketDataAvailableSymbol(candidate);
             if (exact) return exact;
