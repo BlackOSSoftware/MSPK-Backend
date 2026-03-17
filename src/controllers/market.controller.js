@@ -4,6 +4,7 @@ import catchAsync from '../utils/catchAsync.js';
 import ApiError from '../utils/ApiError.js';
 import MasterSegment from '../models/MasterSegment.js';
 import MasterSymbol from '../models/MasterSymbol.js';
+import MarketWatchlistTemplate from '../models/MarketWatchlistTemplate.js';
 import config from '../config/config.js';
 import logger from '../config/log.js';
 import { buildMasterSymbolId } from '../utils/masterSymbolId.js';
@@ -16,6 +17,7 @@ import {
 import { dedupeSymbols } from '../utils/marketSymbolDedupe.js';
 import { SEED_SYMBOLS } from '../config/seedSymbols.js';
 import { DEFAULT_MARKET_WATCHLIST_TEMPLATES } from '../config/defaultMarketWatchlistTemplates.js';
+import { getActiveMarketWatchlistTemplates } from '../services/marketWatchlistTemplate.service.js';
 import {
     MAX_SELECTED_SYMBOLS_PER_SEGMENT,
     buildSelectedSymbolDocsMap,
@@ -53,6 +55,69 @@ const parseIntegerQuery = (value, fallback, min, max) => {
     return Math.min(Math.max(parsed, min), max);
 };
 
+const slugifyKey = (value = '') =>
+    String(value || '')
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '_')
+        .replace(/^_+|_+$/g, '');
+
+const normalizeTemplateSelectorInput = (selector = {}) => {
+    const raw = selector && typeof selector === 'object' ? selector : {};
+    const normalizeArray = (values = []) =>
+        Array.from(
+            new Set(
+                (Array.isArray(values) ? values : [])
+                    .map((value) => String(value || '').trim().toUpperCase())
+                    .filter(Boolean)
+            )
+        );
+
+    return {
+        bucket: String(raw.bucket || '').trim().toUpperCase(),
+        segments: normalizeArray(raw.segments),
+        exchanges: normalizeArray(raw.exchanges),
+        symbolPrefixes: normalizeArray(raw.symbolPrefixes),
+        symbolIncludes: normalizeArray(raw.symbolIncludes),
+        nameIncludes: normalizeArray(raw.nameIncludes),
+    };
+};
+
+const normalizeTemplatePayload = (payload = {}) => {
+    const name = String(payload?.name || '').trim();
+    if (!name) {
+        throw new ApiError(httpStatus.BAD_REQUEST, 'Template name is required');
+    }
+
+    const key = String(payload?.key || '').trim().toLowerCase() || slugifyKey(name);
+    if (!key) {
+        throw new ApiError(httpStatus.BAD_REQUEST, 'Template key is required');
+    }
+
+    const symbolLimitRaw = Number(payload?.symbolLimit);
+    const symbolLimit = Number.isFinite(symbolLimitRaw)
+        ? Math.min(Math.max(Math.floor(symbolLimitRaw), 1), 50)
+        : 25;
+
+    const preferredSymbols = Array.from(
+        new Set(
+            (Array.isArray(payload?.preferredSymbols) ? payload.preferredSymbols : [])
+                .map((value) => String(value || '').trim().toUpperCase())
+                .filter(Boolean)
+        )
+    );
+
+    return {
+        key,
+        name,
+        order: Number.isFinite(Number(payload?.order)) ? Number(payload.order) : 100,
+        isActive: payload?.isActive !== false,
+        symbolLimit,
+        preferredSymbols,
+        selector: normalizeTemplateSelectorInput(payload?.selector || {}),
+    };
+};
+
 const resolutionToSeconds = (resolution) => {
     const normalized = String(resolution || '').trim().toUpperCase();
     if (!normalized) return 60;
@@ -69,6 +134,79 @@ const resolutionToSeconds = (resolution) => {
 };
 
 const escapeRegex = (value = '') => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+const isCryptoSpotItem = (item = {}) => {
+    const segmentGroup = normalizeUpper(item.segmentGroup || item.segment);
+    if (segmentGroup !== 'CRYPTO') return true;
+
+    const symbol = normalizeUpper(item.symbol);
+    const name = normalizeUpper(item.name);
+
+    const nonSpotSymbolHints = [
+        '.P',
+        '.PERP',
+        '.LV',
+        'PERP',
+        'PERPETUAL',
+        'FUT',
+        'SWAP',
+    ];
+
+    const nonSpotNameHints = [
+        'PERP',
+        'PERPETUAL',
+        'FUT',
+        'FUTURE',
+        'SWAP',
+        'LEVERAGE',
+        'LEVERAGED',
+    ];
+
+    if (nonSpotSymbolHints.some((hint) => symbol.includes(hint))) return false;
+    if (nonSpotNameHints.some((hint) => name.includes(hint))) return false;
+
+    return true;
+};
+
+const preferCryptoUsdOverUsdt = (items = []) => {
+    const usdBases = new Set();
+    const normalizedItems = Array.isArray(items) ? items : [];
+
+    for (const item of normalizedItems) {
+        const segmentGroup = normalizeUpper(item.segmentGroup || item.segment);
+        if (segmentGroup !== 'CRYPTO') continue;
+        const symbol = normalizeUpper(item.symbol);
+        if (symbol.endsWith('USD') && !symbol.endsWith('USDT')) {
+            usdBases.add(symbol.slice(0, -3));
+        }
+    }
+
+    if (usdBases.size === 0) return normalizedItems;
+
+    return normalizedItems.filter((item) => {
+        const segmentGroup = normalizeUpper(item.segmentGroup || item.segment);
+        if (segmentGroup !== 'CRYPTO') return true;
+        const symbol = normalizeUpper(item.symbol);
+        if (symbol.endsWith('USDT')) {
+            const base = symbol.slice(0, -4);
+            return !usdBases.has(base);
+        }
+        return true;
+    });
+};
+
+const resolvePreferredCryptoSpotSymbol = async (symbol = '') => {
+    const normalized = normalizeUpper(symbol);
+    if (!normalized.endsWith('USDT')) return normalized;
+
+    const usdCandidate = normalized.slice(0, -1); // BTCUSDT -> BTCUSD
+    if (!usdCandidate || usdCandidate === normalized) return normalized;
+
+    const usdDoc = await MasterSymbol.findOne({ symbol: usdCandidate })
+        .select('symbol')
+        .lean();
+    return usdDoc?.symbol ? usdCandidate : normalized;
+};
 
 const buildSymbolFilter = (query = {}, { ignoreSegment = false } = {}) => {
     const clauses = [];
@@ -243,6 +381,7 @@ const MAX_MARKET_WATCHLISTS = 50;
 const MIN_MARKET_WATCHLIST_NAME_LENGTH = 2;
 const MAX_MARKET_WATCHLIST_NAME_LENGTH = 48;
 const DEFAULT_MARKET_WATCHLIST_NAME = 'My Watchlist';
+const SYSTEM_ALL_WATCHLIST_NAME = 'All';
 const DEFAULT_PRELOADED_WATCHLIST_SYMBOL_LIMIT = 10;
 
 const createMarketWatchlistId = () => new mongoose.Types.ObjectId().toHexString();
@@ -290,6 +429,12 @@ const PRELOADED_TEMPLATE_NAME_SET = new Set(
         normalizeMarketWatchlistName(item?.name).toLowerCase()
     )
 );
+
+const isSystemAllWatchlistName = (name = '') =>
+    normalizeMarketWatchlistName(name).toLowerCase() === SYSTEM_ALL_WATCHLIST_NAME.toLowerCase();
+
+const isTemplateWatchlistName = (name = '') =>
+    PRELOADED_TEMPLATE_NAME_SET.has(normalizeMarketWatchlistName(name).toLowerCase());
 
 const stripPreloadedWatchlists = (watchlists = [], activeWatchlistId = '') => {
     if (!Array.isArray(watchlists) || watchlists.length === 0) {
@@ -579,6 +724,53 @@ const appendMissingPreloadedWatchlists = async (
     return nextWatchlists;
 };
 
+const upsertAllWatchlist = (watchlists = []) => {
+    const list = Array.isArray(watchlists) ? watchlists : [];
+    if (list.length === 0) return list;
+
+    const normalizedAllName = SYSTEM_ALL_WATCHLIST_NAME.toLowerCase();
+    const existingIndex = list.findIndex(
+        (item) => normalizeMarketWatchlistName(item?.name).toLowerCase() === normalizedAllName
+    );
+
+    const symbolSet = new Set();
+    list.forEach((item) => {
+        if (!item || normalizeMarketWatchlistName(item.name).toLowerCase() === normalizedAllName) return;
+        normalizeSelectedSymbols(item.symbols).forEach((sym) => symbolSet.add(sym));
+    });
+
+    const mergedSymbols = Array.from(symbolSet);
+    if (mergedSymbols.length === 0) return list;
+
+    const now = new Date();
+    const allEntry = existingIndex >= 0
+        ? {
+            ...list[existingIndex],
+            name: SYSTEM_ALL_WATCHLIST_NAME,
+            symbols: mergedSymbols,
+            updatedAt: now,
+        }
+        : {
+            id: createMarketWatchlistId(),
+            name: SYSTEM_ALL_WATCHLIST_NAME,
+            symbols: mergedSymbols,
+            isDefault: true,
+            createdAt: now,
+            updatedAt: now,
+        };
+
+    const withoutAll = list.filter(
+        (item) => normalizeMarketWatchlistName(item?.name).toLowerCase() !== normalizedAllName
+    );
+    const next = [allEntry, ...withoutAll];
+
+    if (!next.some((item) => item.isDefault)) {
+        next[0].isDefault = true;
+    }
+
+    return next;
+};
+
 const pickWatchlistSnapshot = (watchlists = []) =>
     (Array.isArray(watchlists) ? watchlists : []).map((item) => ({
         id: String(item?.id || '').trim(),
@@ -621,12 +813,25 @@ const resolveUserMarketWatchlistsState = async (user) => {
     const fallbackSymbols = normalizeSelectedSymbols(user?.marketWatchlist);
     const storedWatchlists = Array.isArray(user?.marketWatchlists) ? user.marketWatchlists : [];
     let initialWatchlists = buildInitialMarketWatchlists(storedWatchlists, fallbackSymbols);
-    const stripped = stripPreloadedWatchlists(
-        initialWatchlists,
-        String(user?.activeMarketWatchlistId || '').trim()
+    const forcedActiveWatchlistId = String(user?.activeMarketWatchlistId || '').trim();
+
+    const activeTemplates = await getActiveMarketWatchlistTemplates();
+    const templateNames = activeTemplates.map((template) =>
+        normalizeMarketWatchlistName(template?.name).toLowerCase()
     );
-    initialWatchlists = stripped.watchlists;
-    const forcedActiveWatchlistId = stripped.activeWatchlistId;
+    const existingNames = new Set(
+        initialWatchlists.map((item) =>
+            normalizeMarketWatchlistName(item?.name).toLowerCase()
+        )
+    );
+    const missingTemplateNames = templateNames.filter((name) => !existingNames.has(name));
+
+    initialWatchlists = await appendMissingPreloadedWatchlists(
+        initialWatchlists,
+        activeTemplates,
+        missingTemplateNames
+    );
+    initialWatchlists = upsertAllWatchlist(initialWatchlists);
 
     const allSymbols = normalizeSelectedSymbols(initialWatchlists.flatMap((item) => item.symbols));
     const symbolDocs = allSymbols.length
@@ -641,10 +846,13 @@ const resolveUserMarketWatchlistsState = async (user) => {
             item.symbols,
             symbolDocsBySymbol
         );
-        const symbolsChanged = !isSameSymbolOrder(normalizedSymbols, enforcedSymbols);
+        const finalSymbols = isSystemAllWatchlistName(item?.name)
+            ? normalizedSymbols
+            : enforcedSymbols;
+        const symbolsChanged = !isSameSymbolOrder(normalizedSymbols, finalSymbols);
         return {
             ...item,
-            symbols: enforcedSymbols,
+            symbols: finalSymbols,
             updatedAt: symbolsChanged ? new Date() : item.updatedAt,
         };
     });
@@ -710,6 +918,12 @@ const validateWatchlistName = (value) => {
     if (!name) {
         throw new ApiError(httpStatus.BAD_REQUEST, 'Watchlist name is required');
     }
+    if (isSystemAllWatchlistName(name)) {
+        throw new ApiError(httpStatus.BAD_REQUEST, '"All" is reserved for the system watchlist');
+    }
+    if (isTemplateWatchlistName(name)) {
+        throw new ApiError(httpStatus.BAD_REQUEST, 'This watchlist name is reserved');
+    }
     if (name.length < MIN_MARKET_WATCHLIST_NAME_LENGTH) {
         throw new ApiError(
             httpStatus.BAD_REQUEST,
@@ -723,6 +937,22 @@ const validateWatchlistName = (value) => {
         );
     }
     return name;
+};
+
+const assertMutableWatchlist = (watchlist) => {
+    if (!watchlist) return;
+    if (isSystemAllWatchlistName(watchlist.name)) {
+        throw new ApiError(httpStatus.BAD_REQUEST, 'The "All" watchlist is read-only');
+    }
+};
+
+const isReservedTemplateName = async (name = '') => {
+    const normalized = normalizeMarketWatchlistName(name).toLowerCase();
+    if (!normalized) return false;
+    const templates = await getActiveMarketWatchlistTemplates();
+    return templates.some(
+        (template) => normalizeMarketWatchlistName(template?.name).toLowerCase() === normalized
+    );
 };
 
 const hasDuplicateWatchlistName = (watchlists = [], name = '', ignoreId = '') => {
@@ -750,6 +980,9 @@ const getUserWatchlists = catchAsync(async (req, res) => {
 const createUserWatchlist = catchAsync(async (req, res) => {
     const user = req.user;
     const name = validateWatchlistName(req.body?.name);
+    if (await isReservedTemplateName(name)) {
+        throw new ApiError(httpStatus.BAD_REQUEST, 'This watchlist name is reserved');
+    }
     const setActive = req.body?.setActive !== false;
 
     const { watchlists, activeWatchlistId } = await resolveUserMarketWatchlistsState(user);
@@ -808,10 +1041,17 @@ const updateUserWatchlist = catchAsync(async (req, res) => {
 
     const nextWatchlists = [...watchlists];
     const currentWatchlist = nextWatchlists[index];
+    assertMutableWatchlist(currentWatchlist);
     let updatedWatchlist = { ...currentWatchlist };
 
     if (hasName) {
+        if (isTemplateWatchlistName(currentWatchlist.name)) {
+            throw new ApiError(httpStatus.BAD_REQUEST, 'Default folders cannot be renamed');
+        }
         const name = validateWatchlistName(req.body.name);
+        if (await isReservedTemplateName(name)) {
+            throw new ApiError(httpStatus.BAD_REQUEST, 'This watchlist name is reserved');
+        }
         if (hasDuplicateWatchlistName(nextWatchlists, name, watchlistId)) {
             throw new ApiError(httpStatus.BAD_REQUEST, 'Watchlist name already exists');
         }
@@ -851,6 +1091,7 @@ const deleteUserWatchlist = catchAsync(async (req, res) => {
     if (index === -1) {
         throw new ApiError(httpStatus.NOT_FOUND, 'Watchlist not found');
     }
+    assertMutableWatchlist(watchlists[index]);
 
     const nextWatchlists = watchlists.filter((item) => item.id !== watchlistId);
     if (!nextWatchlists.some((item) => item.isDefault) && nextWatchlists.length > 0) {
@@ -998,7 +1239,8 @@ const addUserWatchlist = catchAsync(async (req, res) => {
     }
     const requestedWatchlistId = String(req.body?.watchlistId || '').trim();
 
-    const normalized = String(symbol).trim().toUpperCase();
+    let normalized = String(symbol).trim().toUpperCase();
+    normalized = await resolvePreferredCryptoSpotSymbol(normalized);
     const symbolDoc = await MasterSymbol.findOne({ symbol: normalized });
     if (!symbolDoc) {
         throw new ApiError(httpStatus.BAD_REQUEST, 'Symbol not found');
@@ -1013,6 +1255,7 @@ const addUserWatchlist = catchAsync(async (req, res) => {
     }
 
     const targetWatchlist = { ...watchlists[targetIndex] };
+    assertMutableWatchlist(targetWatchlist);
     const list = [...normalizeSelectedSymbols(targetWatchlist.symbols)];
     if (!list.includes(normalized)) {
         const segmentKey = getSelectionBucketKey(symbolDoc);
@@ -1060,7 +1303,8 @@ const removeUserWatchlist = catchAsync(async (req, res) => {
     }
     const requestedWatchlistId = String(req.body?.watchlistId || '').trim();
 
-    const normalized = String(symbol).trim().toUpperCase();
+    let normalized = String(symbol).trim().toUpperCase();
+    normalized = await resolvePreferredCryptoSpotSymbol(normalized);
     const symbolDoc = await MasterSymbol.findOne({ symbol: normalized }).select('symbol');
     const user = req.user;
     const { watchlists, activeWatchlistId } = await resolveUserMarketWatchlistsState(user);
@@ -1070,6 +1314,8 @@ const removeUserWatchlist = catchAsync(async (req, res) => {
         throw new ApiError(httpStatus.NOT_FOUND, 'Watchlist not found');
     }
     const targetWatchlist = { ...watchlists[targetIndex] };
+    assertMutableWatchlist(targetWatchlist);
+    assertMutableWatchlist(targetWatchlist);
     const list = normalizeSelectedSymbols(targetWatchlist.symbols);
     const next = list.filter(s => s !== normalized);
 
@@ -1491,6 +1737,63 @@ const getSegments = catchAsync(async (req, res) => {
     res.send(segments);
 });
 
+const getWatchlistTemplates = catchAsync(async (req, res) => {
+    const includeInactive = String(req.query?.includeInactive || '').trim().toLowerCase() === 'true';
+    const filter = includeInactive ? {} : { isActive: true };
+    const templates = await MarketWatchlistTemplate.find(filter)
+        .sort({ order: 1, createdAt: 1, _id: 1 })
+        .lean();
+    res.send(templates);
+});
+
+const createWatchlistTemplate = catchAsync(async (req, res) => {
+    const payload = normalizeTemplatePayload(req.body);
+    const existing = await MarketWatchlistTemplate.findOne({ key: payload.key });
+    if (existing) {
+        throw new ApiError(httpStatus.BAD_REQUEST, 'Template key already exists');
+    }
+    const created = await MarketWatchlistTemplate.create(payload);
+    res.status(httpStatus.CREATED).send(created);
+});
+
+const updateWatchlistTemplate = catchAsync(async (req, res) => {
+    const templateId = String(req.params.id || '').trim();
+    if (!templateId) {
+        throw new ApiError(httpStatus.BAD_REQUEST, 'Template id is required');
+    }
+
+    const existing = await MarketWatchlistTemplate.findById(templateId);
+    if (!existing) {
+        throw new ApiError(httpStatus.NOT_FOUND, 'Template not found');
+    }
+
+    const payload = normalizeTemplatePayload({ ...existing.toObject(), ...req.body });
+
+    if (payload.key !== existing.key) {
+        const keyExists = await MarketWatchlistTemplate.findOne({ key: payload.key, _id: { $ne: existing._id } });
+        if (keyExists) {
+            throw new ApiError(httpStatus.BAD_REQUEST, 'Template key already exists');
+        }
+    }
+
+    Object.assign(existing, payload);
+    await existing.save();
+    res.send(existing);
+});
+
+const deleteWatchlistTemplate = catchAsync(async (req, res) => {
+    const templateId = String(req.params.id || '').trim();
+    if (!templateId) {
+        throw new ApiError(httpStatus.BAD_REQUEST, 'Template id is required');
+    }
+    const existing = await MarketWatchlistTemplate.findById(templateId);
+    if (!existing) {
+        throw new ApiError(httpStatus.NOT_FOUND, 'Template not found');
+    }
+    await existing.deleteOne();
+    res.status(httpStatus.NO_CONTENT).send();
+});
+
 const getSymbols = catchAsync(async (req, res) => {
     const requestedSegment = normalizeUpper(req.query.segment);
     const filter = buildSymbolFilter(req.query, { ignoreSegment: true });
@@ -1798,7 +2101,11 @@ const searchInstruments = catchAsync(async (req, res) => {
         }
     }
 
-    res.send(instruments.map((item) => decorateSymbolSegment(item)));
+    const decorated = instruments.map((item) => decorateSymbolSegment(item));
+    const deduped = dedupeSymbols(decorated);
+    const spotFiltered = deduped.filter(isCryptoSpotItem);
+    const preferred = preferCryptoUsdOverUsdt(spotFiltered);
+    res.send(preferred);
 });
 
 const syncInstruments = catchAsync(async (req, res) => {
@@ -1809,6 +2116,10 @@ const syncInstruments = catchAsync(async (req, res) => {
 export default {
     seedMarketData,
     getSegments,
+    getWatchlistTemplates,
+    createWatchlistTemplate,
+    updateWatchlistTemplate,
+    deleteWatchlistTemplate,
     createSegment,
     deleteSegment,
     updateSegment,

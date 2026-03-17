@@ -13,6 +13,12 @@ router.post('/segments', marketController.createSegment);
 router.patch('/segments/:id', marketController.updateSegment);
 router.delete('/segments/:id', marketController.deleteSegment);
 
+// Watchlist Templates (Admin)
+router.get('/watchlist-templates', auth(['admin']), marketController.getWatchlistTemplates);
+router.post('/watchlist-templates', auth(['admin']), marketController.createWatchlistTemplate);
+router.patch('/watchlist-templates/:id', auth(['admin']), marketController.updateWatchlistTemplate);
+router.delete('/watchlist-templates/:id', auth(['admin']), marketController.deleteWatchlistTemplate);
+
 // Symbols
 router.get('/symbols', marketController.getSymbols);
 router.post('/symbols', marketController.createSymbol);

@@ -268,6 +268,9 @@ const createSignal = async (signalBody, user) => {
     const normalizedTimeframe = normalizeSignalTimeframe(signalBody.timeframe);
     signalBody.timeframe = normalizedTimeframe || signalBody.timeframe;
   }
+  if (!signalBody.signalTime) {
+    signalBody.signalTime = new Date();
+  }
 
   await hydrateSignalSegment(signalBody);
   if (signalBody.uniqueId) {

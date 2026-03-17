@@ -5,28 +5,34 @@
 export default {
     // Signal Alerts
     SIGNAL_NEW: {
-        title: "New Signal: {{symbol}}",
-        body: "Symbol: {{symbol}}\nAction: {{type}}\nEntry: {{entryPrice}}\nSL: {{stopLoss}}\nTP1: {{target1}}\nTP2: {{target2}}\nTP3: {{target3}}"
+        title: "New Signal | {{symbol}} | {{timeframeLabel}}",
+        body:
+            "Instrument: {{symbol}}\nTimeframe: {{timeframeLabel}}\nSignal Time (IST): {{signalTime}}\nAction: {{type}}\nEntry: {{entryPrice}}\nStop Loss: {{stopLoss}}\nTargets: {{target1}}, {{target2}}, {{target3}}"
     },
     SIGNAL_UPDATE: {
-        title: "Signal Update: {{symbol}}",
-        body: "Update for {{symbol}}: {{updateMessage}}\nCurrent Price: {{currentPrice}}"
+        title: "Signal Update | {{symbol}} | {{timeframeLabel}}",
+        body:
+            "Instrument: {{symbol}}\nTimeframe: {{timeframeLabel}}\nSignal Time (IST): {{signalTime}}\nUpdate: {{updateMessage}}\nCurrent Price: {{currentPrice}}"
     },
     SIGNAL_INFO: {
-        title: "Target Update: {{symbol}}",
-        body: "{{targetLevel}} achieved for {{symbol}}.\nCurrent Price: {{currentPrice}}\nTrade remains active."
+        title: "Target Update | {{symbol}} | {{timeframeLabel}}",
+        body:
+            "{{targetLevel}} reached on {{symbol}}.\nTimeframe: {{timeframeLabel}}\nSignal Time (IST): {{signalTime}}\nCurrent Price: {{currentPrice}}\nPosition remains active."
     },
     SIGNAL_TARGET: {
-        title: "Target Hit: {{symbol}}",
-        body: "Target {{targetLevel}} hit for {{symbol}}.\nExit: {{exitPrice}}\nPoints: {{pointsLabel}}"
+        title: "Target Hit | {{symbol}} | {{timeframeLabel}}",
+        body:
+            "Target {{targetLevel}} achieved on {{symbol}}.\nTimeframe: {{timeframeLabel}}\nSignal Time (IST): {{signalTime}}\nExit: {{exitPrice}}\nPoints: {{pointsLabel}}"
     },
     SIGNAL_PARTIAL_PROFIT: {
-        title: "Partial Profit Booked: {{symbol}}",
-        body: "Partial profit booked in {{symbol}}.\nExit: {{exitPrice}}\nPoints: {{pointsLabel}}"
+        title: "Partial Profit | {{symbol}} | {{timeframeLabel}}",
+        body:
+            "Partial profit booked on {{symbol}}.\nTimeframe: {{timeframeLabel}}\nSignal Time (IST): {{signalTime}}\nExit: {{exitPrice}}\nPoints: {{pointsLabel}}"
     },
     SIGNAL_STOPLOSS: {
-        title: "Stop Loss Hit: {{symbol}}",
-        body: "SL hit for {{symbol}}.\nExit: {{exitPrice}}\nPoints: {{pointsLabel}}"
+        title: "Stop Loss Hit | {{symbol}} | {{timeframeLabel}}",
+        body:
+            "Stop Loss triggered on {{symbol}}.\nTimeframe: {{timeframeLabel}}\nSignal Time (IST): {{signalTime}}\nExit: {{exitPrice}}\nPoints: {{pointsLabel}}"
     },
 
     // Announcements

@@ -29,11 +29,58 @@ export const formatPointsLabel = (value) => {
   return parsed > 0 ? `+${absolute}` : `-${absolute}`;
 };
 
+const humanizeTimeframe = (value) => {
+  const raw = String(value || '').trim();
+  if (!raw || raw === '-') return '';
+  if (raw.toLowerCase() === 'scalp') return 'Scalp';
+
+  const minutesMatch = raw.match(/^(\d+)m$/i);
+  if (minutesMatch) {
+    const minutes = Number(minutesMatch[1]);
+    if (Number.isFinite(minutes) && minutes > 0) {
+      return `${minutes}-minute`;
+    }
+  }
+
+  const hoursMatch = raw.match(/^(\d+)h$/i);
+  if (hoursMatch) {
+    const hours = Number(hoursMatch[1]);
+    if (Number.isFinite(hours) && hours > 0) {
+      return `${hours}-hour`;
+    }
+  }
+
+  if (raw === '1D') return 'Daily';
+  if (raw === '1W') return 'Weekly';
+  if (raw === '1M') return 'Monthly';
+
+  return raw;
+};
+
+const formatSignalTimestamp = (value) => {
+  if (!value) return '';
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return date.toLocaleString('en-IN', {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+    timeZone: 'Asia/Kolkata',
+  });
+};
+
 export const getSignalTemplateKey = (signal) => signal?.subType || 'SIGNAL_NEW';
 
 export const buildSignalTemplateData = (signal = {}) => {
   const normalizedTimeframe =
     normalizeSignalTimeframe(signal.timeframe) || String(signal.timeframe || '').trim();
+  const timeframeLabel = normalizedTimeframe ? humanizeTimeframe(normalizedTimeframe) : '';
+  const signalTime =
+    formatSignalTimestamp(signal.signalTime || signal.createdAt || signal.updatedAt || signal.exitTime);
+  const timeframeDisplay = normalizedTimeframe
+    ? timeframeLabel && timeframeLabel !== normalizedTimeframe
+      ? `${normalizedTimeframe} (${timeframeLabel})`
+      : normalizedTimeframe
+    : '-';
   const entryPrice = toFiniteNumber(signal.entryPrice);
   const stopLoss = toFiniteNumber(signal.stopLoss);
   const target1 = toFiniteNumber(signal.targets?.target1);
@@ -56,6 +103,8 @@ export const buildSignalTemplateData = (signal = {}) => {
   return {
     symbol: signal.symbol || '-',
     timeframe: normalizedTimeframe || '-',
+    timeframeLabel: timeframeDisplay,
+    signalTime: signalTime || '-',
     type: signal.type || '-',
     entryPrice: formatNotificationNumber(entryPrice),
     stopLoss: formatNotificationNumber(stopLoss),

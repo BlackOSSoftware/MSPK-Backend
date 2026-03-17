@@ -3,7 +3,7 @@ import Joi from 'joi';
 const createSignal = {
   body: Joi.object().keys({
       symbol: Joi.string().required(),
-      segment: Joi.string().valid('EQUITY', 'FNO', 'COMMODITY', 'COMEX', 'CURRENCY').required(),
+      segment: Joi.string().valid('EQUITY', 'FNO', 'COMMODITY', 'COMEX', 'CURRENCY', 'CRYPTO', 'FOREX').required(),
       type: Joi.string().valid('BUY', 'SELL').required(),
       entryPrice: Joi.number().required(), // Changed to number
       stopLoss: Joi.number().required(),
