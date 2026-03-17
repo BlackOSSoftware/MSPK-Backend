@@ -149,6 +149,29 @@ const getUserSelectedSymbols = (user, symbolDocsBySymbol = null) =>
     ? limitSelectedSymbolsPerSegment(user?.marketWatchlist, symbolDocsBySymbol)
     : normalizeSelectedSymbols(user?.marketWatchlist);
 
+const hasExplicitUserSignalSelection = (user) => Array.isArray(user?.signalWatchlist);
+
+const getUserSignalSelectionSource = (user) =>
+  hasExplicitUserSignalSelection(user) ? user?.signalWatchlist : user?.marketWatchlist;
+
+const getUserSignalSelectedSymbols = (user, symbolDocsBySymbol = null) =>
+  symbolDocsBySymbol instanceof Map
+    ? limitSelectedSymbolsPerSegment(getUserSignalSelectionSource(user), symbolDocsBySymbol)
+    : normalizeSelectedSymbols(getUserSignalSelectionSource(user));
+
+const setUserSignalSelectedSymbols = (user, symbols = [], symbolDocsBySymbol = null) => {
+  const normalizedSymbols =
+    symbolDocsBySymbol instanceof Map
+      ? limitSelectedSymbolsPerSegment(symbols, symbolDocsBySymbol)
+      : normalizeSelectedSymbols(symbols);
+
+  if (user) {
+    user.signalWatchlist = normalizedSymbols;
+  }
+
+  return normalizedSymbols;
+};
+
 const buildSelectedSignalFilter = (symbols = []) => {
   const selectedSymbols = expandSelectedSymbols(symbols);
   if (selectedSymbols.length === 0) {
@@ -171,8 +194,12 @@ export {
   buildSelectedSymbolDocsMap,
   expandSelectedSymbols,
   getSelectionBucketKey,
+  getUserSignalSelectedSymbols,
   getUserSelectedSymbols,
+  getUserSignalSelectionSource,
+  hasExplicitUserSignalSelection,
   hasSelectedSignalSymbol,
   limitSelectedSymbolsPerSegment,
   normalizeSelectedSymbols,
+  setUserSignalSelectedSymbols,
 };

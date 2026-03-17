@@ -229,6 +229,10 @@ const userSchema = new mongoose.Schema(
       type: [String],
       default: []
     },
+    signalWatchlist: {
+      type: [String],
+      default: undefined,
+    },
     marketWatchlists: {
       type: [marketNamedWatchlistSchema],
       default: [],

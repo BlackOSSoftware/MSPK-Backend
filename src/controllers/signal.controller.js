@@ -4,11 +4,16 @@ import ApiError from '../utils/ApiError.js';
 import MasterSymbol from '../models/MasterSymbol.js';
 import { signalService, technicalAnalysisService, marketDataService } from '../services/index.js';
 import {
+  MAX_SELECTED_SYMBOLS_PER_SEGMENT,
   buildSelectedSignalFilter,
   buildSelectedSymbolDocsMap,
   expandSelectedSymbols,
-  getUserSelectedSymbols,
+  getSelectionBucketKey,
+  getUserSignalSelectedSymbols,
+  hasExplicitUserSignalSelection,
   hasSelectedSignalSymbol,
+  normalizeSelectedSymbols,
+  setUserSignalSelectedSymbols,
 } from '../utils/userSignalSelection.js';
 import { pickBestMasterSymbol } from '../utils/masterSymbolResolver.js';
 import { resolveSymbolSegmentGroup } from '../utils/marketSegmentResolver.js';
@@ -93,6 +98,20 @@ const toCsvCell = (value) => `"${String(value ?? '').replace(/"/g, '""')}"`;
 
 const normalizeSignalLookupKey = (value) => String(value || '').trim().toUpperCase();
 
+const resolvePreferredSignalSymbol = async (symbol = '') => {
+  const normalized = normalizeSignalLookupKey(symbol);
+  if (!normalized.endsWith('USDT')) return normalized;
+
+  const usdCandidate = normalized.slice(0, -1);
+  if (!usdCandidate || usdCandidate === normalized) return normalized;
+
+  const usdDoc = await MasterSymbol.findOne({ symbol: usdCandidate })
+    .select('symbol')
+    .lean();
+
+  return usdDoc?.symbol ? usdCandidate : normalized;
+};
+
 const resolveSignalMasterSymbols = async (signals = []) => {
   const rawSymbols = Array.from(
     new Set(
@@ -143,6 +162,55 @@ const resolveSignalMasterSymbols = async (signals = []) => {
   }
 
   return resolvedByRawSymbol;
+};
+
+const ensureUserSignalSelectionInitialized = async (user) => {
+  if (!user || user.role === 'admin' || hasExplicitUserSignalSelection(user)) {
+    return normalizeSelectedSymbols(user?.signalWatchlist);
+  }
+
+  const fallbackSymbols = normalizeSelectedSymbols(user?.marketWatchlist);
+  const fallbackDocs = fallbackSymbols.length > 0
+    ? await MasterSymbol.find({ symbol: { $in: fallbackSymbols } })
+      .select('symbol segment exchange')
+      .lean()
+    : [];
+  const fallbackDocsMap = buildSelectedSymbolDocsMap(fallbackDocs);
+
+  setUserSignalSelectedSymbols(user, fallbackSymbols, fallbackDocsMap);
+  await user.save();
+  return normalizeSelectedSymbols(user?.signalWatchlist);
+};
+
+const buildSelectedScriptsResponse = async (symbols = []) => {
+  const normalizedSymbols = normalizeSelectedSymbols(symbols);
+  if (normalizedSymbols.length === 0) return [];
+
+  const docs = await MasterSymbol.find({ symbol: { $in: normalizedSymbols } })
+    .select('symbol name segment segmentGroup exchange provider')
+    .lean();
+  const docsBySymbol = new Map(
+    docs.map((doc) => [normalizeSignalLookupKey(doc?.symbol), doc])
+  );
+
+  return normalizedSymbols.map((symbol) => {
+    const doc = docsBySymbol.get(symbol);
+    if (!doc) {
+      return {
+        symbol,
+        name: symbol,
+        segment: '',
+        segmentGroup: '',
+        exchange: '',
+        provider: null,
+      };
+    }
+
+    return {
+      ...doc,
+      symbol,
+    };
+  });
 };
 
 const formatSignalResponse = (signal, resolvedMasterSymbol = null) => {
@@ -346,15 +414,15 @@ const getSignalAccessContext = async (req) => {
 
   const { allowedSegments, allowedCategories } =
     planStatus === 'active' ? getAllowedAccessFromPermissions(permissions) : { allowedSegments: [], allowedCategories: [] };
-  const rawSelectedSymbols = getUserSelectedSymbols(req.user);
+  const rawSelectedSymbols = await ensureUserSignalSelectionInitialized(req.user);
   const signalVisibleFrom = req.user?.createdAt ? getStartOfIndiaDay(req.user.createdAt) : null;
   const selectedSymbolDocs = rawSelectedSymbols.length > 0
     ? await MasterSymbol.find({ symbol: { $in: rawSelectedSymbols } }).select('symbol segment exchange').lean()
     : [];
-  const selectedSymbols = getUserSelectedSymbols(req.user, buildSelectedSymbolDocsMap(selectedSymbolDocs));
+  const selectedSymbols = getUserSignalSelectedSymbols(req.user, buildSelectedSymbolDocsMap(selectedSymbolDocs));
   const requiresSelection = planStatus === 'active';
   const selectionMessage = requiresSelection && selectedSymbols.length === 0
-    ? 'Select scripts in your watchlist to receive signals. Signals are unlimited for selected scripts, but you can add only 10 scripts per segment.'
+    ? 'Select scripts in Manage Scripts to receive signals. Watchlists are separate, and you can add up to 10 scripts per segment.'
     : null;
 
   return {
@@ -436,7 +504,7 @@ const assertSignalAccess = (access, signal) => {
       !hasSelectedSignalSymbol(access.selectedSymbols, signal.symbol)
     )
   ) {
-    throw new ApiError(httpStatus.FORBIDDEN, 'You only receive signals for scripts selected in your watchlist.');
+    throw new ApiError(httpStatus.FORBIDDEN, 'You only receive signals for scripts selected in Manage Scripts.');
   }
 
   if (
@@ -471,6 +539,85 @@ const assertSignalAccess = (access, signal) => {
 const createSignal = catchAsync(async (req, res) => {
   const signal = await signalService.createSignal(req.body, req.user);
   res.status(httpStatus.CREATED).send(signal);
+});
+
+const getSelectedScripts = catchAsync(async (req, res) => {
+  const selectedSymbols = await ensureUserSignalSelectionInitialized(req.user);
+  const scripts = await buildSelectedScriptsResponse(selectedSymbols);
+  res.send(scripts);
+});
+
+const addSelectedScript = catchAsync(async (req, res) => {
+  const rawSymbol = String(req.body?.symbol || '').trim();
+  if (!rawSymbol) {
+    throw new ApiError(httpStatus.BAD_REQUEST, 'Symbol is required');
+  }
+
+  const user = req.user;
+  const currentSymbols = await ensureUserSignalSelectionInitialized(user);
+  let normalizedSymbol = await resolvePreferredSignalSymbol(rawSymbol);
+  normalizedSymbol = normalizeSignalLookupKey(normalizedSymbol);
+
+  const symbolDoc = await MasterSymbol.findOne({ symbol: normalizedSymbol })
+    .select('symbol name segment exchange')
+    .lean();
+  if (!symbolDoc) {
+    throw new ApiError(httpStatus.BAD_REQUEST, 'Symbol not found');
+  }
+
+  if (currentSymbols.includes(normalizedSymbol)) {
+    return res.send({
+      symbols: currentSymbols,
+      scripts: await buildSelectedScriptsResponse(currentSymbols),
+    });
+  }
+
+  const currentDocs = currentSymbols.length > 0
+    ? await MasterSymbol.find({ symbol: { $in: currentSymbols } })
+      .select('symbol segment exchange')
+      .lean()
+    : [];
+  const targetSegmentKey = getSelectionBucketKey(symbolDoc);
+  const existingSegmentCount = currentDocs.reduce(
+    (count, doc) => (getSelectionBucketKey(doc) === targetSegmentKey ? count + 1 : count),
+    0
+  );
+
+  if (existingSegmentCount >= MAX_SELECTED_SYMBOLS_PER_SEGMENT) {
+    throw new ApiError(
+      httpStatus.BAD_REQUEST,
+      `You can add only ${MAX_SELECTED_SYMBOLS_PER_SEGMENT} scripts in the ${targetSegmentKey} segment.`
+    );
+  }
+
+  const nextSymbols = [...currentSymbols, normalizedSymbol];
+  setUserSignalSelectedSymbols(user, nextSymbols);
+  await user.save();
+
+  res.send({
+    symbols: normalizeSelectedSymbols(user.signalWatchlist),
+    scripts: await buildSelectedScriptsResponse(user.signalWatchlist),
+  });
+});
+
+const removeSelectedScript = catchAsync(async (req, res) => {
+  const rawSymbol = String(req.body?.symbol || '').trim();
+  if (!rawSymbol) {
+    throw new ApiError(httpStatus.BAD_REQUEST, 'Symbol is required');
+  }
+
+  const user = req.user;
+  const currentSymbols = await ensureUserSignalSelectionInitialized(user);
+  const normalizedSymbol = normalizeSignalLookupKey(await resolvePreferredSignalSymbol(rawSymbol));
+  const nextSymbols = currentSymbols.filter((symbol) => symbol !== normalizedSymbol);
+
+  setUserSignalSelectedSymbols(user, nextSymbols);
+  await user.save();
+
+  res.send({
+    symbols: normalizeSelectedSymbols(user.signalWatchlist),
+    scripts: await buildSelectedScriptsResponse(user.signalWatchlist),
+  });
 });
 
 const getSignal = catchAsync(async (req, res) => {
@@ -902,6 +1049,9 @@ const getSignalAnalysis = catchAsync(async (req, res) => {
 });
 
 export default {
+  getSelectedScripts,
+  addSelectedScript,
+  removeSelectedScript,
   createSignal,
   createManualSignal,
   getSignal,

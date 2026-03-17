@@ -9,6 +9,9 @@ const router = express.Router();
 // Public (Optional Auth: Guests see Free/Closed, Users see based on sub)
 import optionalAuth from '../middleware/optionalAuth.js';
 router.get('/', optionalAuth(), signalController.getSignals);
+router.get('/scripts', auth(), signalController.getSelectedScripts);
+router.post('/scripts/add', auth(), signalController.addSelectedScript);
+router.post('/scripts/remove', auth(), signalController.removeSelectedScript);
 router.get('/report/export', auth(['admin']), signalController.exportSignalReport);
 router.get('/:signalId/analysis', optionalAuth(), signalController.getSignalAnalysis);
 router.get('/:signalId', optionalAuth(), signalController.getSignal);

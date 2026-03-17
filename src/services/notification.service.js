@@ -23,7 +23,7 @@ import {
 } from '../utils/notificationFormatter.js';
 import {
   buildSelectedSymbolDocsMap,
-  getUserSelectedSymbols,
+  getUserSignalSelectedSymbols,
   hasSelectedSignalSymbol,
 } from '../utils/userSignalSelection.js';
 import { derivePlanPermissions } from '../utils/planPermissions.js';
@@ -375,7 +375,7 @@ class NotificationService {
           if (debugBroadcastAll) {
               logger.warn('[ALERT] DEBUG_SIGNAL_BROADCAST_ALL enabled - sending to all active users.');
               users = await User.find({ status: 'Active' })
-                  .select('_id name email role fcmTokens phone phoneNumber preferredSegments marketWatchlist isNotificationEnabled isWhatsAppEnabled isEmailAlertEnabled telegramChatId telegramUsername')
+                  .select('_id name email role fcmTokens phone phoneNumber preferredSegments marketWatchlist signalWatchlist isNotificationEnabled isWhatsAppEnabled isEmailAlertEnabled telegramChatId telegramUsername')
                   .lean();
           } else {
               const candidateIds = Array.from(candidateUserIds);
@@ -383,10 +383,10 @@ class NotificationService {
                   ? await User.find({
                         _id: { $in: candidateIds },
                         status: 'Active'
-                    }).select('_id name email role fcmTokens phone phoneNumber preferredSegments marketWatchlist isNotificationEnabled isWhatsAppEnabled isEmailAlertEnabled telegramChatId telegramUsername')
+                    }).select('_id name email role fcmTokens phone phoneNumber preferredSegments marketWatchlist signalWatchlist isNotificationEnabled isWhatsAppEnabled isEmailAlertEnabled telegramChatId telegramUsername')
                   : [];
           }
-          const allSelectedSymbols = users.flatMap((user) => getUserSelectedSymbols(user));
+          const allSelectedSymbols = users.flatMap((user) => getUserSignalSelectedSymbols(user));
           const selectedSymbolDocs = allSelectedSymbols.length > 0
               ? await MasterSymbol.find({ symbol: { $in: allSelectedSymbols } }).select('symbol segment exchange').lean()
               : [];
@@ -395,7 +395,7 @@ class NotificationService {
           const selectionStateByUser = new Map();
           users.forEach((user) => {
               const userId = user?._id?.toString() || '';
-              const selectedSymbols = getUserSelectedSymbols(user, selectedSymbolDocsMap);
+              const selectedSymbols = getUserSignalSelectedSymbols(user, selectedSymbolDocsMap);
               const hasSymbol = hasSelectedSignalSymbol(selectedSymbols, signal.symbol);
               selectionStateByUser.set(userId, {
                   userId,
@@ -423,7 +423,7 @@ class NotificationService {
                   }
               }
 
-              // Watchlist selection is explicit; don't block by preferred segments.
+              // Manage Scripts selection is explicit; don't block by preferred segments.
               return true;
           });
 
