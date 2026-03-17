@@ -1,5 +1,24 @@
 const normalizeUpper = (value) => String(value ?? '').trim().toUpperCase();
 
+const KNOWN_EXCHANGE_PREFIXES = new Set([
+  'NSE',
+  'BSE',
+  'NFO',
+  'MCX',
+  'CDS',
+  'BCD',
+  'NSEIX',
+  'COMEX',
+  'NYMEX',
+  'FOREX',
+  'CRYPTO',
+  'BINANCE',
+]);
+
+// Exchanges that represent Indian venues. We treat these as "explicitly Indian" only when
+// they come from a reliable source (Kite) or from a symbol prefix like "NSE:...".
+const INDIAN_EXCHANGES = new Set(['NSE', 'BSE', 'MCX', 'NFO', 'CDS', 'BCD', 'NSEIX']);
+
 const FOREX_CODES = new Set([
   'USD', 'EUR', 'GBP', 'JPY', 'AUD', 'CAD', 'CHF', 'NZD', 'INR', 'SGD', 'HKD', 'CNY', 'CNH',
   'SEK', 'NOK', 'DKK', 'ZAR', 'RUB', 'TRY', 'MXN', 'BRL', 'KRW', 'PLN', 'THB', 'IDR', 'MYR',
@@ -36,12 +55,28 @@ const isForexPair = (symbol = '') => {
   return FOREX_CODES.has(base) && FOREX_CODES.has(quote);
 };
 
+const extractExchangePrefix = (symbol = '') => {
+  const normalized = normalizeUpper(symbol);
+  const match = normalized.match(/^([A-Z0-9]+):/);
+  const prefix = match?.[1] || '';
+  if (!prefix) return '';
+  if (!KNOWN_EXCHANGE_PREFIXES.has(prefix)) return '';
+  return prefix;
+};
+
 const resolveSymbolSegmentGroup = (symbolDoc = {}) => {
   const segment = normalizeUpper(symbolDoc?.segment);
-  const exchange = normalizeUpper(symbolDoc?.exchange);
+  const rawExchange = normalizeUpper(symbolDoc?.exchange);
   const subsegment = normalizeUpper(symbolDoc?.subsegment);
   const symbol = normalizeUpper(symbolDoc?.symbol || symbolDoc?.sourceSymbol);
   const name = normalizeUpper(symbolDoc?.name);
+  const provider = normalizeUpper(symbolDoc?.provider);
+
+  const symbolExchange = extractExchangePrefix(symbol);
+  const exchange = symbolExchange || rawExchange;
+  const isExplicitIndianExchange =
+    (symbolExchange && INDIAN_EXCHANGES.has(symbolExchange)) ||
+    (provider === 'KITE' && exchange && INDIAN_EXCHANGES.has(exchange));
 
   if (
     isCryptoLikeSymbol(symbol) ||
@@ -53,28 +88,27 @@ const resolveSymbolSegmentGroup = (symbolDoc = {}) => {
 
   const isComexSegment = COMEX_EXCHANGES.has(segment);
   const isComexExchange = COMEX_EXCHANGES.has(exchange);
-  const isComexCommodityHint = COMEX_SUBSEGMENTS.has(subsegment) || isCommodityLikeSymbol(symbol, name);
 
-  if (isComexExchange || (isComexSegment && isComexCommodityHint)) {
-    return 'COMEX';
-  }
-
-  if (
-    isCommodityLikeSymbol(symbol, name) &&
-    exchange &&
-    exchange !== 'MCX' &&
-    exchange !== 'NSE' &&
-    exchange !== 'BSE'
-  ) {
-    return 'COMEX';
-  }
-
-  if (
-    ['COMMODITY', 'MCX'].includes(segment) ||
-    exchange === 'MCX' ||
-    isCommodityLikeSymbol(symbol, name)
-  ) {
+  const isMcx = exchange === 'MCX' || segment === 'MCX';
+  if (isMcx) {
     return 'COMMODITY';
+  }
+
+  if (isComexExchange || isComexSegment) {
+    return 'COMEX';
+  }
+
+  const isCommodityHint = isCommodityLikeSymbol(symbol, name);
+  if (isCommodityHint && !isExplicitIndianExchange) {
+    // Outside MCX, commodity-like symbols belong to the global COMEX bucket (e.g. XAUUSD, XAGUSD, USOIL).
+    return 'COMEX';
+  }
+
+  if (
+    ['COMMODITY', 'MCX'].includes(segment)
+  ) {
+    // If something was stored as COMMODITY but is not explicitly MCX, treat it as COMEX (global commodities).
+    return 'COMEX';
   }
 
   if (
