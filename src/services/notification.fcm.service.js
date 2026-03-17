@@ -1,4 +1,4 @@
-import { admin } from '../config/firebase.js';
+import { admin, initializeFirebase, isFirebaseAvailable } from '../config/firebase.js';
 import logger from '../config/log.js';
 import FCMToken from '../models/FCMToken.js';
 
@@ -27,6 +27,20 @@ const sendToUsers = async (userIds, payload) => {
  */
 const sendToTokens = async (tokens, payload) => {
   if (!tokens || tokens.length === 0) return;
+
+  if (!isFirebaseAvailable()) {
+    logger.warn('Firebase credentials are not configured. Skipping FCM send.');
+    return;
+  }
+
+  if (!admin.apps || admin.apps.length === 0) {
+    initializeFirebase();
+  }
+
+  if (!admin.apps || admin.apps.length === 0) {
+    logger.warn('Firebase Admin not initialized. Skipping FCM send.');
+    return;
+  }
 
   const uniqueTokens = [...new Set(tokens)];
   const message = {

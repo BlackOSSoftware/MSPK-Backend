@@ -4,7 +4,7 @@ import logger from '../config/log.js';
 import User from '../models/User.js';
 import Setting from '../models/Setting.js';
 import FCMToken from '../models/FCMToken.js';
-import { initializeFirebase } from '../config/firebase.js';
+import { initializeFirebase, isFirebaseAvailable } from '../config/firebase.js';
 import telegramService from '../services/channels/telegram.service.js';
 import whatsappChannelService from '../services/channels/whatsapp.service.js';
 import { emailService } from '../services/index.js'; // Use central service exports
@@ -62,6 +62,17 @@ const buildTemplateVariablesFromKeys = (keys = [], templateVars = {}) => {
 
 // Ensure Firebase is initialized in worker context
 initializeFirebase();
+let pushUnavailableWarningShown = false;
+
+const logPushUnavailable = (reason = 'disabled') => {
+  if (pushUnavailableWarningShown) return;
+  pushUnavailableWarningShown = true;
+  if (reason === 'firebase') {
+    logger.warn('[PushWorker] Push notifications are disabled because Firebase credentials are not configured.');
+    return;
+  }
+  logger.warn('[PushWorker] push_config is disabled. Skipping push send.');
+};
 
 const connection = {
   host: config.redis.host,
@@ -319,8 +330,8 @@ const notificationWorker = new Worker('notifications', async (job) => {
       }
       else if (type === 'push') {
           const pushConfig = getSetting('push_config');
-          // Always allow push notifications (ignore disabled settings as requested).
-          if (true) {
+          const pushEnabled = pushConfig?.enabled !== false;
+          if (pushEnabled && isFirebaseAvailable()) {
               const tokenDocs = await FCMToken.find({ user: userId }).select('token platform');
               const androidTokens = tokenDocs.filter(t => t.platform === 'android').map(t => t.token);
               const webTokens = tokenDocs.filter(t => t.platform === 'web').map(t => t.token);
@@ -365,7 +376,7 @@ const notificationWorker = new Worker('notifications', async (job) => {
                   logger.info(`[PushWorker] WEB Result for User ${userId}: Success=${result.successCount}, Failure=${result.failureCount}`);
               }
           } else {
-              logger.warn('[PushWorker] push_config is disabled. Skipping push send.');
+              logPushUnavailable(pushEnabled ? 'firebase' : 'disabled');
           }
       }
       else if (type === 'email') {

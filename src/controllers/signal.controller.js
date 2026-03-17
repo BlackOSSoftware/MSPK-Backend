@@ -380,18 +380,22 @@ const getSignalAccessContext = async (req) => {
   };
 };
 
+const shouldEnforceSelectedScripts = (access) => access?.mode === 'user';
+
+const buildSelectedScriptsAccessFilter = (access) => {
+  if (!shouldEnforceSelectedScripts(access)) return null;
+
+  if (!Array.isArray(access?.selectedSymbols) || access.selectedSymbols.length === 0) {
+    return { _id: { $in: [] } };
+  }
+
+  return buildSelectedSignalFilter(access.selectedSymbols);
+};
+
 const buildBaseFilterForAccess = (access) => {
   if (access.mode === 'admin') return {};
 
-  const enforceWatchlist =
-    String(process.env.SIGNAL_REQUIRE_WATCHLIST || '').trim().toLowerCase() === 'true';
-  const selectedSymbolFilter =
-    enforceWatchlist &&
-    access.mode === 'user' &&
-    Array.isArray(access.selectedSymbols) &&
-    access.selectedSymbols.length > 0
-      ? buildSelectedSignalFilter(access.selectedSymbols)
-      : null;
+  const selectedSymbolFilter = buildSelectedScriptsAccessFilter(access);
   let accessFilter = !access.allowedSegments?.length && !access.allowedCategories?.length
     ? { isFree: true }
     : {
@@ -424,12 +428,13 @@ const buildBaseFilterForAccess = (access) => {
 
 const assertSignalAccess = (access, signal) => {
   if (access.mode === 'admin') return;
-  const enforceWatchlist =
-    String(process.env.SIGNAL_REQUIRE_WATCHLIST || '').trim().toLowerCase() === 'true';
   if (
-    enforceWatchlist &&
-    access.mode === 'user' &&
-    !hasSelectedSignalSymbol(access.selectedSymbols, signal.symbol)
+    shouldEnforceSelectedScripts(access) &&
+    (
+      !Array.isArray(access?.selectedSymbols) ||
+      access.selectedSymbols.length === 0 ||
+      !hasSelectedSignalSymbol(access.selectedSymbols, signal.symbol)
+    )
   ) {
     throw new ApiError(httpStatus.FORBIDDEN, 'You only receive signals for scripts selected in your watchlist.');
   }

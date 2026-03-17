@@ -28,6 +28,7 @@ import {
 } from '../utils/userSignalSelection.js';
 import { derivePlanPermissions } from '../utils/planPermissions.js';
 import { sendToUser } from './websocket.service.js';
+import { isFirebaseAvailable } from '../config/firebase.js';
 
 const serializeRealtimeNotification = (notification) => ({
   _id: notification._id,
@@ -292,6 +293,7 @@ class NotificationService {
           const emailConfig = getSetting('email_config');
           const activeTemplates = { ...templates, ...(getSetting('notification_templates') || {}) };
           const whatsappEnabled = whatsappChannelService.isConfigured(waConfig);
+          const pushEnabled = Boolean(pushConfig?.enabled) && isFirebaseAvailable();
 
           // 1. TARGETED NOTIFICATIONS (Telegram / WhatsApp / Push)
           // Find users with Active Subscriptions matching this Segment
@@ -499,7 +501,7 @@ class NotificationService {
                   });
               }
 
-              if (pushConfig && pushConfig.enabled && user.isNotificationEnabled !== false) {
+              if (pushEnabled && user.isNotificationEnabled !== false) {
                   jobs.push({
                       name: 'send-push',
                       data: { type: 'push', userId, signal },

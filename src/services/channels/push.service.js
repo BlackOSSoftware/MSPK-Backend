@@ -1,4 +1,4 @@
-import { admin, initializeFirebase } from '../../config/firebase.js';
+import { admin, initializeFirebase, isFirebaseAvailable } from '../../config/firebase.js';
 import logger from '../../config/log.js';
 import FCMToken from '../../models/FCMToken.js';
 
@@ -37,6 +37,11 @@ const sendPushNotification = async (tokens, title, body, data = {}, platform = '
         if (!tokens || tokens.length === 0) {
             logger.warn('No FCM tokens provided for push notification');
             return false;
+        }
+
+        if (!isFirebaseAvailable()) {
+            logger.warn('Firebase credentials are not configured. Skipping push notification send.');
+            return { successCount: 0, failureCount: 0, results: [], error: 'Firebase credentials missing' };
         }
 
         // Ensure Firebase Admin is initialized (worker may run separately)
