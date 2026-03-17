@@ -21,7 +21,7 @@ const getMsg91TemplateId = (key) => {
   return String(process.env[`MSG91_TEMPLATE_${key}`] || '').trim();
 };
 
-const extractTemplateKeys = (template = {}) => {
+const extractTemplateKeys = (template = {}, fields = ['title', 'body']) => {
   const keys = new Set();
   const pushMatches = (text = '') => {
     const regex = /{{\s*([a-zA-Z0-9_]+)\s*}}/g;
@@ -31,10 +31,13 @@ const extractTemplateKeys = (template = {}) => {
     }
   };
 
-  pushMatches(template.title);
-  pushMatches(template.body);
+  fields.forEach((field) => {
+    pushMatches(template?.[field]);
+  });
   return Array.from(keys);
 };
+
+const extractBodyTemplateKeys = (template = {}) => extractTemplateKeys(template, ['body']);
 
 const buildTemplateVariables = (templateKey, templateVars = {}, activeTemplates = {}) => {
   const template = activeTemplates?.[templateKey];
@@ -239,6 +242,7 @@ const notificationWorker = new Worker('notifications', async (job) => {
       let html = '';
       let templateId = '';
       let templateVars = null;
+      let whatsappTemplateVars = null;
       
       if (signal) {
           const signalData = buildSignalTemplateData(signal);
@@ -249,6 +253,10 @@ const notificationWorker = new Worker('notifications', async (job) => {
           html = buildEmailHtml(title, message);
           templateId = getMsg91TemplateId(templateKey);
           templateVars = buildTemplateVariables(templateKey, signalData, activeTemplates);
+          whatsappTemplateVars = buildTemplateVariablesFromKeys(
+            extractBodyTemplateKeys(activeTemplates?.[templateKey] || {}),
+            signalData
+          );
       } else if (announcement) {
           // Determine subtype
           let templateKey = 'ANNOUNCEMENT';
@@ -261,6 +269,10 @@ const notificationWorker = new Worker('notifications', async (job) => {
           html = buildEmailHtml(title, message);
           templateId = getMsg91TemplateId(templateKey);
           templateVars = buildTemplateVariables(templateKey, announcement, activeTemplates);
+          whatsappTemplateVars = buildTemplateVariablesFromKeys(
+            extractBodyTemplateKeys(activeTemplates?.[templateKey] || {}),
+            announcement
+          );
       } else if (notification && !isEmailJob) {
           title = notification.title || notification?.notification?.title || 'Notification';
           message =
@@ -323,6 +335,8 @@ const notificationWorker = new Worker('notifications', async (job) => {
                    message,
                    signal,
                    announcement,
+                   templateName: templateId,
+                   templateComponents: whatsappTemplateVars,
                });
            } else {
                logger.debug(`Skipping WhatsApp for User ${userId} - channel disabled, recipient missing, or user opted out`);

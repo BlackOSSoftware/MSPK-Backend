@@ -370,7 +370,27 @@ const validateChannel = async (rawConfig = null) => {
   };
 };
 
-const buildMsg91Payload = ({ signal, announcement, title, message }) => {
+const buildMsg91Payload = ({
+  signal,
+  announcement,
+  title,
+  message,
+  templateName = '',
+  templateComponents = null,
+}) => {
+  const resolvedTemplateName = String(templateName || '').trim();
+
+  if (resolvedTemplateName) {
+    const parameters = Array.isArray(templateComponents)
+      ? templateComponents
+      : Object.keys(templateComponents || {}).map((key) => templateComponents[key]);
+
+    return {
+      templateName: resolvedTemplateName,
+      components: parameters.map((value) => String(value ?? '')),
+    };
+  }
+
   if (signal) {
     return {
       templateName: 'signal_alert',
@@ -393,13 +413,13 @@ const buildMsg91Payload = ({ signal, announcement, title, message }) => {
   };
 };
 
-const sendMsg91Notification = async (resolvedConfig, { to, signal, announcement, title, message }) => {
+const sendMsg91Notification = async (resolvedConfig, { to, signal, announcement, title, message, templateName, templateComponents }) => {
   const recipient = normalizeRecipient(to, 'msg91', resolvedConfig.defaultCountryCode);
   if (!recipient || isChatId(recipient)) {
     throw new Error('MSG91 provider requires a valid phone number');
   }
 
-  const payload = buildMsg91Payload({ signal, announcement, title, message });
+  const payload = buildMsg91Payload({ signal, announcement, title, message, templateName, templateComponents });
   await msg91Service.sendWhatsapp(recipient, payload.templateName, payload.components);
 
   return {
@@ -548,7 +568,7 @@ const sendMedia = async (
 
 const sendNotification = async (
   rawConfig = null,
-  { to, text, title, message, signal = null, announcement = null, priority } = {}
+  { to, text, title, message, signal = null, announcement = null, priority, templateName = '', templateComponents = null } = {}
 ) => {
   const resolvedConfig = resolveWhatsAppConfig(rawConfig);
   if (!isConfigured(resolvedConfig)) {
@@ -556,7 +576,15 @@ const sendNotification = async (
   }
 
   if (resolvedConfig.provider === 'msg91') {
-    return sendMsg91Notification(resolvedConfig, { to, signal, announcement, title, message });
+    return sendMsg91Notification(resolvedConfig, {
+      to,
+      signal,
+      announcement,
+      title,
+      message,
+      templateName,
+      templateComponents,
+    });
   }
 
   return sendText(resolvedConfig, {

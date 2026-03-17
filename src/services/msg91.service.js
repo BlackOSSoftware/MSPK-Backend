@@ -92,6 +92,10 @@ class Msg91Service {
              throw new Error('MSG91 WhatsApp integrated number missing');
         }
 
+        const componentValues = Array.isArray(components)
+            ? components
+            : Object.keys(components || {}).map((key) => components[key]);
+
         try {
            // This is a simplified implementation for MSG91's WhatsApp API
            // Docs: https://docs.msg91.com/reference/send-whatsapp-message
@@ -112,9 +116,9 @@ class Msg91Service {
                        components: [
                            {
                                type: "body",
-                               parameters: Object.keys(components).map(key => ({
+                               parameters: componentValues.map((value) => ({
                                    type: "text",
-                                   text: components[key]
+                                   text: String(value ?? '')
                                }))
                            }
                        ]

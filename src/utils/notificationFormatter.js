@@ -90,7 +90,7 @@ const getTimeframeDurationMs = (timeframe) => {
   return 0;
 };
 
-const resolveDisplayTimestamp = ({
+export const resolveDisplayTimestamp = ({
   primary,
   fallback,
   timeframe,

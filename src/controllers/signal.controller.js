@@ -15,6 +15,7 @@ import {
   normalizeSelectedSymbols,
   setUserSignalSelectedSymbols,
 } from '../utils/userSignalSelection.js';
+import { resolveDisplayTimestamp } from '../utils/notificationFormatter.js';
 import { pickBestMasterSymbol } from '../utils/masterSymbolResolver.js';
 import { resolveSymbolSegmentGroup } from '../utils/marketSegmentResolver.js';
 import { buildTimeframeQuery, normalizeSignalTimeframe } from '../utils/timeframe.js';
@@ -217,6 +218,17 @@ const formatSignalResponse = (signal, resolvedMasterSymbol = null) => {
   const canonicalSymbol = String(resolvedMasterSymbol?.symbol || signal.symbol || '').trim().toUpperCase();
   const symbolName = String(resolvedMasterSymbol?.name || signal.symbol || '').trim();
   const originalSymbol = String(signal?.symbol || '').trim().toUpperCase();
+  const normalizedTimeframe = normalizeSignalTimeframe(signal.timeframe) || signal.timeframe;
+  const displaySignalTime = resolveDisplayTimestamp({
+    primary: signal.signalTime,
+    fallback: signal.createdAt,
+    timeframe: normalizedTimeframe,
+  });
+  const displayExitTime = resolveDisplayTimestamp({
+    primary: signal.exitTime,
+    fallback: signal.updatedAt || signal.createdAt,
+    timeframe: normalizedTimeframe,
+  });
   const segment = resolvedMasterSymbol
     ? resolveSignalDisplaySegment({
         ...signal,
@@ -240,11 +252,14 @@ const formatSignalResponse = (signal, resolvedMasterSymbol = null) => {
     status: signal.status,
     timestamp: signal.createdAt,
     createdAt: signal.createdAt,
+    updatedAt: signal.updatedAt,
     signalTime: signal.signalTime,
+    displaySignalTime,
     exitPrice: getResolvedSignalExitPrice(signal),
     totalPoints: getResolvedSignalPoints(signal),
     exitReason: signal.exitReason,
     exitTime: signal.exitTime,
+    displayExitTime,
     segment,
     category: signal.category,
     targets: signal.targets,
@@ -252,7 +267,7 @@ const formatSignalResponse = (signal, resolvedMasterSymbol = null) => {
     notes: signal.notes,
     strategyId: signal.strategyId,
     strategyName: signal.strategyName,
-    timeframe: normalizeSignalTimeframe(signal.timeframe) || signal.timeframe,
+    timeframe: normalizedTimeframe,
     metrics: signal.metrics,
   };
 };
@@ -276,6 +291,63 @@ const getEndOfDay = (date) => {
   const next = new Date(date);
   next.setHours(23, 59, 59, 999);
   return next;
+};
+
+const buildSegmentFilterQuery = (segment = '') => {
+  const normalized = String(segment || '').trim().toUpperCase();
+  if (!normalized || normalized === 'ALL') return null;
+
+  if (normalized === 'NSE') {
+    return {
+      $or: [
+        { segment: { $in: ['EQUITY', 'INDICES', 'NSE', 'BSE', 'INDEX', 'NSEIX'] } },
+        { category: { $in: ['EQUITY_INTRA', 'EQUITY_DELIVERY', 'BTST', 'HERO_ZERO'] } },
+        { symbol: { $regex: /^(NSE|BSE|NSEIX):/i } },
+      ],
+    };
+  }
+
+  if (normalized === 'NFO') {
+    return {
+      $or: [
+        { segment: { $in: ['FNO', 'FO', 'NFO', 'OPTIONS', 'OPTION', 'FUTURES'] } },
+        { category: { $in: ['NIFTY_OPT', 'BANKNIFTY_OPT', 'FINNIFTY_OPT', 'STOCK_OPT'] } },
+        { symbol: { $regex: /^NFO:/i } },
+      ],
+    };
+  }
+
+  if (normalized === 'MCX') {
+    return {
+      $or: [
+        { segment: { $in: ['MCX', 'COMMODITY', 'COMEX', 'NYMEX'] } },
+        { category: 'MCX_FUT' },
+        { symbol: { $regex: /^(MCX|COMEX|NYMEX):/i } },
+      ],
+    };
+  }
+
+  if (normalized === 'FOREX' || normalized === 'CURRENCY') {
+    return {
+      $or: [
+        { segment: { $in: ['CURRENCY', 'FOREX', 'CDS', 'BCD', 'FX', 'CUR'] } },
+        { category: 'CURRENCY' },
+        { symbol: { $regex: /^(CDS|BCD|FOREX):/i } },
+      ],
+    };
+  }
+
+  if (normalized === 'CRYPTO') {
+    return {
+      $or: [
+        { segment: { $in: ['CRYPTO', 'BINANCE'] } },
+        { category: 'CRYPTO' },
+        { symbol: { $regex: /(USDT|USDC|BUSD|BTCUSD|ETHUSD|SOLUSD|XRPUSD|DOGEUSD|BNBUSD|ADAUSD|AVAXUSD|MATICUSD|LTCUSD|DOTUSD|TRXUSD)/i } },
+      ],
+    };
+  }
+
+  return { segment: normalized };
 };
 
 const resolveSignalDateRange = ({ datePreset, dateFilter, fromDate, toDate }) => {
@@ -663,20 +735,25 @@ const getSignals = catchAsync(async (req, res) => {
   // 2. Build Query Filters Array
   const { search, symbol, status, segment, type, dateFilter, datePreset, fromDate, toDate, signalId } = req.query;
   const conditions = [baseFilter];
+  const periodConditions = [baseFilter];
 
   if (search) {
-      conditions.push({
+      const searchFilter = {
         $or: [
           { symbol: { $regex: search, $options: 'i' } },
           { uniqueId: { $regex: search, $options: 'i' } },
           { webhookId: { $regex: search, $options: 'i' } },
           { strategyName: { $regex: search, $options: 'i' } },
         ],
-      });
+      };
+      conditions.push(searchFilter);
+      periodConditions.push(searchFilter);
   }
 
   if (symbol) {
-      conditions.push(buildSelectedSignalFilter([symbol]));
+      const symbolFilter = buildSelectedSignalFilter([symbol]);
+      conditions.push(symbolFilter);
+      periodConditions.push(symbolFilter);
   }
 
   const dateRange = resolveSignalDateRange({ datePreset, dateFilter, fromDate, toDate });
@@ -686,35 +763,51 @@ const getSignals = catchAsync(async (req, res) => {
 
   if (status && status !== 'All') {
       if (status === '!Closed') {
-          conditions.push({ status: { $nin: CLOSED_SIGNAL_STATUSES } });
+          const statusFilter = { status: { $nin: CLOSED_SIGNAL_STATUSES } };
+          conditions.push(statusFilter);
+          periodConditions.push(statusFilter);
       } else if (status === 'History') {
-          conditions.push({ status: { $in: CLOSED_SIGNAL_STATUSES } });
+          const statusFilter = { status: { $in: CLOSED_SIGNAL_STATUSES } };
+          conditions.push(statusFilter);
+          periodConditions.push(statusFilter);
       } else {
-          conditions.push({ status: status });
+          const statusFilter = { status };
+          conditions.push(statusFilter);
+          periodConditions.push(statusFilter);
       }
   }
 
   if (segment && segment !== 'All') {
-      conditions.push({ segment: segment });
+      const segmentFilter = buildSegmentFilterQuery(segment);
+      if (segmentFilter) {
+        conditions.push(segmentFilter);
+        periodConditions.push(segmentFilter);
+      }
   }
 
   if (type && type !== 'All') {
-      conditions.push({ type: type.toUpperCase() });
+      const typeFilter = { type: type.toUpperCase() };
+      conditions.push(typeFilter);
+      periodConditions.push(typeFilter);
   }
 
   if (signalId) {
-      conditions.push({ _id: signalId });
+      const idFilter = { _id: signalId };
+      conditions.push(idFilter);
+      periodConditions.push(idFilter);
   }
 
   if (req.query.timeframe) {
       const timeframeFilter = buildTimeframeQuery('timeframe', req.query.timeframe);
       if (timeframeFilter) {
         conditions.push(timeframeFilter);
+        periodConditions.push(timeframeFilter);
       }
   }
 
   // Final Composite Filter
   filter = conditions.length > 1 ? { $and: conditions } : conditions[0];
+  const periodFilter = periodConditions.length > 1 ? { $and: periodConditions } : periodConditions[0];
 
   // 3. Query Data
   const sortByLatestEvent = String(req.query.sortBy || '').trim().toLowerCase() === 'latest-event';
@@ -723,7 +816,7 @@ const getSignals = catchAsync(async (req, res) => {
   // 4. Get Visible Stats (based on access scope)
   const [stats, periodStats, report] = await Promise.all([
     signalService.getSignalStats(filter),
-    signalService.getSignalPeriodStats(baseFilter),
+    signalService.getSignalPeriodStats(periodFilter),
     String(req.query.includeReport || '').trim() === '1' && access.mode === 'admin'
       ? signalService.getSignalReport(filter)
       : Promise.resolve(null),
@@ -800,7 +893,10 @@ const exportSignalReport = catchAsync(async (req, res) => {
   }
 
   if (segment && segment !== 'All') {
-    conditions.push({ segment });
+    const segmentFilter = buildSegmentFilterQuery(segment);
+    if (segmentFilter) {
+      conditions.push(segmentFilter);
+    }
   }
 
   if (type && type !== 'All') {
