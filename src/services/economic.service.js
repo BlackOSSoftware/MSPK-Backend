@@ -13,11 +13,163 @@ class EconomicService {
         this.publicCalendarCache = {
             data: null,
             lastFetch: 0,
+            months: new Map(),
         };
         this.isAlertCheckRunning = false;
         // Cache duration: 1 Hour (Free tier limit is 250 calls/day, so 1 call/hr is safe)
         this.CACHE_DURATION = 60 * 60 * 1000; 
         this.baseUrl = 'https://financialmodelingprep.com/api/v3';
+    }
+
+    getMonthKey(date = new Date()) {
+        const monthNames = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+        const parsed = date instanceof Date ? new Date(date) : new Date(date);
+        if (Number.isNaN(parsed.getTime())) return '';
+        return `${monthNames[parsed.getMonth()]}.${parsed.getFullYear()}`;
+    }
+
+    getMonthKeysForRange(filter = {}) {
+        const start = filter.from ? new Date(filter.from) : new Date();
+        const end = filter.to ? new Date(filter.to) : new Date(start);
+
+        if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+            return [this.getMonthKey(new Date())].filter(Boolean);
+        }
+
+        start.setDate(1);
+        start.setHours(0, 0, 0, 0);
+        end.setDate(1);
+        end.setHours(0, 0, 0, 0);
+
+        const keys = [];
+        const cursor = new Date(start);
+        while (cursor.getTime() <= end.getTime() && keys.length < 12) {
+            const key = this.getMonthKey(cursor);
+            if (key) keys.push(key);
+            cursor.setMonth(cursor.getMonth() + 1, 1);
+        }
+
+        return keys.length > 0 ? keys : [this.getMonthKey(new Date())].filter(Boolean);
+    }
+
+    extractForexFactoryDays(html = '') {
+        const marker = 'days:';
+        const markerIndex = String(html).indexOf(marker);
+        if (markerIndex === -1) return [];
+
+        const startIndex = html.indexOf('[', markerIndex);
+        if (startIndex === -1) return [];
+
+        let depth = 0;
+        let inString = false;
+        let isEscaped = false;
+        let endIndex = -1;
+
+        for (let index = startIndex; index < html.length; index += 1) {
+            const char = html[index];
+
+            if (inString) {
+                if (isEscaped) {
+                    isEscaped = false;
+                    continue;
+                }
+                if (char === '\\') {
+                    isEscaped = true;
+                    continue;
+                }
+                if (char === '"') {
+                    inString = false;
+                }
+                continue;
+            }
+
+            if (char === '"') {
+                inString = true;
+                continue;
+            }
+
+            if (char === '[') {
+                depth += 1;
+                continue;
+            }
+
+            if (char === ']') {
+                depth -= 1;
+                if (depth === 0) {
+                    endIndex = index;
+                    break;
+                }
+            }
+        }
+
+        if (endIndex === -1) return [];
+
+        try {
+            return JSON.parse(html.slice(startIndex, endIndex + 1));
+        } catch (error) {
+            logger.error('ECONOMIC: Failed to parse ForexFactory fallback payload', error.message);
+            return [];
+        }
+    }
+
+    mapForexFactoryEvent(day = {}, event = {}) {
+        const timestamp = Number(event?.dateline);
+        const eventDate = Number.isFinite(timestamp) ? new Date(timestamp * 1000) : new Date(event?.date || day?.date);
+        if (Number.isNaN(eventDate.getTime())) return null;
+
+        const impactRaw = String(event?.impactName || '').trim().toLowerCase();
+        const normalizedImpact = impactRaw
+            ? impactRaw.charAt(0).toUpperCase() + impactRaw.slice(1)
+            : 'None';
+
+        return {
+            eventId: `ffx_${String(event?.id || `${event?.currency || 'NA'}_${event?.name || event?.event || eventDate.toISOString()}`)}`,
+            date: eventDate,
+            country: event?.country || event?.currency || '',
+            currency: event?.currency || '',
+            event: event?.name || event?.event || '',
+            impact: ['Low', 'Medium', 'High', 'None'].includes(normalizedImpact) ? normalizedImpact : 'None',
+            actual: event?.actual ?? '',
+            forecast: event?.forecast ?? '',
+            previous: event?.previous ?? '',
+            unit: null,
+            isAlertSent: false,
+        };
+    }
+
+    async fetchForexFactoryMonthEvents(monthKey) {
+        const normalizedKey = String(monthKey || '').trim().toLowerCase();
+        if (!normalizedKey) return [];
+
+        const cached = this.publicCalendarCache.months.get(normalizedKey);
+        const now = Date.now();
+        if (cached && now - cached.lastFetch < 60 * 60 * 1000) {
+            return cached.data;
+        }
+
+        try {
+            const response = await axios.get(`https://secure.forexfactory.com/calendar?month=${normalizedKey}`, {
+                timeout: 15000,
+                headers: {
+                    'User-Agent': 'Mozilla/5.0',
+                },
+            });
+
+            const days = this.extractForexFactoryDays(response.data);
+            const events = days
+                .flatMap((day) => (Array.isArray(day?.events) ? day.events.map((event) => this.mapForexFactoryEvent(day, event)) : []))
+                .filter(Boolean);
+
+            this.publicCalendarCache.months.set(normalizedKey, {
+                data: events,
+                lastFetch: now,
+            });
+
+            return events;
+        } catch (error) {
+            logger.error(`ECONOMIC: ForexFactory month fallback failed for ${normalizedKey}`, error.message);
+            return [];
+        }
     }
 
     initialize(apiKey) {
@@ -154,11 +306,25 @@ class EconomicService {
     }
 
     async getPublicFallbackEvents(filter = {}) {
+        const monthKeys = this.getMonthKeysForRange(filter);
+        const monthEvents = [];
+
+        for (const monthKey of monthKeys) {
+            const events = await this.fetchForexFactoryMonthEvents(monthKey);
+            if (events.length > 0) {
+                monthEvents.push(...events);
+            }
+        }
+
+        if (monthEvents.length > 0) {
+            const dedupedEvents = Array.from(
+                new Map(monthEvents.map((event) => [String(event.eventId || `${event.date}_${event.event}`), event])).values()
+            );
+            return this.filterPublicFallbackEvents(dedupedEvents, filter);
+        }
+
         const now = Date.now();
-        if (
-            Array.isArray(this.publicCalendarCache.data) &&
-            now - this.publicCalendarCache.lastFetch < 60 * 1000
-        ) {
+        if (Array.isArray(this.publicCalendarCache.data) && now - this.publicCalendarCache.lastFetch < 60 * 1000) {
             return this.filterPublicFallbackEvents(this.publicCalendarCache.data, filter);
         }
 
@@ -192,19 +358,21 @@ class EconomicService {
 
         const normalizedImpact = String(filter.impact || '').trim().toLowerCase();
 
-        return (Array.isArray(events) ? events : []).filter((event) => {
-            const eventDate = new Date(event.date);
-            if (Number.isNaN(eventDate.getTime())) return false;
-            if (fromDate && eventDate.getTime() < fromDate.getTime()) return false;
-            if (toDate && eventDate.getTime() > toDate.getTime()) return false;
-            if (!normalizedImpact || normalizedImpact === 'all') return true;
+        return (Array.isArray(events) ? events : [])
+            .filter((event) => {
+                const eventDate = new Date(event.date);
+                if (Number.isNaN(eventDate.getTime())) return false;
+                if (fromDate && eventDate.getTime() < fromDate.getTime()) return false;
+                if (toDate && eventDate.getTime() > toDate.getTime()) return false;
+                if (!normalizedImpact || normalizedImpact === 'all') return true;
 
-            if (normalizedImpact === 'important') {
-                return String(event.impact || '').toLowerCase() === 'high';
-            }
+                if (normalizedImpact === 'important') {
+                    return String(event.impact || '').toLowerCase() === 'high';
+                }
 
-            return String(event.impact || '').toLowerCase() === normalizedImpact;
-        });
+                return String(event.impact || '').toLowerCase() === normalizedImpact;
+            })
+            .sort((left, right) => new Date(left.date).getTime() - new Date(right.date).getTime());
     }
 
     /**
