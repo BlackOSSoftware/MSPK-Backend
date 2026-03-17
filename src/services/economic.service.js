@@ -43,7 +43,7 @@ class EconomicService {
         let totalPages = Math.max(1, Math.ceil(totalResults / limit));
         let skip = (page - 1) * limit;
         let results = await EconomicEvent.find(query)
-            .sort({ date: -1 })
+            .sort({ date: 1 })
             .skip(skip)
             .limit(limit);
 
@@ -63,7 +63,7 @@ class EconomicService {
             totalPages = Math.max(1, Math.ceil(totalResults / limit));
             skip = (page - 1) * limit;
             results = await EconomicEvent.find(query)
-                .sort({ date: -1 })
+                .sort({ date: 1 })
                 .skip(skip)
                 .limit(limit);
 
@@ -170,7 +170,7 @@ class EconomicService {
             const mappedEvents = rawEvents
                 .map((item) => this.mapPublicFallbackEvent(item))
                 .filter(Boolean)
-                .sort((left, right) => new Date(right.date).getTime() - new Date(left.date).getTime());
+                .sort((left, right) => new Date(left.date).getTime() - new Date(right.date).getTime());
 
             this.publicCalendarCache = {
                 data: mappedEvents,
