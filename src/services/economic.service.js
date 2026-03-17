@@ -21,6 +21,20 @@ class EconomicService {
         this.baseUrl = 'https://financialmodelingprep.com/api/v3';
     }
 
+    parseIndiaDateBoundary(value, endOfDay = false) {
+        if (!value) return null;
+        const normalized = String(value).trim();
+        if (!normalized) return null;
+
+        if (/^\d{4}-\d{2}-\d{2}$/.test(normalized)) {
+            return new Date(`${normalized}T${endOfDay ? '23:59:59.999' : '00:00:00.000'}+05:30`);
+        }
+
+        const parsed = new Date(normalized);
+        if (Number.isNaN(parsed.getTime())) return null;
+        return parsed;
+    }
+
     getMonthKey(date = new Date()) {
         const monthNames = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
         const parsed = date instanceof Date ? new Date(date) : new Date(date);
@@ -29,8 +43,8 @@ class EconomicService {
     }
 
     getMonthKeysForRange(filter = {}) {
-        const start = filter.from ? new Date(filter.from) : new Date();
-        const end = filter.to ? new Date(filter.to) : new Date(start);
+        const start = filter.from ? this.parseIndiaDateBoundary(filter.from) : new Date();
+        const end = filter.to ? this.parseIndiaDateBoundary(filter.to, true) : new Date(start);
 
         if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
             return [this.getMonthKey(new Date())].filter(Boolean);
@@ -241,15 +255,17 @@ class EconomicService {
             query.date = {};
 
             if (filter.from) {
-                const fromDate = new Date(filter.from);
-                fromDate.setHours(0, 0, 0, 0);
+                const fromDate = this.parseIndiaDateBoundary(filter.from);
+                if (fromDate) {
                 query.date.$gte = fromDate;
+                }
             }
 
             if (filter.to) {
-                const toDate = new Date(filter.to);
-                toDate.setHours(23, 59, 59, 999);
+                const toDate = this.parseIndiaDateBoundary(filter.to, true);
+                if (toDate) {
                 query.date.$lte = toDate;
+                }
             }
         }
 
@@ -351,10 +367,8 @@ class EconomicService {
     }
 
     filterPublicFallbackEvents(events = [], filter = {}) {
-        const fromDate = filter.from ? new Date(filter.from) : null;
-        const toDate = filter.to ? new Date(filter.to) : null;
-        if (fromDate) fromDate.setHours(0, 0, 0, 0);
-        if (toDate) toDate.setHours(23, 59, 59, 999);
+        const fromDate = filter.from ? this.parseIndiaDateBoundary(filter.from) : null;
+        const toDate = filter.to ? this.parseIndiaDateBoundary(filter.to, true) : null;
 
         const normalizedImpact = String(filter.impact || '').trim().toLowerCase();
 
