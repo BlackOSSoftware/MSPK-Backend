@@ -2029,7 +2029,14 @@ const getHistory = catchAsync(async (req, res) => {
     const fromValue = from ? from : Math.max(0, fallbackFrom);
 
     logger.info(`History Request: ${symbol} (${resolution}) from ${fromValue} to ${toValue} count ${resolvedCount}`);
-    const history = await marketDataService.getHistory(symbol, resolution, fromValue, toValue, resolvedCount);
+    const history = await marketDataService.getHistory(
+        symbol,
+        resolution,
+        fromValue,
+        toValue,
+        resolvedCount,
+        { throwOnAuthError: true }
+    );
     logger.info(`[HISTORY_RESPONSE] Returning ${history.length} candles for ${symbol}`);
     res.send(history);
 });

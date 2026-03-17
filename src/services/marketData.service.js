@@ -1,5 +1,6 @@
 import { EventEmitter } from 'events';
 import axios from 'axios';
+import httpStatus from 'http-status';
 import Setting from '../models/Setting.js';
 import MasterSymbol from '../models/MasterSymbol.js';
 import { kiteService } from './kite.service.js';
@@ -8,6 +9,7 @@ import mt5Service from './mt5.service.js';
 import pipeline from '../utils/pipeline/DataPipeline.js';
 import { redisClient } from './redis.service.js';
 import logger from '../config/log.js';
+import ApiError from '../utils/ApiError.js';
 import { decrypt, encrypt } from '../utils/encryption.js';
 import cacheManager from './cacheManager.js';
 import { decorateSymbolSegment } from '../utils/marketSegmentResolver.js';
@@ -1753,7 +1755,7 @@ class MarketDataService extends EventEmitter {
         return response;
     }
 
-    async getHistory(symbol, resolution, from, to, countOverride = null) {
+    async getHistory(symbol, resolution, from, to, countOverride = null, options = {}) {
         let canonical = this._getCanonicalSymbol(symbol) || String(symbol || '').trim();
         if (!canonical) return [];
         const alias = this._resolveHistoryAlias(canonical);
@@ -1792,6 +1794,12 @@ class MarketDataService extends EventEmitter {
 
                 if (this.kiteAuthBrokenUntil && Date.now() < this.kiteAuthBrokenUntil) {
                     logger.warn(`MARKET_DATA: Skipping Kite history for ${historySymbol}; auth cooldown active`);
+                    if (options?.throwOnAuthError) {
+                        throw new ApiError(
+                            httpStatus.UNAUTHORIZED,
+                            'Zerodha/Kite session expired or invalid. Please reconnect Kite.'
+                        );
+                    }
                     return [];
                 }
 
@@ -1900,15 +1908,53 @@ class MarketDataService extends EventEmitter {
 
             return [];
         } catch (error) {
+            const message = String(error?.message || '');
+            const lower = message.toLowerCase();
+            const statusCode = Number(
+                error?.status ||
+                error?.statusCode ||
+                error?.response?.status ||
+                0
+            );
+
+            const isAuthError = (
+                statusCode === 401 ||
+                statusCode === 403 ||
+                lower.includes('403') ||
+                lower.includes('401') ||
+                (lower.includes('incorrect') && (lower.includes('api_key') || lower.includes('access_token')))
+            );
+
+            // If the access token was updated in DB while the server is running, refresh settings once and retry.
             if (
-                error.message?.includes('403') ||
-                error.message?.includes('401') ||
-                error.message?.toLowerCase().includes('incorrect api_key')
+                isAuthError &&
+                options?.reloadSettingsOnAuthError !== false &&
+                !options?._retriedAfterSettingsReload
             ) {
-                this.kiteAuthBrokenUntil = Date.now() + 5 * 60 * 1000;
+                try {
+                    await this.loadSettings();
+                } catch (reloadError) {
+                    logger.warn(`MARKET_DATA: Failed reloading settings after auth error: ${reloadError.message}`);
+                }
+
+                return await this.getHistory(symbol, resolution, from, to, countOverride, {
+                    ...options,
+                    _retriedAfterSettingsReload: true,
+                });
             }
 
-            logger.error(`MARKET_DATA: History fetch failed for ${canonical}: ${error.message}`);
+            if (isAuthError) {
+                this.kiteAuthBrokenUntil = Date.now() + 5 * 60 * 1000;
+
+                if (options?.throwOnAuthError) {
+                    throw new ApiError(
+                        httpStatus.UNAUTHORIZED,
+                        'Zerodha/Kite session expired or invalid. Please reconnect Kite.'
+                    );
+                }
+            }
+
+            logger.error(`MARKET_DATA: History fetch failed for ${canonical}: ${message}`);
             return [];
         }
     }
