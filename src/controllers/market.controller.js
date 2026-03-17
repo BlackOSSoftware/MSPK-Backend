@@ -359,6 +359,7 @@ const enrichMarketSymbols = (symbols) => {
             segment: s.segment,
             segmentGroup: resolveSymbolSegmentGroup(s),
             exchange: s.exchange,
+            isLocked: Boolean(s.isLocked),
             provider: s.provider || null,
             price: live,
             prevClose: Number.isFinite(close) ? close : 0,
@@ -478,6 +479,11 @@ const buildInitialMarketWatchlists = (rawWatchlists = [], fallbackSymbols = []) 
             normalizeMarketWatchlistName(sourceItem.name) || `Watchlist ${index + 1}`;
         const name = makeUniqueWatchlistName(preferredName, usedNameMap);
         const symbols = normalizeSelectedSymbols(sourceItem.symbols);
+        const hasCustomSymbols = Object.prototype.hasOwnProperty.call(sourceItem, 'customSymbols');
+        const customSymbols = hasCustomSymbols
+            ? normalizeSelectedSymbols(sourceItem.customSymbols)
+            : null;
+        const templateKey = String(sourceItem.templateKey || '').trim().toLowerCase() || undefined;
         const createdAt = sourceItem.createdAt ? new Date(sourceItem.createdAt) : new Date();
         const updatedAt = sourceItem.updatedAt ? new Date(sourceItem.updatedAt) : createdAt;
 
@@ -485,6 +491,8 @@ const buildInitialMarketWatchlists = (rawWatchlists = [], fallbackSymbols = []) 
             id,
             name,
             symbols,
+            customSymbols,
+            templateKey,
             isDefault: Boolean(sourceItem.isDefault),
             createdAt,
             updatedAt,
@@ -542,19 +550,13 @@ const findDocBySymbolHint = (docsBySymbol = new Map(), symbolHint = '') => {
 };
 
 const pickTopTemplateSymbols = (symbolDocs = [], docsBySymbol = new Map(), template = {}) => {
-    const matcher = typeof template.matcher === 'function' ? template.matcher : () => false;
-    const symbolLimitRaw = Number(template?.symbolLimit);
-    const symbolLimit = Number.isFinite(symbolLimitRaw)
-        ? Math.min(Math.max(Math.floor(symbolLimitRaw), 1), 50)
-        : DEFAULT_PRELOADED_WATCHLIST_SYMBOL_LIMIT;
     const selected = [];
     const seen = new Set();
 
-    const tryAddDoc = (doc, { force = false } = {}) => {
+    const tryAddDoc = (doc) => {
         if (!doc?.symbol) return;
         const symbol = String(doc.symbol).trim().toUpperCase();
         if (!symbol || seen.has(symbol)) return;
-        if (!force && !matcher(doc)) return;
         seen.add(symbol);
         selected.push(symbol);
     };
@@ -565,24 +567,7 @@ const pickTopTemplateSymbols = (symbolDocs = [], docsBySymbol = new Map(), templ
     for (const hint of preferredSymbols) {
         const preferredDoc = findDocBySymbolHint(docsBySymbol, hint);
         // Preferred symbols should be honored even when segment metadata is imperfect.
-        tryAddDoc(preferredDoc, { force: true });
-        if (selected.length >= symbolLimit) {
-            return selected;
-        }
-    }
-
-    const remainingCandidates = symbolDocs
-        .filter((doc) => matcher(doc))
-        .sort((left, right) => {
-            const leftPriority = Number(Boolean(left?.isWatchlist));
-            const rightPriority = Number(Boolean(right?.isWatchlist));
-            if (leftPriority !== rightPriority) return rightPriority - leftPriority;
-            return String(left?.symbol || '').localeCompare(String(right?.symbol || ''));
-        });
-
-    for (const doc of remainingCandidates) {
-        tryAddDoc(doc);
-        if (selected.length >= symbolLimit) break;
+        tryAddDoc(preferredDoc);
     }
 
     return selected;
@@ -595,22 +580,13 @@ const buildPreloadedTemplateWatchlists = async (templates = [], templateNameSet 
     });
     if (targetTemplates.length === 0) return [];
 
-    const symbolDocs = await MasterSymbol.find({
-        isActive: { $ne: false },
-    })
-        .select('symbol name segment exchange subsegment meta isWatchlist')
-        .lean();
-
-    const normalizedDocs = symbolDocs
-        .map((doc) => normalizeSymbolDoc(doc))
-        .filter((doc) => Boolean(doc.symbol));
-    const docsBySymbol = new Map(normalizedDocs.map((doc) => [doc.symbol, doc]));
-
     const preloadedWatchlists = [];
     for (const template of targetTemplates) {
-        const symbols = pickTopTemplateSymbols(normalizedDocs, docsBySymbol, template);
-        if (symbols.length === 0) continue;
+        const symbols = normalizeSelectedSymbols(
+            Array.isArray(template?.preferredSymbols) ? template.preferredSymbols : []
+        );
         preloadedWatchlists.push({
+            key: String(template?.key || '').trim().toLowerCase(),
             name: template.name,
             symbols,
         });
@@ -633,6 +609,7 @@ const buildPreloadedMarketWatchlists = async (templates = [], fallbackSymbols = 
             id: createMarketWatchlistId(),
             name: makeUniqueWatchlistName(DEFAULT_MARKET_WATCHLIST_NAME, usedNameMap),
             symbols: normalizedFallback,
+            customSymbols: [],
             isDefault: true,
             createdAt: now,
             updatedAt: now,
@@ -646,6 +623,8 @@ const buildPreloadedMarketWatchlists = async (templates = [], fallbackSymbols = 
             id: createMarketWatchlistId(),
             name: makeUniqueWatchlistName(template.name, usedNameMap),
             symbols: template.symbols,
+            customSymbols: [],
+            templateKey: String(template.key || '').trim().toLowerCase() || undefined,
             isDefault: false,
             createdAt: now,
             updatedAt: now,
@@ -658,6 +637,7 @@ const buildPreloadedMarketWatchlists = async (templates = [], fallbackSymbols = 
             id: createMarketWatchlistId(),
             name: makeUniqueWatchlistName(DEFAULT_MARKET_WATCHLIST_NAME, usedNameMap),
             symbols: normalizedFallback,
+            customSymbols: [],
             isDefault: true,
             createdAt: now,
             updatedAt: now,
@@ -707,13 +687,15 @@ const appendMissingPreloadedWatchlists = async (
         if (currentNameSet.has(templateNameKey)) continue;
 
         const templateEntry = templateByName.get(templateNameKey);
-        if (!templateEntry || templateEntry.symbols.length === 0) continue;
+        if (!templateEntry) continue;
 
         const now = new Date();
         nextWatchlists.push({
             id: createMarketWatchlistId(),
             name: makeUniqueWatchlistName(template.name, usedNameMap),
             symbols: templateEntry.symbols,
+            customSymbols: [],
+            templateKey: String(templateEntry.key || template.key || '').trim().toLowerCase() || undefined,
             isDefault: false,
             createdAt: now,
             updatedAt: now,
@@ -722,6 +704,90 @@ const appendMissingPreloadedWatchlists = async (
     }
 
     return nextWatchlists;
+};
+
+const buildTemplateLookup = async (templates = []) => {
+    const preloaded = await buildPreloadedTemplateWatchlists(templates);
+    const symbolMap = new Map();
+    const keyByName = new Map();
+
+    for (const entry of preloaded) {
+        const nameKey = normalizeMarketWatchlistName(entry?.name).toLowerCase();
+        const templateKey = String(entry?.key || '').trim().toLowerCase();
+        const symbols = normalizeSelectedSymbols(entry?.symbols);
+
+        if (templateKey) {
+            symbolMap.set(templateKey, symbols);
+        }
+        if (nameKey) {
+            symbolMap.set(nameKey, symbols);
+            if (templateKey) {
+                keyByName.set(nameKey, templateKey);
+            }
+        }
+    }
+
+    return { symbolMap, keyByName };
+};
+
+const mergeTemplateWatchlistSymbols = (watchlist, baseSymbols = []) => {
+    const baseList = normalizeSelectedSymbols(baseSymbols);
+    const baseSet = new Set(baseList);
+    const storedSymbols = normalizeSelectedSymbols(watchlist?.symbols);
+    const hasCustomField = watchlist && Object.prototype.hasOwnProperty.call(watchlist, 'customSymbols');
+    const storedCustomRaw = hasCustomField ? watchlist?.customSymbols : null;
+    const storedCustom = Array.isArray(storedCustomRaw)
+        ? normalizeSelectedSymbols(storedCustomRaw)
+        : [];
+
+    if (!hasCustomField || storedCustomRaw === null) {
+        return {
+            symbols: baseList,
+            customSymbols: [],
+        };
+    }
+
+    const customSymbols = storedCustom.length > 0
+        ? storedCustom.filter((sym) => !baseSet.has(sym))
+        : storedSymbols.filter((sym) => !baseSet.has(sym));
+
+    const allowedSet = new Set([...baseList, ...customSymbols]);
+    const ordered = [];
+    const seen = new Set();
+
+    for (const sym of storedSymbols) {
+        if (!allowedSet.has(sym) || seen.has(sym)) continue;
+        ordered.push(sym);
+        seen.add(sym);
+    }
+
+    for (const sym of baseList) {
+        if (seen.has(sym)) continue;
+        ordered.push(sym);
+        seen.add(sym);
+    }
+
+    for (const sym of customSymbols) {
+        if (seen.has(sym)) continue;
+        ordered.push(sym);
+        seen.add(sym);
+    }
+
+    return {
+        symbols: ordered,
+        customSymbols,
+    };
+};
+
+const resolveTemplateSymbolsForWatchlist = (watchlist, templateSymbolMap, templateKeyByName) => {
+    const nameKey = normalizeMarketWatchlistName(watchlist?.name).toLowerCase();
+    const directKey = String(watchlist?.templateKey || '').trim().toLowerCase();
+    const resolvedKey = directKey || (templateKeyByName?.get(nameKey) ?? '');
+    const symbols =
+        (resolvedKey && templateSymbolMap?.get(resolvedKey)) ||
+        templateSymbolMap?.get(nameKey) ||
+        [];
+    return { symbols, templateKey: resolvedKey || directKey || undefined };
 };
 
 const upsertAllWatchlist = (watchlists = []) => {
@@ -776,6 +842,8 @@ const pickWatchlistSnapshot = (watchlists = []) =>
         id: String(item?.id || '').trim(),
         name: normalizeMarketWatchlistName(item?.name),
         symbols: normalizeSelectedSymbols(item?.symbols),
+        customSymbols: normalizeSelectedSymbols(item?.customSymbols),
+        templateKey: String(item?.templateKey || '').trim().toLowerCase() || undefined,
         isDefault: Boolean(item?.isDefault),
     }));
 
@@ -816,6 +884,8 @@ const resolveUserMarketWatchlistsState = async (user) => {
     const forcedActiveWatchlistId = String(user?.activeMarketWatchlistId || '').trim();
 
     const activeTemplates = await getActiveMarketWatchlistTemplates();
+    const { symbolMap: templateSymbolMap, keyByName: templateKeyByName } =
+        await buildTemplateLookup(activeTemplates);
     const templateNames = activeTemplates.map((template) =>
         normalizeMarketWatchlistName(template?.name).toLowerCase()
     );
@@ -832,6 +902,31 @@ const resolveUserMarketWatchlistsState = async (user) => {
         missingTemplateNames
     );
     initialWatchlists = upsertAllWatchlist(initialWatchlists);
+
+    initialWatchlists = initialWatchlists.map((item) => {
+        const nameKey = normalizeMarketWatchlistName(item?.name).toLowerCase();
+        let templateKey = String(item?.templateKey || '').trim().toLowerCase();
+        if (!templateKey) {
+            templateKey = templateKeyByName.get(nameKey) || '';
+        }
+        const baseSymbols =
+            (templateKey && templateSymbolMap.get(templateKey)) ||
+            templateSymbolMap.get(nameKey);
+        if (!baseSymbols) return item;
+
+        const merged = mergeTemplateWatchlistSymbols(item, baseSymbols);
+        const symbolsChanged =
+            !isSameSymbolOrder(normalizeSelectedSymbols(item.symbols), merged.symbols) ||
+            !isSameSymbolOrder(normalizeSelectedSymbols(item.customSymbols), merged.customSymbols);
+
+        return {
+            ...item,
+            symbols: merged.symbols,
+            customSymbols: merged.customSymbols,
+            templateKey: templateKey || item.templateKey,
+            updatedAt: symbolsChanged ? new Date() : item.updatedAt,
+        };
+    });
 
     const allSymbols = normalizeSelectedSymbols(initialWatchlists.flatMap((item) => item.symbols));
     const symbolDocs = allSymbols.length
@@ -890,6 +985,8 @@ const resolveUserMarketWatchlistsState = async (user) => {
         activeWatchlistId,
         activeWatchlist,
         shouldPersist: watchlistsChanged || activeWatchlistChanged || legacyWatchlistChanged,
+        templateSymbolMap,
+        templateKeyByName,
     };
 };
 
@@ -985,7 +1082,8 @@ const createUserWatchlist = catchAsync(async (req, res) => {
     }
     const setActive = req.body?.setActive !== false;
 
-    const { watchlists, activeWatchlistId } = await resolveUserMarketWatchlistsState(user);
+    const { watchlists, activeWatchlistId, templateSymbolMap } =
+        await resolveUserMarketWatchlistsState(user);
     if (watchlists.length >= MAX_MARKET_WATCHLISTS) {
         throw new ApiError(
             httpStatus.BAD_REQUEST,
@@ -1001,6 +1099,8 @@ const createUserWatchlist = catchAsync(async (req, res) => {
         id: createMarketWatchlistId(),
         name,
         symbols: [],
+        customSymbols: [],
+        templateKey: undefined,
         isDefault: false,
         createdAt: now,
         updatedAt: now,
@@ -1045,7 +1145,7 @@ const updateUserWatchlist = catchAsync(async (req, res) => {
     let updatedWatchlist = { ...currentWatchlist };
 
     if (hasName) {
-        if (isTemplateWatchlistName(currentWatchlist.name)) {
+        if (await isReservedTemplateName(currentWatchlist.name)) {
             throw new ApiError(httpStatus.BAD_REQUEST, 'Default folders cannot be renamed');
         }
         const name = validateWatchlistName(req.body.name);
@@ -1185,7 +1285,7 @@ const getTickers = catchAsync(async (req, res) => {
 const getUserWatchlist = catchAsync(async (req, res) => {
     const user = req.user;
     const requestedWatchlistId = String(req.query?.watchlistId || '').trim();
-    const { watchlists, activeWatchlist, activeWatchlistId, shouldPersist } =
+    const { watchlists, activeWatchlist, activeWatchlistId, shouldPersist, templateSymbolMap, templateKeyByName } =
         await resolveUserMarketWatchlistsState(user);
 
     if (shouldPersist) {
@@ -1208,12 +1308,23 @@ const getUserWatchlist = catchAsync(async (req, res) => {
         return res.send([]);
     }
 
-    const docs = await MasterSymbol.find({ symbol: { $in: symbols } }).lean();
-    const map = new Map(docs.map(d => [d.symbol, d]));
+    const { symbols: lockedSymbols, templateKey } = resolveTemplateSymbolsForWatchlist(
+        targetWatchlist,
+        templateSymbolMap,
+        templateKeyByName
+    );
+    const lockedSet = new Set(lockedSymbols);
 
-    const ordered = symbols
-        .map(sym => map.get(sym))
-        .filter(Boolean);
+    const docs = await MasterSymbol.find({ symbol: { $in: symbols } }).lean();
+    const map = new Map(docs.map(d => [String(d.symbol).trim().toUpperCase(), d]));
+
+    const ordered = symbols.map((sym) => {
+        const doc = map.get(sym);
+        if (doc) {
+            return { ...doc, isLocked: lockedSet.has(sym) };
+        }
+        return { symbol: sym, name: sym, isLocked: lockedSet.has(sym) };
+    });
 
     await Promise.all(ordered.map(s => marketDataService.ensureSymbolSubscription(s.symbol, s)));
 
@@ -1247,7 +1358,8 @@ const addUserWatchlist = catchAsync(async (req, res) => {
     }
 
     const user = req.user;
-    const { watchlists, activeWatchlistId } = await resolveUserMarketWatchlistsState(user);
+    const { watchlists, activeWatchlistId, templateSymbolMap, templateKeyByName } =
+        await resolveUserMarketWatchlistsState(user);
     const targetWatchlistId = requestedWatchlistId || activeWatchlistId;
     const targetIndex = watchlists.findIndex((item) => item.id === targetWatchlistId);
     if (targetIndex === -1) {
@@ -1280,7 +1392,26 @@ const addUserWatchlist = catchAsync(async (req, res) => {
         list.push(normalized);
     }
 
-    targetWatchlist.symbols = list;
+    const { symbols: baseSymbols, templateKey } = resolveTemplateSymbolsForWatchlist(
+        targetWatchlist,
+        templateSymbolMap,
+        templateKeyByName
+    );
+
+    if (baseSymbols.length > 0) {
+        const merged = mergeTemplateWatchlistSymbols(
+            { ...targetWatchlist, symbols: list },
+            baseSymbols
+        );
+        targetWatchlist.symbols = merged.symbols;
+        targetWatchlist.customSymbols = merged.customSymbols;
+        if (templateKey && !targetWatchlist.templateKey) {
+            targetWatchlist.templateKey = templateKey;
+        }
+    } else {
+        targetWatchlist.symbols = list;
+        targetWatchlist.customSymbols = normalizeSelectedSymbols(targetWatchlist.customSymbols);
+    }
     targetWatchlist.updatedAt = new Date();
     watchlists[targetIndex] = targetWatchlist;
     commitUserMarketWatchlistsState(user, watchlists, activeWatchlistId);
@@ -1307,7 +1438,8 @@ const removeUserWatchlist = catchAsync(async (req, res) => {
     normalized = await resolvePreferredCryptoSpotSymbol(normalized);
     const symbolDoc = await MasterSymbol.findOne({ symbol: normalized }).select('symbol');
     const user = req.user;
-    const { watchlists, activeWatchlistId } = await resolveUserMarketWatchlistsState(user);
+    const { watchlists, activeWatchlistId, templateSymbolMap, templateKeyByName } =
+        await resolveUserMarketWatchlistsState(user);
     const targetWatchlistId = requestedWatchlistId || activeWatchlistId;
     const targetIndex = watchlists.findIndex((item) => item.id === targetWatchlistId);
     if (targetIndex === -1) {
@@ -1315,11 +1447,32 @@ const removeUserWatchlist = catchAsync(async (req, res) => {
     }
     const targetWatchlist = { ...watchlists[targetIndex] };
     assertMutableWatchlist(targetWatchlist);
-    assertMutableWatchlist(targetWatchlist);
-    const list = normalizeSelectedSymbols(targetWatchlist.symbols);
-    const next = list.filter(s => s !== normalized);
+    const { symbols: baseSymbols, templateKey } = resolveTemplateSymbolsForWatchlist(
+        targetWatchlist,
+        templateSymbolMap,
+        templateKeyByName
+    );
+    if (baseSymbols.includes(normalized)) {
+        throw new ApiError(httpStatus.FORBIDDEN, 'Default watchlist symbols cannot be removed');
+    }
 
-    targetWatchlist.symbols = next;
+    const list = normalizeSelectedSymbols(targetWatchlist.symbols);
+    const next = list.filter((s) => s !== normalized);
+
+    if (baseSymbols.length > 0) {
+        const merged = mergeTemplateWatchlistSymbols(
+            { ...targetWatchlist, symbols: next },
+            baseSymbols
+        );
+        targetWatchlist.symbols = merged.symbols;
+        targetWatchlist.customSymbols = merged.customSymbols;
+        if (templateKey && !targetWatchlist.templateKey) {
+            targetWatchlist.templateKey = templateKey;
+        }
+    } else {
+        targetWatchlist.symbols = next;
+        targetWatchlist.customSymbols = normalizeSelectedSymbols(targetWatchlist.customSymbols);
+    }
     targetWatchlist.updatedAt = new Date();
     watchlists[targetIndex] = targetWatchlist;
     commitUserMarketWatchlistsState(user, watchlists, activeWatchlistId);
@@ -1343,7 +1496,8 @@ const reorderUserWatchlist = catchAsync(async (req, res) => {
     const requestedWatchlistId = String(req.body?.watchlistId || '').trim();
 
     const user = req.user;
-    const { watchlists, activeWatchlistId } = await resolveUserMarketWatchlistsState(user);
+    const { watchlists, activeWatchlistId, templateSymbolMap, templateKeyByName } =
+        await resolveUserMarketWatchlistsState(user);
     const targetWatchlistId = requestedWatchlistId || activeWatchlistId;
     const targetIndex = watchlists.findIndex((item) => item.id === targetWatchlistId);
     if (targetIndex === -1) {
@@ -1376,7 +1530,25 @@ const reorderUserWatchlist = catchAsync(async (req, res) => {
     const missingSymbols = currentSymbols.filter((symbol) => !nextSymbols.includes(symbol));
     const finalOrder = [...nextSymbols, ...missingSymbols];
 
-    targetWatchlist.symbols = finalOrder;
+    const { symbols: baseSymbols, templateKey } = resolveTemplateSymbolsForWatchlist(
+        targetWatchlist,
+        templateSymbolMap,
+        templateKeyByName
+    );
+    if (baseSymbols.length > 0) {
+        const merged = mergeTemplateWatchlistSymbols(
+            { ...targetWatchlist, symbols: finalOrder },
+            baseSymbols
+        );
+        targetWatchlist.symbols = merged.symbols;
+        targetWatchlist.customSymbols = merged.customSymbols;
+        if (templateKey && !targetWatchlist.templateKey) {
+            targetWatchlist.templateKey = templateKey;
+        }
+    } else {
+        targetWatchlist.symbols = finalOrder;
+        targetWatchlist.customSymbols = normalizeSelectedSymbols(targetWatchlist.customSymbols);
+    }
     targetWatchlist.updatedAt = new Date();
     watchlists[targetIndex] = targetWatchlist;
     commitUserMarketWatchlistsState(user, watchlists, activeWatchlistId);

@@ -29,6 +29,7 @@ const buildDefaultUserMarketWatchlistState = (
         id: activeWatchlistId,
         name: DEFAULT_MARKET_WATCHLIST_NAME,
         symbols: normalizedSymbols,
+        customSymbols: [],
         isDefault: true,
         createdAt: now,
         updatedAt: now,
