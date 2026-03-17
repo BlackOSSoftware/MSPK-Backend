@@ -327,7 +327,12 @@ const createSignal = async (signalBody, user) => {
   return signal;
 };
 
-const buildSignalDedupStages = (filter = {}) => {
+const buildSignalSortSpec = (sortByLatestEvent = false) =>
+  sortByLatestEvent
+    ? { __eventTime: -1, updatedAt: -1, createdAt: -1, _id: -1 }
+    : { createdAt: -1, _id: -1 };
+
+const buildSignalDedupStages = (filter = {}, { sortByLatestEvent = false } = {}) => {
   const stages = [];
 
   if (filter && Object.keys(filter).length > 0) {
@@ -337,6 +342,9 @@ const buildSignalDedupStages = (filter = {}) => {
   stages.push(
     {
       $addFields: {
+        __eventTime: {
+          $ifNull: ['$exitTime', { $ifNull: ['$updatedAt', { $ifNull: ['$signalTime', '$createdAt'] }] }],
+        },
         __dedupeKey: {
           $switch: {
             branches: [
@@ -387,15 +395,14 @@ const buildSignalDedupStages = (filter = {}) => {
         },
       },
     },
-    { $sort: { createdAt: -1, _id: -1 } },
+    { $sort: buildSignalSortSpec(sortByLatestEvent) },
     {
       $group: {
         _id: '$__dedupeKey',
         doc: { $first: '$$ROOT' },
       },
     },
-    { $replaceRoot: { newRoot: '$doc' } },
-    { $project: { __dedupeKey: 0 } }
+    { $replaceRoot: { newRoot: '$doc' } }
   );
 
   return stages;
@@ -405,8 +412,10 @@ const querySignals = async (filter, options) => {
   const page = options.page ? parseInt(options.page) : 1;
   const limit = options.limit ? parseInt(options.limit) : 10;
   const skip = (page - 1) * limit;
+  const sortByLatestEvent = Boolean(options?.sortByLatestEvent);
+  const sortSpec = buildSignalSortSpec(sortByLatestEvent);
 
-  const baseStages = buildSignalDedupStages(filter);
+  const baseStages = buildSignalDedupStages(filter, { sortByLatestEvent });
   const [countResult, results] = await Promise.all([
     Signal.aggregate([
       ...baseStages,
@@ -414,9 +423,10 @@ const querySignals = async (filter, options) => {
     ]),
     Signal.aggregate([
       ...baseStages,
-      { $sort: { createdAt: -1, _id: -1 } },
+      { $sort: sortSpec },
       { $skip: skip },
       { $limit: limit },
+      { $project: { __dedupeKey: 0, __eventTime: 0 } },
     ]),
   ]);
 
@@ -563,6 +573,7 @@ const listSignalsForReport = async (filter = {}) => {
   return Signal.aggregate([
     ...buildSignalDedupStages(filter),
     { $sort: { createdAt: -1, _id: -1 } },
+    { $project: { __dedupeKey: 0, __eventTime: 0 } },
   ]);
 };
 

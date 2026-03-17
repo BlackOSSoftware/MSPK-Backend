@@ -172,71 +172,124 @@ const receiveSignal = catchAsync(async (req, res) => {
   }
 
   const findSignalByWebhookId = async (webhookId) => {
-    if (!webhookId) return null;
+    if (!webhookId) return { signal: null, ambiguous: false };
     const id = String(webhookId).trim();
     const baseFilter = symbol ? { symbol, segment } : { segment };
     const timeframeFilter = buildTimeframeQuery('timeframe', normalizedTimeframe);
     const buildScopedFilters = (filter) =>
-      timeframeFilter ? [{ ...filter, ...timeframeFilter }, filter] : [filter];
+      timeframeFilter ? [{ ...filter, ...timeframeFilter }] : [filter];
+    const dedupeSignals = (signals = []) => {
+      const uniqueSignals = new Map();
+      signals.forEach((candidate) => {
+        if (!candidate?._id) return;
+        uniqueSignals.set(String(candidate._id), candidate);
+      });
+      return Array.from(uniqueSignals.values());
+    };
+    const sortCandidates = (signals = []) =>
+      [...signals].sort((left, right) => {
+        const leftUpdated = new Date(left?.updatedAt || left?.createdAt || 0).getTime();
+        const rightUpdated = new Date(right?.updatedAt || right?.createdAt || 0).getTime();
+        return rightUpdated - leftUpdated;
+      });
+    const resolveCandidateResult = (signals = []) => {
+      const candidates = sortCandidates(dedupeSignals(signals));
+      if (candidates.length === 0) {
+        return { signal: null, ambiguous: false };
+      }
+
+      if (timeframeFilter) {
+        return { signal: candidates[0], ambiguous: false };
+      }
+
+      const distinctTimeframes = new Set(
+        candidates
+          .map((candidate) => normalizeSignalTimeframe(candidate?.timeframe) || String(candidate?.timeframe || '').trim())
+          .filter(Boolean)
+      );
+
+      if (distinctTimeframes.size > 1) {
+        logger.warn(
+          `[WEBHOOK] Ambiguous signal match for ${symbol || 'unknown'} webhookId=${id}. Multiple timeframes active; include timeframe in webhook EXIT/INFO payload.`
+        );
+        return { signal: null, ambiguous: true };
+      }
+
+      return { signal: candidates[0], ambiguous: false };
+    };
+    const collectCandidates = async ({ includeClosed = false } = {}) => {
+      const scopedFilters = buildScopedFilters(baseFilter);
+      const statusFilter = includeClosed ? {} : { status: { $nin: getSignalClosedStatuses() } };
+      const queries = scopedFilters.map((scopedFilter) =>
+        Signal.find({
+          ...scopedFilter,
+          ...statusFilter,
+          $or: [{ uniqueId: id }, { webhookId: id }],
+        })
+          .sort({ updatedAt: -1, createdAt: -1, _id: -1 })
+          .limit(5)
+      );
+
+      if (symbol) {
+        buildScopedFilters({ symbol }).forEach((scopedFilter) => {
+          queries.push(
+            Signal.find({
+              ...scopedFilter,
+              ...statusFilter,
+              $or: [{ uniqueId: id }, { webhookId: id }],
+            })
+              .sort({ updatedAt: -1, createdAt: -1, _id: -1 })
+              .limit(5)
+          );
+        });
+      }
+
+      const queryResults = await Promise.all(queries);
+      return queryResults.flat();
+    };
 
     // 1) If webhook sends our MongoDB _id
     if (mongoose.Types.ObjectId.isValid(id)) {
       const byId = await Signal.findById(id);
-      if (byId) return byId;
+      if (byId) return { signal: byId, ambiguous: false };
     }
 
     // 2) Match by the caller-provided ID first.
-    for (const scopedFilter of buildScopedFilters(baseFilter)) {
-      const byExternalId = await Signal.findOne({
-        ...scopedFilter,
-        $or: [{ uniqueId: id }, { webhookId: id }],
-        status: { $nin: getSignalClosedStatuses() },
-      }).sort({ createdAt: -1 });
-      if (byExternalId) return byExternalId;
-    }
-
-    if (symbol) {
-      for (const scopedFilter of buildScopedFilters({ symbol })) {
-        const byLegacySymbolOnly = await Signal.findOne({
-          ...scopedFilter,
-          $or: [{ uniqueId: id }, { webhookId: id }],
-          status: { $nin: getSignalClosedStatuses() },
-        }).sort({ createdAt: -1 });
-        if (byLegacySymbolOnly) return byLegacySymbolOnly;
-      }
+    const activeMatchResult = resolveCandidateResult(await collectCandidates());
+    if (activeMatchResult.signal || activeMatchResult.ambiguous || !req.body.exit_time) {
+      return activeMatchResult;
     }
 
     // 3) If already closed (idempotent EXIT), match on exit_time too.
     if (req.body.exit_time) {
       const exitTime = new Date(req.body.exit_time);
-      for (const scopedFilter of buildScopedFilters(baseFilter)) {
-        const byClosed = await Signal.findOne({
-          ...scopedFilter,
-          $or: [{ uniqueId: id }, { webhookId: id }],
-          exitTime,
-        }).sort({ createdAt: -1 });
-        if (byClosed) return byClosed;
-      }
-
-      if (symbol) {
-        for (const scopedFilter of buildScopedFilters({ symbol })) {
-          const byLegacyClosed = await Signal.findOne({
-            ...scopedFilter,
-            $or: [{ uniqueId: id }, { webhookId: id }],
-            exitTime,
-          }).sort({ createdAt: -1 });
-          if (byLegacyClosed) return byLegacyClosed;
-        }
-      }
+      const closedCandidates = (await collectCandidates({ includeClosed: true })).filter((candidate) => {
+        const candidateExitTime = candidate?.exitTime ? new Date(candidate.exitTime).getTime() : NaN;
+        return Number.isFinite(candidateExitTime) && candidateExitTime === exitTime.getTime();
+      });
+      return resolveCandidateResult(closedCandidates);
     }
 
-    return null;
+    return { signal: null, ambiguous: false };
   };
 
   if (event === 'INFO') {
-    const existing = await findSignalByWebhookId(webhookId);
+    const { signal: existing, ambiguous } = await findSignalByWebhookId(webhookId);
+    if (ambiguous) {
+      return sendWebhookResponse(httpStatus.OK, {
+        status: 'ambiguous_timeframe',
+        uniq_id: webhookId,
+        symbol,
+        timeframe: normalizedTimeframe || null,
+      });
+    }
     if (!existing) {
-      return sendWebhookResponse(httpStatus.OK, { status: 'not_found', uniq_id: webhookId, symbol });
+      return sendWebhookResponse(httpStatus.OK, {
+        status: 'not_found',
+        uniq_id: webhookId,
+        symbol,
+        timeframe: normalizedTimeframe || null,
+      });
     }
 
     const currentPrice = toFiniteNumber(req.body.price);
@@ -279,9 +332,22 @@ const receiveSignal = catchAsync(async (req, res) => {
   }
 
   if (event === 'EXIT') {
-    const existing = await findSignalByWebhookId(webhookId);
+    const { signal: existing, ambiguous } = await findSignalByWebhookId(webhookId);
+    if (ambiguous) {
+      return sendWebhookResponse(httpStatus.OK, {
+        status: 'ambiguous_timeframe',
+        uniq_id: webhookId,
+        symbol,
+        timeframe: normalizedTimeframe || null,
+      });
+    }
     if (!existing) {
-      return sendWebhookResponse(httpStatus.OK, { status: 'not_found', uniq_id: webhookId, symbol });
+      return sendWebhookResponse(httpStatus.OK, {
+        status: 'not_found',
+        uniq_id: webhookId,
+        symbol,
+        timeframe: normalizedTimeframe || null,
+      });
     }
 
     const desiredStatus = deriveExitStatus({

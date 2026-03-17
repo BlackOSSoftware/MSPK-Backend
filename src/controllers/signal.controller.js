@@ -27,6 +27,7 @@ const toFiniteNumber = (value) => {
 
 const roundSignalValue = (value) => Math.round(value * 100) / 100;
 const CLOSED_SIGNAL_STATUSES = ['Closed', 'Target Hit', 'Partial Profit Book', 'Stoploss Hit'];
+const INDIA_TIMEZONE_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 
 const resolveSignalDisplaySegment = (signal) => {
   const category = String(signal?.category || '').trim().toUpperCase();
@@ -194,6 +195,15 @@ const getStartOfDay = (date) => {
   return next;
 };
 
+const getStartOfIndiaDay = (date) => {
+  const parsed = date instanceof Date ? new Date(date) : new Date(date);
+  if (Number.isNaN(parsed.getTime())) return null;
+
+  const shifted = new Date(parsed.getTime() + INDIA_TIMEZONE_OFFSET_MS);
+  shifted.setUTCHours(0, 0, 0, 0);
+  return new Date(shifted.getTime() - INDIA_TIMEZONE_OFFSET_MS);
+};
+
 const getEndOfDay = (date) => {
   const next = new Date(date);
   next.setHours(23, 59, 59, 999);
@@ -337,7 +347,7 @@ const getSignalAccessContext = async (req) => {
   const { allowedSegments, allowedCategories } =
     planStatus === 'active' ? getAllowedAccessFromPermissions(permissions) : { allowedSegments: [], allowedCategories: [] };
   const rawSelectedSymbols = getUserSelectedSymbols(req.user);
-  const signalVisibleFrom = req.user?.createdAt ? new Date(req.user.createdAt) : null;
+  const signalVisibleFrom = req.user?.createdAt ? getStartOfIndiaDay(req.user.createdAt) : null;
   const selectedSymbolDocs = rawSelectedSymbols.length > 0
     ? await MasterSymbol.find({ symbol: { $in: rawSelectedSymbols } }).select('symbol segment exchange').lean()
     : [];
@@ -555,7 +565,8 @@ const getSignals = catchAsync(async (req, res) => {
   filter = conditions.length > 1 ? { $and: conditions } : conditions[0];
 
   // 3. Query Data
-  const signalsData = await signalService.querySignals(filter, { page, limit });
+  const sortByLatestEvent = String(req.query.sortBy || '').trim().toLowerCase() === 'latest-event';
+  const signalsData = await signalService.querySignals(filter, { page, limit, sortByLatestEvent });
   
   // 4. Get Visible Stats (based on access scope)
   const [stats, periodStats, report] = await Promise.all([

@@ -1,6 +1,30 @@
 import { KiteConnect, KiteTicker } from 'kiteconnect';
 import logger from '../config/log.js';
 
+const KITE_HISTORY_TIMEZONE_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+const KITE_HISTORY_DATE_TIME_PATTERN = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
+
+const formatKiteHistoryDateTime = (value) => {
+    if (typeof value === 'string' && KITE_HISTORY_DATE_TIME_PATTERN.test(value.trim())) {
+        return value.trim();
+    }
+
+    const date = value instanceof Date ? value : new Date(value);
+    if (Number.isNaN(date.getTime())) {
+        throw new Error(`Invalid Kite history date: ${value}`);
+    }
+
+    const shifted = new Date(date.getTime() + KITE_HISTORY_TIMEZONE_OFFSET_MS);
+    const year = shifted.getUTCFullYear();
+    const month = String(shifted.getUTCMonth() + 1).padStart(2, '0');
+    const day = String(shifted.getUTCDate()).padStart(2, '0');
+    const hours = String(shifted.getUTCHours()).padStart(2, '0');
+    const minutes = String(shifted.getUTCMinutes()).padStart(2, '0');
+    const seconds = String(shifted.getUTCSeconds()).padStart(2, '0');
+
+    return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
+};
+
 class KiteService {
     constructor() {
         this.kite = null;
@@ -68,11 +92,10 @@ class KiteService {
         if (!this.kite || !this.accessToken) throw new Error('Kite not authenticated');
         
         try {
-            logger.info(`Fetching Kite History: Token=${instrumentToken}, Interval=${interval}, From=${from}, To=${to}`);
-            
-            // Kite expects Date objects
-            const fromDate = new Date(from);
-            const toDate = new Date(to);
+            const fromDate = formatKiteHistoryDateTime(from);
+            const toDate = formatKiteHistoryDateTime(to);
+
+            logger.info(`Fetching Kite History: Token=${instrumentToken}, Interval=${interval}, From=${fromDate}, To=${toDate}`);
             
             const candles = await this.kite.getHistoricalData(instrumentToken, interval, fromDate, toDate, continuous);
             

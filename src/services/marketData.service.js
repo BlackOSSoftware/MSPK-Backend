@@ -30,23 +30,77 @@ const CURRENT_MONTH_CONTRACT_EXCHANGES = ['MCX', 'COMEX', 'NYMEX', 'NFO', 'CDS',
 const CURRENT_MONTH_CONTRACT_SEGMENTS = ['FNO', 'COMMODITY', 'COMEX', 'CURRENCY'];
 const KITE_HISTORY_ALIASES = new Map([
     ['BANKNIFTY', 'NSE:NIFTY BANK-INDEX'],
+    ['BANKNIFTY1!', 'NSE:NIFTY BANK-INDEX'],
     ['NSE:BANKNIFTY', 'NSE:NIFTY BANK-INDEX'],
     ['NSE:NIFTYBANK', 'NSE:NIFTY BANK-INDEX'],
     ['NSE:NIFTY BANK', 'NSE:NIFTY BANK-INDEX'],
     ['NIFTY', 'NSE:NIFTY 50-INDEX'],
+    ['NIFTY1!', 'NSE:NIFTY 50-INDEX'],
     ['NIFTY50', 'NSE:NIFTY 50-INDEX'],
     ['NSE:NIFTY', 'NSE:NIFTY 50-INDEX'],
     ['NSE:NIFTY 50', 'NSE:NIFTY 50-INDEX'],
     ['FINNIFTY', 'NSE:NIFTY FIN SERVICE-INDEX'],
+    ['FINNIFTY1!', 'NSE:NIFTY FIN SERVICE-INDEX'],
     ['NSE:FINNIFTY', 'NSE:NIFTY FIN SERVICE-INDEX'],
     ['NSE:NIFTY FIN SERVICE', 'NSE:NIFTY FIN SERVICE-INDEX'],
     ['INDIAVIX', 'NSE:INDIA VIX'],
     ['NSE:INDIAVIX', 'NSE:INDIA VIX'],
 ]);
+const MARKET_DATA_SYMBOL_SUFFIX_PRIORITY = ['.PR', '.X', '.LV', '.M', '.R', '.P'];
+const MARKET_DATA_FUTURES_MONTH_ORDER = new Map([
+    ['F', 1],
+    ['G', 2],
+    ['H', 3],
+    ['J', 4],
+    ['K', 5],
+    ['M', 6],
+    ['N', 7],
+    ['Q', 8],
+    ['U', 9],
+    ['V', 10],
+    ['X', 11],
+    ['Z', 12],
+]);
+const MARKET_DATA_FUTURES_CONTRACT_REGEX = /^([A-Z]+)([FGHJKMNQUVXZ])(\d{1,2})$/;
+const MARKET_DATA_CONTINUOUS_FUTURE_REGEX = /^([A-Z]+)1!$/;
+const MARKET_DATA_WIRE_ALIASES = new Map([
+    ['XAUUSD', ['XAUUSD.PR', 'XAUUSD.X']],
+    ['XAGUSD', ['XAGUSD.PR', 'XAGUSD.X']],
+    ['CL1!', ['USOILROLL', 'USOILJ6', 'USOILK6']],
+    ['USOIL', ['USOILROLL', 'USOILJ6', 'USOILK6']],
+    ['BRN1!', ['UKOILROLL', 'UKOILK6', 'UKOILM6']],
+    ['UKOIL', ['UKOILROLL', 'UKOILK6', 'UKOILM6']],
+]);
 
 const toNumber = (value, fallback = 0) => {
     const parsed = Number(value);
     return Number.isFinite(parsed) ? parsed : fallback;
+};
+
+const parseMarketDataContractSymbol = (value) => {
+    const normalized = String(value || '').trim().toUpperCase();
+    const match = normalized.match(MARKET_DATA_FUTURES_CONTRACT_REGEX);
+    if (!match) return null;
+
+    const [, root, monthCode, yearToken] = match;
+    const monthOrder = MARKET_DATA_FUTURES_MONTH_ORDER.get(monthCode);
+    if (!monthOrder) return null;
+
+    const year = Number.parseInt(yearToken, 10);
+    if (!Number.isFinite(year)) return null;
+
+    return {
+        root,
+        monthCode,
+        monthOrder,
+        year,
+    };
+};
+
+const getMarketDataSymbolSuffixPriority = (value = '') => {
+    const normalized = String(value || '').trim().toUpperCase();
+    const suffixIndex = MARKET_DATA_SYMBOL_SUFFIX_PRIORITY.findIndex((suffix) => normalized.endsWith(suffix));
+    return suffixIndex === -1 ? MARKET_DATA_SYMBOL_SUFFIX_PRIORITY.length : suffixIndex;
 };
 
 const parseTs = (value, fallback = Math.floor(Date.now() / 1000)) => {
@@ -192,6 +246,10 @@ class MarketDataService extends EventEmitter {
         this.tokenSymbolsMap = new Map();
         this.symbolCaseMap = new Map();
         this.marketDataAliasMap = new Map();
+        this.marketDataAvailableSymbols = [];
+        this.marketDataAvailableSymbolMap = new Map();
+        this._marketDataSymbolsLoadedAtMs = 0;
+        this._marketDataSymbolsPromise = null;
         this._symbolsCacheVersion = 1;
 
         this.currentPrices = {};
@@ -358,6 +416,17 @@ class MarketDataService extends EventEmitter {
                 await this.loadMasterSymbols();
             }
             await this.loadSettings();
+            await this._loadMarketDataAvailableSymbols();
+            const marketDataSync = await this.reconcileMarketDataSymbols();
+            if (marketDataSync.updatedCount > 0) {
+                await this.refreshSymbolsCache({ bumpVersion: true });
+                logger.info(`MARKET_DATA: Synced ${marketDataSync.updatedCount} market-data source symbols`);
+            }
+            if (marketDataSync.unresolvedCount > 0) {
+                logger.warn(
+                    `MARKET_DATA: ${marketDataSync.unresolvedCount} market-data symbols still unresolved (${marketDataSync.unresolvedSymbols.join(', ')})`
+                );
+            }
             this.startStatsBroadcast();
         } catch (error) {
             logger.error('MARKET_DATA: Failed to initialize', error);
@@ -406,9 +475,54 @@ class MarketDataService extends EventEmitter {
         return String(symbol || '').trim().toUpperCase();
     }
 
+    _resolveCommodityContinuousAlias(symbol) {
+        const normalized = this._normalizeMarketSymbol(symbol);
+        const match = normalized.match(/^(?:MCX:)?([A-Z]+)1!$/);
+        if (!match) return null;
+
+        const candidate = `MCX:${match[1]}`;
+        if (this.symbols[candidate]) return candidate;
+
+        const rememberedCandidate = this.symbolCaseMap.get(candidate.toLowerCase());
+        if (rememberedCandidate) return rememberedCandidate;
+
+        const kiteInstrument = kiteInstrumentsService.getInstrumentBySymbol(candidate);
+        if (kiteInstrument) return candidate;
+
+        return null;
+    }
+
+    async _resolveCommodityContinuousAliasFromStore(symbol) {
+        const direct = this._resolveCommodityContinuousAlias(symbol);
+        if (direct) return direct;
+
+        const normalized = this._normalizeMarketSymbol(symbol);
+        const match = normalized.match(/^(?:MCX:)?([A-Z]+)1!$/);
+        if (!match) return null;
+
+        const candidate = `MCX:${match[1]}`;
+        try {
+            const escaped = candidate.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const doc = await MasterSymbol.findOne({
+                symbol: new RegExp(`^${escaped}$`, 'i'),
+            })
+                .select('symbol')
+                .lean();
+
+            return doc?.symbol ? this._normalizeMarketSymbol(doc.symbol) : null;
+        } catch (error) {
+            logger.warn(`MARKET_DATA: Failed resolving commodity alias ${candidate}: ${error.message}`);
+            return null;
+        }
+    }
+
     _resolveHistoryAlias(symbol) {
         const normalized = this._normalizeMarketSymbol(symbol);
-        return KITE_HISTORY_ALIASES.get(normalized) || normalized;
+        const directAlias = KITE_HISTORY_ALIASES.get(normalized);
+        if (directAlias) return directAlias;
+
+        const commodityAlias = this._resolveCommodityContinuousAlias(normalized);
+        return commodityAlias || normalized;
     }
 
     _isIndianSymbol(symbol, symbolDoc = null) {
@@ -502,9 +616,14 @@ class MarketDataService extends EventEmitter {
         const wireSymbols = new Set();
         const canonical = this._normalizeMarketSymbol(symbolDoc.symbol);
         const sourceSymbol = this._normalizeMarketSymbol(symbolDoc.sourceSymbol);
+        const resolvedSymbol = this._resolveBestMarketDataSymbol(symbolDoc, symbolDoc.symbol);
 
-        if (canonical) wireSymbols.add(canonical);
-        if (sourceSymbol) wireSymbols.add(sourceSymbol);
+        if (resolvedSymbol) wireSymbols.add(resolvedSymbol);
+
+        if (!resolvedSymbol) {
+            if (canonical) wireSymbols.add(canonical);
+            if (sourceSymbol) wireSymbols.add(sourceSymbol);
+        }
 
         const segment = this._normalizeMarketSymbol(symbolDoc.segment);
         const exchange = this._normalizeMarketSymbol(symbolDoc.exchange);
@@ -1020,6 +1139,127 @@ class MarketDataService extends EventEmitter {
         }
     }
 
+    async _persistResolvedMarketDataSourceSymbol(symbolDoc, resolvedSourceSymbol) {
+        const canonical = this._normalizeMarketSymbol(symbolDoc?.symbol);
+        const resolved = this._normalizeMarketSymbol(resolvedSourceSymbol);
+        if (!canonical || !resolved) return symbolDoc;
+
+        const currentSource = this._normalizeMarketSymbol(symbolDoc?.sourceSymbol);
+        if (currentSource === resolved) return symbolDoc;
+
+        const nextDoc = {
+            ...(typeof symbolDoc?.toObject === 'function' ? symbolDoc.toObject() : { ...symbolDoc }),
+            sourceSymbol: resolvedSourceSymbol,
+            provider: symbolDoc?.provider || 'market_data',
+            isActive: true,
+            meta: {
+                ...(symbolDoc?.meta && typeof symbolDoc.meta === 'object' ? symbolDoc.meta : {}),
+                liveFeedSupported: true,
+            },
+        };
+
+        this.symbols[canonical] = nextDoc;
+        this._rememberSymbolCase(canonical);
+        this._registerMarketDataAliases(canonical, [resolvedSourceSymbol]);
+
+        try {
+            await MasterSymbol.updateOne(
+                { symbol: canonical },
+                {
+                    $set: {
+                        sourceSymbol: resolvedSourceSymbol,
+                        provider: symbolDoc?.provider || 'market_data',
+                        isActive: true,
+                        'meta.liveFeedSupported': true,
+                    },
+                }
+            );
+        } catch (error) {
+            logger.warn(`MARKET_DATA: Failed persisting resolved source symbol for ${canonical}: ${error.message}`);
+        }
+
+        return nextDoc;
+    }
+
+    async reconcileMarketDataSymbols() {
+        await this._loadMarketDataAvailableSymbols();
+        if (this.marketDataAvailableSymbols.length === 0) {
+            return { updatedCount: 0, unresolvedCount: 0, unresolvedSymbols: [] };
+        }
+
+        const docs = Object.values(this.symbols).filter((doc) => doc && this._isMarketDataSymbol(doc));
+        const updates = [];
+        const unresolvedSymbols = [];
+
+        for (const doc of docs) {
+            const resolvedSourceSymbol = this._resolveBestMarketDataSymbol(doc, doc.symbol);
+            if (!resolvedSourceSymbol) {
+                unresolvedSymbols.push(doc.symbol);
+                if (doc.isActive !== false || doc?.meta?.liveFeedSupported !== false) {
+                    updates.push({
+                        updateOne: {
+                            filter: { _id: doc._id },
+                            update: {
+                                $set: {
+                                    isActive: false,
+                                    'meta.liveFeedSupported': false,
+                                },
+                            },
+                        },
+                    });
+                }
+                continue;
+            }
+
+            const currentSource = this._normalizeMarketSymbol(doc.sourceSymbol || doc.symbol);
+            const normalizedResolved = this._normalizeMarketSymbol(resolvedSourceSymbol);
+            if (!normalizedResolved) continue;
+
+            this.symbols[doc.symbol] = {
+                ...doc,
+                sourceSymbol: resolvedSourceSymbol,
+                provider: doc.provider || 'market_data',
+                isActive: true,
+                meta: {
+                    ...(doc?.meta && typeof doc.meta === 'object' ? doc.meta : {}),
+                    liveFeedSupported: true,
+                },
+            };
+            this._registerMarketDataAliases(doc.symbol, [resolvedSourceSymbol]);
+            if (currentSource === normalizedResolved && doc.isActive !== false && doc?.meta?.liveFeedSupported === true) {
+                continue;
+            }
+
+            updates.push({
+                updateOne: {
+                    filter: { _id: doc._id },
+                    update: {
+                        $set: {
+                            sourceSymbol: resolvedSourceSymbol,
+                            provider: doc.provider || 'market_data',
+                            isActive: true,
+                            'meta.liveFeedSupported': true,
+                        },
+                    },
+                },
+            });
+        }
+
+        if (updates.length > 0) {
+            try {
+                await MasterSymbol.bulkWrite(updates, { ordered: false });
+            } catch (error) {
+                logger.warn(`MARKET_DATA: Bulk source-symbol sync failed: ${error.message}`);
+            }
+        }
+
+        return {
+            updatedCount: updates.length,
+            unresolvedCount: unresolvedSymbols.length,
+            unresolvedSymbols: unresolvedSymbols.slice(0, 25),
+        };
+    }
+
     async addSymbol(symbolDoc) {
         if (!symbolDoc?.symbol) return;
 
@@ -1079,6 +1319,10 @@ class MarketDataService extends EventEmitter {
 
         const canUseMarketData = this._isMarketDataSymbol(symbolDoc) || !symbolDoc.instrumentToken;
         if (canUseMarketData) {
+            const resolvedSourceSymbol = this._resolveBestMarketDataSymbol(symbolDoc, symbolDoc.symbol);
+            if (resolvedSourceSymbol) {
+                symbolDoc = await this._persistResolvedMarketDataSourceSymbol(symbolDoc, resolvedSourceSymbol);
+            }
             const wireSymbols = this._resolveMarketDataWireSymbols(symbolDoc);
             const symbolsToSubscribe = wireSymbols.length > 0 ? wireSymbols : [symbolDoc.symbol];
             this._registerMarketDataAliases(symbolDoc.symbol, symbolsToSubscribe);
@@ -1803,7 +2047,13 @@ class MarketDataService extends EventEmitter {
     async getHistory(symbol, resolution, from, to, countOverride = null, options = {}) {
         let canonical = this._getCanonicalSymbol(symbol) || String(symbol || '').trim();
         if (!canonical) return [];
-        const alias = this._resolveHistoryAlias(canonical);
+        let alias = this._resolveHistoryAlias(canonical);
+        if (!alias || alias === canonical) {
+            const storedCommodityAlias = await this._resolveCommodityContinuousAliasFromStore(canonical);
+            if (storedCommodityAlias) {
+                alias = storedCommodityAlias;
+            }
+        }
         const historySymbol = alias || canonical;
 
         const fromTs = parseTs(from);
@@ -2055,6 +2305,208 @@ class MarketDataService extends EventEmitter {
         return stripped.replace(/\/+$/, '');
     }
 
+    _setMarketDataAvailableSymbols(symbols = []) {
+        const available = [];
+        const symbolMap = new Map();
+
+        for (const value of Array.isArray(symbols) ? symbols : []) {
+            const actual = String(value || '').trim();
+            const normalized = this._normalizeMarketSymbol(actual);
+            if (!actual || !normalized || symbolMap.has(normalized)) continue;
+
+            available.push({ actual, normalized });
+            symbolMap.set(normalized, actual);
+        }
+
+        this.marketDataAvailableSymbols = available;
+        this.marketDataAvailableSymbolMap = symbolMap;
+        this._marketDataSymbolsLoadedAtMs = Date.now();
+    }
+
+    async _loadMarketDataAvailableSymbols({ forceReload = false } = {}) {
+        const ttlMs = 10 * 60 * 1000;
+        if (
+            !forceReload &&
+            this.marketDataAvailableSymbols.length > 0 &&
+            Date.now() - this._marketDataSymbolsLoadedAtMs < ttlMs
+        ) {
+            return this.marketDataAvailableSymbols;
+        }
+
+        if (this._marketDataSymbolsPromise) {
+            return this._marketDataSymbolsPromise;
+        }
+
+        const baseUrl = this._resolveMarketDataHttpBase();
+        if (!baseUrl) {
+            return this.marketDataAvailableSymbols;
+        }
+
+        this._marketDataSymbolsPromise = (async () => {
+            try {
+                const headers = this.config.market_data_api_key
+                    ? { 'x-api-key': this.config.market_data_api_key }
+                    : undefined;
+                const response = await axios.get(`${baseUrl}/api/symbols`, {
+                    headers,
+                    timeout: 8000,
+                });
+                const symbols = Array.isArray(response.data?.symbols) ? response.data.symbols : [];
+                this._setMarketDataAvailableSymbols(symbols);
+            } catch (error) {
+                logger.warn(`MARKET_DATA: Available symbols API failed: ${error.message}`);
+            } finally {
+                this._marketDataSymbolsPromise = null;
+            }
+
+            return this.marketDataAvailableSymbols;
+        })();
+
+        return this._marketDataSymbolsPromise;
+    }
+
+    _getMarketDataAvailableSymbol(symbol) {
+        const normalized = this._normalizeMarketSymbol(symbol);
+        if (!normalized) return null;
+        return this.marketDataAvailableSymbolMap.get(normalized) || null;
+    }
+
+    _getMarketDataPrefixMatches(symbol) {
+        const normalized = this._normalizeMarketSymbol(symbol);
+        if (!normalized || this.marketDataAvailableSymbols.length === 0) return [];
+
+        return this.marketDataAvailableSymbols
+            .filter((item) => (
+                item.normalized === normalized ||
+                item.normalized.startsWith(`${normalized}.`) ||
+                item.normalized.startsWith(`${normalized}_`) ||
+                item.normalized.startsWith(`${normalized}-`)
+            ))
+            .sort((left, right) => {
+                const suffixDiff =
+                    getMarketDataSymbolSuffixPriority(left.normalized) -
+                    getMarketDataSymbolSuffixPriority(right.normalized);
+                if (suffixDiff !== 0) return suffixDiff;
+                return left.actual.length - right.actual.length;
+            });
+    }
+
+    _pickBestMarketDataContract(root, target = null) {
+        const normalizedRoot = this._normalizeMarketSymbol(root);
+        if (!normalizedRoot || this.marketDataAvailableSymbols.length === 0) return null;
+
+        const candidates = this.marketDataAvailableSymbols
+            .map((item) => ({
+                actual: item.actual,
+                normalized: item.normalized,
+                parsed: parseMarketDataContractSymbol(item.normalized),
+            }))
+            .filter((item) => item.parsed?.root === normalizedRoot);
+
+        if (candidates.length === 0) return null;
+
+        const now = new Date();
+        const targetMonthOrder =
+            Number.isFinite(target?.monthOrder)
+                ? target.monthOrder
+                : (now.getUTCMonth() + 1);
+        const targetYear =
+            Number.isFinite(target?.year)
+                ? target.year
+                : Number.parseInt(String(now.getUTCFullYear()).slice(-1), 10);
+
+        const ranked = candidates
+            .map((item) => {
+                const yearDiff = item.parsed.year >= targetYear
+                    ? item.parsed.year - targetYear
+                    : item.parsed.year + 10 - targetYear;
+                const monthDiff = item.parsed.monthOrder >= targetMonthOrder
+                    ? item.parsed.monthOrder - targetMonthOrder
+                    : item.parsed.monthOrder + 12;
+                const score = yearDiff * 12 + monthDiff;
+                return { ...item, score };
+            })
+            .sort((left, right) => {
+                if (left.score !== right.score) return left.score - right.score;
+                return left.normalized.localeCompare(right.normalized);
+            });
+
+        return ranked[0]?.actual || null;
+    }
+
+    _resolveMarketDataFuturesAlias(symbol) {
+        const normalized = this._normalizeMarketSymbol(symbol);
+        if (!normalized) return null;
+
+        const explicitAliases = MARKET_DATA_WIRE_ALIASES.get(normalized) || [];
+        for (const candidate of explicitAliases) {
+            const exact = this._getMarketDataAvailableSymbol(candidate);
+            if (exact) return exact;
+        }
+
+        const contract = parseMarketDataContractSymbol(normalized);
+        if (contract) {
+            return this._pickBestMarketDataContract(contract.root, contract);
+        }
+
+        const continuousMatch = normalized.match(MARKET_DATA_CONTINUOUS_FUTURE_REGEX);
+        if (continuousMatch) {
+            const root = continuousMatch[1];
+            return this._pickBestMarketDataContract(root);
+        }
+
+        return null;
+    }
+
+    _resolveBestMarketDataSymbol(symbolDoc = null, rawSymbol = '') {
+        const candidates = new Set();
+        const addCandidate = (value) => {
+            const normalized = this._normalizeMarketSymbol(value);
+            if (!normalized) return;
+            candidates.add(normalized);
+        };
+
+        addCandidate(rawSymbol);
+        addCandidate(symbolDoc?.symbol);
+        addCandidate(symbolDoc?.sourceSymbol);
+
+        const normalizedName = this._normalizeMarketSymbol(symbolDoc?.name);
+        const normalizedExchange = this._normalizeMarketSymbol(symbolDoc?.exchange);
+        if (normalizedExchange === 'NYMEX' || /(?:CRUDE OIL|WTI|US OIL)/.test(normalizedName)) {
+            addCandidate('USOILROLL');
+            addCandidate('USOIL');
+        }
+        if (/BRENT/.test(normalizedName)) {
+            addCandidate('UKOILROLL');
+            addCandidate('UKOIL');
+        }
+
+        for (const candidate of candidates) {
+            const exact = this._getMarketDataAvailableSymbol(candidate);
+            if (exact) return exact;
+        }
+
+        for (const candidate of candidates) {
+            const explicitAliases = MARKET_DATA_WIRE_ALIASES.get(candidate) || [];
+            for (const alias of explicitAliases) {
+                const exact = this._getMarketDataAvailableSymbol(alias);
+                if (exact) return exact;
+            }
+        }
+
+        for (const candidate of candidates) {
+            const prefixMatch = this._getMarketDataPrefixMatches(candidate)[0];
+            if (prefixMatch?.actual) return prefixMatch.actual;
+        }
+
+        for (const candidate of candidates) {
+            const futuresAlias = this._resolveMarketDataFuturesAlias(candidate);
+            if (futuresAlias) return futuresAlias;
+        }
+
+        return null;
+    }
+
     _getMarketDataHistoryCount(override = null) {
         const baseRaw = override !== null && override !== undefined
             ? Number.parseInt(override, 10)
@@ -2098,9 +2550,15 @@ class MarketDataService extends EventEmitter {
         if (!baseUrl) return [];
 
         try {
+            await this._loadMarketDataAvailableSymbols();
+            const resolvedSymbol =
+                this._resolveBestMarketDataSymbol(
+                    this.symbols[this._getCanonicalSymbol(symbol) || this._normalizeMarketSymbol(symbol)] || null,
+                    symbol
+                ) || symbol;
             const count = this._getMarketDataHistoryCount(countOverride);
             const params = {
-                symbol,
+                symbol: resolvedSymbol,
                 resolution,
                 count,
                 from: fromTs,
@@ -2138,12 +2596,13 @@ class MarketDataService extends EventEmitter {
             return await cacheManager.getOrFetch(cacheKey, async () => {
                 const dbFilter = safeQuery
                     ? {
+                        isActive: true,
                         $or: [
                             { symbol: { $regex: safeQuery, $options: 'i' } },
                             { name: { $regex: safeQuery, $options: 'i' } },
                         ],
                     }
-                    : {};
+                    : { isActive: true };
 
                 const dbSymbols = await MasterSymbol.find(dbFilter)
                     .sort({ symbol: 1 })

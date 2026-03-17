@@ -11,6 +11,29 @@ const INDEX_SYMBOL_ALIAS_MAP = new Map(
   INDEX_SYMBOL_ALIAS_GROUPS.flatMap((group) => group.map((symbol) => [symbol, group]))
 );
 
+const getCommodityContinuousAliases = (symbol = '') => {
+  const normalized = String(symbol || '').trim().toUpperCase();
+  if (!normalized) return [];
+
+  const aliases = new Set();
+  const rootMatch = normalized.match(/^MCX:([A-Z]+)$/);
+  if (rootMatch) {
+    const [, root] = rootMatch;
+    aliases.add(`${root}1!`);
+    aliases.add(`MCX:${root}1!`);
+    return Array.from(aliases);
+  }
+
+  const continuousMatch = normalized.match(/^(?:MCX:)?([A-Z]+)1!$/);
+  if (!continuousMatch) return [];
+
+  const [, root] = continuousMatch;
+  aliases.add(`MCX:${root}`);
+  aliases.add(`${root}1!`);
+  aliases.add(`MCX:${root}1!`);
+  return Array.from(aliases);
+};
+
 const getSelectedSymbolAliases = (symbol = '') => {
   const normalized = String(symbol || '').trim().toUpperCase();
   if (!normalized) return [];
@@ -19,6 +42,8 @@ const getSelectedSymbolAliases = (symbol = '') => {
   const indexAliasGroup = INDEX_SYMBOL_ALIAS_MAP.get(normalized);
   if (indexAliasGroup) {
     indexAliasGroup.forEach((alias) => aliases.add(alias));
+  } else {
+    getCommodityContinuousAliases(normalized).forEach((alias) => aliases.add(alias));
   }
 
   if (!isCryptoLikeSymbol(normalized)) {

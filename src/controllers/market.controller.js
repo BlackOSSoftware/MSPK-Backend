@@ -1318,13 +1318,22 @@ const getUserWatchlist = catchAsync(async (req, res) => {
     const docs = await MasterSymbol.find({ symbol: { $in: symbols } }).lean();
     const map = new Map(docs.map(d => [String(d.symbol).trim().toUpperCase(), d]));
 
-    const ordered = symbols.map((sym) => {
-        const doc = map.get(sym);
-        if (doc) {
-            return { ...doc, isLocked: lockedSet.has(sym) };
-        }
-        return { symbol: sym, name: sym, isLocked: lockedSet.has(sym) };
-    });
+    const ordered = symbols
+        .map((sym) => {
+            const doc = map.get(sym);
+            if (doc) {
+                return { ...doc, isLocked: lockedSet.has(sym) };
+            }
+            return { symbol: sym, name: sym, isLocked: lockedSet.has(sym) };
+        })
+        .filter((item) => {
+            const isUnsupported =
+                item?.isActive === false &&
+                item?.meta?.liveFeedSupported === false &&
+                !(item?.lastPrice > 0) &&
+                !(item?.prevClose > 0);
+            return !isUnsupported;
+        });
 
     await Promise.all(ordered.map(s => marketDataService.ensureSymbolSubscription(s.symbol, s)));
 

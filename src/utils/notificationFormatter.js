@@ -57,10 +57,67 @@ const humanizeTimeframe = (value) => {
   return raw;
 };
 
+const parseTimestamp = (value) => {
+  if (!value) return null;
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return date;
+};
+
+const getTimeframeDurationMs = (timeframe) => {
+  const raw = String(timeframe || '').trim();
+  if (!raw) return 0;
+
+  const secondsMatch = raw.match(/^(\d+)s$/i);
+  if (secondsMatch) {
+    return Number(secondsMatch[1]) * 1000;
+  }
+
+  const minutesMatch = raw.match(/^(\d+)m$/i);
+  if (minutesMatch) {
+    return Number(minutesMatch[1]) * 60 * 1000;
+  }
+
+  const hoursMatch = raw.match(/^(\d+)h$/i);
+  if (hoursMatch) {
+    return Number(hoursMatch[1]) * 60 * 60 * 1000;
+  }
+
+  if (raw === '1D') return 24 * 60 * 60 * 1000;
+  if (raw === '1W') return 7 * 24 * 60 * 60 * 1000;
+  if (raw === '1M') return 30 * 24 * 60 * 60 * 1000;
+
+  return 0;
+};
+
+const resolveDisplayTimestamp = ({
+  primary,
+  fallback,
+  timeframe,
+}) => {
+  const primaryDate = parseTimestamp(primary);
+  const fallbackDate = parseTimestamp(fallback);
+
+  if (!primaryDate) return fallbackDate;
+  if (!fallbackDate) return primaryDate;
+
+  const timeframeMs = getTimeframeDurationMs(timeframe);
+  const maxAllowedSkewMs = Math.min(
+    Math.max(timeframeMs * 3, 30 * 60 * 1000),
+    6 * 60 * 60 * 1000
+  );
+
+  if (Math.abs(fallbackDate.getTime() - primaryDate.getTime()) > maxAllowedSkewMs) {
+    return fallbackDate;
+  }
+
+  return primaryDate;
+};
+
 const formatSignalTimestamp = (value) => {
   if (!value) return '';
-  const date = value instanceof Date ? value : new Date(value);
-  if (Number.isNaN(date.getTime())) return String(value);
+  const date = parseTimestamp(value);
+  if (!date) return String(value);
   return date.toLocaleString('en-IN', {
     dateStyle: 'medium',
     timeStyle: 'short',
@@ -75,10 +132,20 @@ export const buildSignalTemplateData = (signal = {}) => {
   const normalizedTimeframe =
     normalizeSignalTimeframe(signal.timeframe) || String(signal.timeframe || '').trim();
   const timeframeLabel = normalizedTimeframe ? humanizeTimeframe(normalizedTimeframe) : '';
-  const signalTime = formatSignalTimestamp(signal.signalTime || signal.createdAt);
-  const exitTime = formatSignalTimestamp(signal.exitTime || signal.updatedAt);
+  const resolvedSignalTime = resolveDisplayTimestamp({
+    primary: signal.signalTime,
+    fallback: signal.createdAt,
+    timeframe: normalizedTimeframe,
+  });
+  const resolvedExitTime = resolveDisplayTimestamp({
+    primary: signal.exitTime,
+    fallback: signal.updatedAt || signal.createdAt,
+    timeframe: normalizedTimeframe,
+  });
+  const signalTime = formatSignalTimestamp(resolvedSignalTime);
+  const exitTime = formatSignalTimestamp(resolvedExitTime);
   const eventTime = formatSignalTimestamp(
-    signal.exitTime || signal.signalTime || signal.updatedAt || signal.createdAt
+    resolvedExitTime || resolvedSignalTime || signal.updatedAt || signal.createdAt
   );
   const timeframeDisplay = normalizedTimeframe
     ? timeframeLabel && timeframeLabel !== normalizedTimeframe
