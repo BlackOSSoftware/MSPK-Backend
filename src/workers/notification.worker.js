@@ -315,6 +315,7 @@ const notificationWorker = new Worker('notifications', async (job) => {
       logger.info(`Processed ${type} notification for job ${job.id}`);
   } catch (error) {
       logger.error(`Failed to process notification job ${job.id}`, error);
+      throw error;
   }
 }, { connection, concurrency: Number.isFinite(config.notifications?.workerConcurrency) ? config.notifications.workerConcurrency : 20 });
 

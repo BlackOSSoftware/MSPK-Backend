@@ -74,8 +74,11 @@ export const buildSignalTemplateData = (signal = {}) => {
   const normalizedTimeframe =
     normalizeSignalTimeframe(signal.timeframe) || String(signal.timeframe || '').trim();
   const timeframeLabel = normalizedTimeframe ? humanizeTimeframe(normalizedTimeframe) : '';
-  const signalTime =
-    formatSignalTimestamp(signal.signalTime || signal.createdAt || signal.updatedAt || signal.exitTime);
+  const signalTime = formatSignalTimestamp(signal.signalTime || signal.createdAt);
+  const exitTime = formatSignalTimestamp(signal.exitTime || signal.updatedAt);
+  const eventTime = formatSignalTimestamp(
+    signal.exitTime || signal.signalTime || signal.updatedAt || signal.createdAt
+  );
   const timeframeDisplay = normalizedTimeframe
     ? timeframeLabel && timeframeLabel !== normalizedTimeframe
       ? `${normalizedTimeframe} (${timeframeLabel})`
@@ -105,6 +108,9 @@ export const buildSignalTemplateData = (signal = {}) => {
     timeframe: normalizedTimeframe || '-',
     timeframeLabel: timeframeDisplay,
     signalTime: signalTime || '-',
+    entryTime: signalTime || '-',
+    exitTime: exitTime || '-',
+    eventTime: eventTime || '-',
     type: signal.type || '-',
     entryPrice: formatNotificationNumber(entryPrice),
     stopLoss: formatNotificationNumber(stopLoss),
@@ -147,10 +153,21 @@ const ensureSignalSummaryPlaceholders = (templateKey, template) => {
     next.body = `Symbol: {{symbol}}${next.body ? `\n${next.body}` : ''}`;
   }
 
+  if (signalTemplateKeys.includes(templateKey) && !next.body.includes('{{timeframeLabel}}')) {
+    next.body = `${next.body}\nTimeframe: {{timeframeLabel}}`.trim();
+  }
+
+  if (signalTemplateKeys.includes(templateKey) && !next.body.includes('{{signalTime}}') && !next.body.includes('{{entryTime}}')) {
+    next.body = `${next.body}\nEntry Time (IST): {{signalTime}}`.trim();
+  }
+
   if (!['SIGNAL_TARGET', 'SIGNAL_STOPLOSS', 'SIGNAL_PARTIAL_PROFIT'].includes(templateKey)) {
     return next;
   }
 
+  if (!next.body.includes('{{exitTime}}')) {
+    next.body = `${next.body}\nExit Time (IST): {{exitTime}}`;
+  }
   if (!next.body.includes('{{exitPrice}}')) {
     next.body = `${next.body}\nExit: {{exitPrice}}`;
   }

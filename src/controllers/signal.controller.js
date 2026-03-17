@@ -6,6 +6,7 @@ import { signalService, technicalAnalysisService, marketDataService } from '../s
 import {
   buildSelectedSignalFilter,
   buildSelectedSymbolDocsMap,
+  expandSelectedSymbols,
   getUserSelectedSymbols,
   hasSelectedSignalSymbol,
 } from '../utils/userSignalSelection.js';
@@ -88,32 +89,103 @@ const getResolvedSignalPoints = (signal) => {
 
 const toCsvCell = (value) => `"${String(value ?? '').replace(/"/g, '""')}"`;
 
-const formatSignalResponse = (signal) => ({
-  id: signal._id,
-  uniqueId: signal.uniqueId,
-  webhookId: signal.webhookId,
-  symbol: signal.symbol,
-  type: signal.type,
-  entry: signal.entryPrice,
-  stoploss: signal.stopLoss,
-  status: signal.status,
-  timestamp: signal.createdAt,
-  createdAt: signal.createdAt,
-  signalTime: signal.signalTime,
-  exitPrice: getResolvedSignalExitPrice(signal),
-  totalPoints: getResolvedSignalPoints(signal),
-  exitReason: signal.exitReason,
-  exitTime: signal.exitTime,
-  segment: resolveSignalDisplaySegment(signal),
-  category: signal.category,
-  targets: signal.targets,
-  isFree: signal.isFree,
-  notes: signal.notes,
-  strategyId: signal.strategyId,
-  strategyName: signal.strategyName,
-  timeframe: normalizeSignalTimeframe(signal.timeframe) || signal.timeframe,
-  metrics: signal.metrics,
-});
+const normalizeSignalLookupKey = (value) => String(value || '').trim().toUpperCase();
+
+const resolveSignalMasterSymbols = async (signals = []) => {
+  const rawSymbols = Array.from(
+    new Set(
+      (Array.isArray(signals) ? signals : [])
+        .map((signal) => String(signal?.symbol || '').trim())
+        .filter(Boolean)
+    )
+  );
+
+  if (rawSymbols.length === 0) return new Map();
+
+  const aliasPool = Array.from(
+    new Set(
+      rawSymbols.flatMap((symbol) =>
+        expandSelectedSymbols([symbol]).map((item) => normalizeSignalLookupKey(item))
+      )
+    )
+  );
+
+  const masterSymbols = await MasterSymbol.find({
+    $or: [
+      { symbol: { $in: aliasPool } },
+      { sourceSymbol: { $in: aliasPool } },
+      ...rawSymbols.map((symbol) => ({ name: new RegExp(`^${symbol.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') })),
+    ],
+  })
+    .select('symbol name segment exchange sourceSymbol')
+    .sort({ isActive: -1, updatedAt: -1, symbol: 1 })
+    .lean();
+
+  const resolvedByRawSymbol = new Map();
+
+  for (const rawSymbol of rawSymbols) {
+    const normalizedRaw = normalizeSignalLookupKey(rawSymbol);
+    const aliases = new Set(expandSelectedSymbols([rawSymbol]).map((item) => normalizeSignalLookupKey(item)));
+    aliases.add(normalizedRaw);
+
+    const resolved = masterSymbols.find((doc) => {
+      const symbol = normalizeSignalLookupKey(doc?.symbol);
+      const sourceSymbol = normalizeSignalLookupKey(doc?.sourceSymbol);
+      const name = normalizeSignalLookupKey(doc?.name);
+      return aliases.has(symbol) || aliases.has(sourceSymbol) || name === normalizedRaw;
+    });
+
+    if (resolved) {
+      resolvedByRawSymbol.set(normalizedRaw, resolved);
+    }
+  }
+
+  return resolvedByRawSymbol;
+};
+
+const formatSignalResponse = (signal, resolvedMasterSymbol = null) => {
+  const canonicalSymbol = String(resolvedMasterSymbol?.symbol || signal.symbol || '').trim().toUpperCase();
+  const symbolName = String(resolvedMasterSymbol?.name || signal.symbol || '').trim();
+  const originalSymbol = String(signal?.symbol || '').trim().toUpperCase();
+  const segment = resolvedMasterSymbol
+    ? resolveSignalDisplaySegment({
+        ...signal,
+        symbol: canonicalSymbol,
+        segment: resolvedMasterSymbol.segment,
+        exchange: resolvedMasterSymbol.exchange,
+      })
+    : resolveSignalDisplaySegment(signal);
+
+  return {
+    id: signal._id,
+    uniqueId: signal.uniqueId,
+    webhookId: signal.webhookId,
+    symbol: canonicalSymbol,
+    symbolName,
+    originalSymbol,
+    sourceSymbol: String(resolvedMasterSymbol?.sourceSymbol || canonicalSymbol || '').trim().toUpperCase(),
+    type: signal.type,
+    entry: signal.entryPrice,
+    stoploss: signal.stopLoss,
+    status: signal.status,
+    timestamp: signal.createdAt,
+    createdAt: signal.createdAt,
+    signalTime: signal.signalTime,
+    exitPrice: getResolvedSignalExitPrice(signal),
+    totalPoints: getResolvedSignalPoints(signal),
+    exitReason: signal.exitReason,
+    exitTime: signal.exitTime,
+    segment,
+    category: signal.category,
+    targets: signal.targets,
+    isFree: signal.isFree,
+    notes: signal.notes,
+    strategyId: signal.strategyId,
+    strategyName: signal.strategyName,
+    timeframe: normalizeSignalTimeframe(signal.timeframe) || signal.timeframe,
+    metrics: signal.metrics,
+  };
+};
 
 const getStartOfDay = (date) => {
   const next = new Date(date);
@@ -394,7 +466,8 @@ const getSignal = catchAsync(async (req, res) => {
   const access = await getSignalAccessContext(req);
   assertSignalAccess(access, signal);
 
-  res.send(formatSignalResponse(signal));
+  const symbolMap = await resolveSignalMasterSymbols([signal]);
+  res.send(formatSignalResponse(signal, symbolMap.get(normalizeSignalLookupKey(signal.symbol)) || null));
 });
 
 const createManualSignal = catchAsync(async (req, res) => {
@@ -492,7 +565,10 @@ const getSignals = catchAsync(async (req, res) => {
       : Promise.resolve(null),
   ]);
 
-  const formattedResults = signalsData.results.map((signal) => formatSignalResponse(signal));
+  const symbolMap = await resolveSignalMasterSymbols(signalsData.results);
+  const formattedResults = signalsData.results.map((signal) =>
+    formatSignalResponse(signal, symbolMap.get(normalizeSignalLookupKey(signal.symbol)) || null)
+  );
 
   res.send({
       access: {

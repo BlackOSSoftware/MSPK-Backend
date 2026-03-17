@@ -616,7 +616,34 @@ class MarketDataService extends EventEmitter {
         const direct = this.symbols[raw] ? raw : null;
         if (direct) return direct;
 
-        return this.symbolCaseMap.get(raw.toLowerCase()) || raw;
+        const remembered = this.symbolCaseMap.get(raw.toLowerCase());
+        if (remembered) return remembered;
+
+        const normalized = this._normalizeMarketSymbol(raw);
+        const historyAlias = this._resolveHistoryAlias(normalized);
+        if (historyAlias) {
+            const directAlias = this.symbols[historyAlias] ? historyAlias : null;
+            if (directAlias) return directAlias;
+
+            const rememberedAlias = this.symbolCaseMap.get(historyAlias.toLowerCase());
+            if (rememberedAlias) return rememberedAlias;
+        }
+
+        const mappedAliases = this.marketDataAliasMap.get(normalized.toLowerCase());
+        if (mappedAliases && mappedAliases.size > 0) {
+            for (const candidate of mappedAliases) {
+                if (!candidate) continue;
+                const directCandidate = this.symbols[candidate] ? candidate : null;
+                if (directCandidate) return directCandidate;
+
+                const rememberedCandidate = this.symbolCaseMap.get(String(candidate).toLowerCase());
+                if (rememberedCandidate) return rememberedCandidate;
+
+                return String(candidate).trim().toUpperCase();
+            }
+        }
+
+        return historyAlias || raw;
     }
 
     _toKiteQuoteSymbol(rawSymbol, symbolDoc = null) {

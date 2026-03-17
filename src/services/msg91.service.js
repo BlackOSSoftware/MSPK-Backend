@@ -82,9 +82,14 @@ class Msg91Service {
      * @returns {Promise<void>}
      */
     async sendWhatsapp(mobile, templateName, components = {}) {
-        if (!process.env.MSG91_WHATSAPP_INTEGRATED_NUMBER) {
+        if (!this.authKey) {
+            logger.error('MSG91_AUTH_KEY is missing in .env');
+            throw new Error('MSG91 WhatsApp auth key missing');
+        }
+
+        if (!process.env.MSG91_WHATSAPP_INTEGRATED_NUMBER || process.env.MSG91_WHATSAPP_INTEGRATED_NUMBER === 'your_integrated_number') {
              logger.warn('MSG91: WhatsApp Integrated Number not set in .env');
-             return;
+             throw new Error('MSG91 WhatsApp integrated number missing');
         }
 
         try {
@@ -124,9 +129,11 @@ class Msg91Service {
 
            const response = await axios.post(url, payload, { headers });
            logger.info(`MSG91: WhatsApp sent to ${mobile} response: ${JSON.stringify(response.data)}`);
+           return response.data;
 
         } catch (error) {
             logger.error(`MSG91: WhatsApp Error - ${error.response?.data?.message || error.message}`);
+            throw new Error(error.response?.data?.message || error.message || 'MSG91 WhatsApp send failed');
         }
     }
 

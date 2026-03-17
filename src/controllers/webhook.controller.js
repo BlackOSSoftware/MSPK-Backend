@@ -10,6 +10,7 @@ import {
   normalizeSignalSegment,
   normalizeSignalSymbol,
 } from '../utils/signalRouting.js';
+import { expandSelectedSymbols } from '../utils/userSignalSelection.js';
 import { buildTimeframeQuery, normalizeSignalTimeframe } from '../utils/timeframe.js';
 
 const escapeRegex = (value = '') => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -132,17 +133,29 @@ const resolveMasterSymbol = async (input, { symbolIdRequested = false } = {}) =>
   if (!rawInput) return null;
 
   const normalizedSymbol = normalizeSignalSymbol(rawInput);
+  const symbolAliases = Array.from(new Set([normalizedSymbol, ...expandSelectedSymbols([normalizedSymbol])]));
+
+  const bySymbol = await MasterSymbol.findOne({ symbol: { $in: symbolAliases } }).lean();
+  if (bySymbol) return bySymbol;
+
+  const bySourceSymbol = await MasterSymbol.findOne({ sourceSymbol: { $in: symbolAliases } }).lean();
+  if (bySourceSymbol) return bySourceSymbol;
+
+  const byName = await MasterSymbol.findOne({ name: new RegExp(`^${escapeRegex(rawInput)}$`, 'i') }).lean();
+  if (byName) return byName;
+
   if (!symbolIdRequested && !mongoose.Types.ObjectId.isValid(rawInput)) {
-    return MasterSymbol.findOne({ symbol: normalizedSymbol }).lean();
+    return null;
   }
 
-  const filters = [{ symbol: normalizedSymbol }];
+  const filters = [{ symbol: { $in: symbolAliases } }, { sourceSymbol: { $in: symbolAliases } }];
 
   if (mongoose.Types.ObjectId.isValid(rawInput)) {
     filters.unshift({ _id: rawInput });
   }
 
   filters.unshift({ symbolId: new RegExp(`^${escapeRegex(rawInput)}$`, 'i') });
+  filters.push({ name: new RegExp(`^${escapeRegex(rawInput)}$`, 'i') });
 
   return MasterSymbol.findOne({ $or: filters }).lean();
 };

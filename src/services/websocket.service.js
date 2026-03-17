@@ -7,6 +7,7 @@ import pipeline from '../utils/pipeline/DataPipeline.js';
 
 let wss;
 const rooms = new Map(); // Map<string, Set<WebSocket>>
+const socketRoomAliases = new WeakMap(); // WeakMap<WebSocket, Map<string, Set<string>>>
 const SESSION_MISMATCH_LOG_WINDOW_MS = 60 * 1000;
 const SESSION_MISMATCH_CLEANUP_MS = 10 * 60 * 1000;
 const sessionMismatchLog = new Map(); // Map<string, { last: number; count: number }>
@@ -69,6 +70,67 @@ const parseWsBoolean = (value, fallback = true) => {
   if (['true', '1', 'yes', 'y', 'on'].includes(normalized)) return true;
   if (['false', '0', 'no', 'n', 'off'].includes(normalized)) return false;
   return fallback;
+};
+
+const normalizeRoomName = (value) => String(value || '').trim().toLowerCase();
+
+const addClientToRoom = (ws, roomName) => {
+  const normalized = normalizeRoomName(roomName);
+  if (!normalized) return null;
+
+  if (!rooms.has(normalized)) {
+    rooms.set(normalized, new Set());
+  }
+  rooms.get(normalized).add(ws);
+  return normalized;
+};
+
+const removeClientFromRoom = (ws, roomName) => {
+  const normalized = normalizeRoomName(roomName);
+  if (!normalized || !rooms.has(normalized)) return null;
+
+  rooms.get(normalized).delete(ws);
+  if (rooms.get(normalized).size === 0) {
+    rooms.delete(normalized);
+  }
+  return normalized;
+};
+
+const trackSocketRoomAliases = (ws, rawRoomName, roomNames = []) => {
+  const rawRoom = normalizeRoomName(rawRoomName);
+  if (!rawRoom) return;
+
+  let roomMap = socketRoomAliases.get(ws);
+  if (!roomMap) {
+    roomMap = new Map();
+    socketRoomAliases.set(ws, roomMap);
+  }
+
+  const tracked = new Set([rawRoom]);
+  for (const roomName of Array.isArray(roomNames) ? roomNames : [roomNames]) {
+    const normalized = normalizeRoomName(roomName);
+    if (normalized) tracked.add(normalized);
+  }
+
+  roomMap.set(rawRoom, tracked);
+};
+
+const consumeTrackedSocketRooms = (ws, rawRoomName) => {
+  const rawRoom = normalizeRoomName(rawRoomName);
+  if (!rawRoom) return new Set();
+
+  const roomMap = socketRoomAliases.get(ws);
+  if (!roomMap) {
+    return new Set([rawRoom]);
+  }
+
+  const tracked = roomMap.get(rawRoom);
+  roomMap.delete(rawRoom);
+  if (roomMap.size === 0) {
+    socketRoomAliases.delete(ws);
+  }
+
+  return tracked && tracked.size > 0 ? new Set(tracked) : new Set([rawRoom]);
 };
 
 const syncPipelineActiveSymbols = () => {
@@ -265,21 +327,34 @@ const initWebSocket = (server) => {
 
 const subscribeToRoom = async (ws, roomName) => {
   if (!roomName) return;
-  const normalized = roomName.toString().trim().toLowerCase();
-  if (!rooms.has(normalized)) {
-    rooms.set(normalized, new Set());
-  }
-  rooms.get(normalized).add(ws);
-  syncPipelineActiveSymbols();
-  logger.info(`WebSocket: Room Subscribed -> [${normalized}] (Total: ${rooms.get(normalized).size} clients)`);
+  const linkedRooms = new Set();
+  const normalized = addClientToRoom(ws, roomName);
+  if (normalized) linkedRooms.add(normalized);
 
   // TICK REPLAY
   try {
     const { default: marketDataService } = await import('./marketData.service.js');
-    await marketDataService.ensureSymbolSubscription(roomName);
+    const resolvedSymbol = await marketDataService.ensureSymbolSubscription(roomName);
+    if (resolvedSymbol) {
+      const resolvedRoom = addClientToRoom(ws, resolvedSymbol);
+      if (resolvedRoom) linkedRooms.add(resolvedRoom);
+    }
+
+    if (typeof marketDataService._resolveAliasTargets === 'function') {
+      const aliasTargets = marketDataService._resolveAliasTargets(resolvedSymbol || roomName);
+      aliasTargets.forEach((target) => {
+        const aliasRoom = addClientToRoom(ws, target);
+        if (aliasRoom) linkedRooms.add(aliasRoom);
+      });
+    }
+
+    trackSocketRoomAliases(ws, roomName, Array.from(linkedRooms));
+    syncPipelineActiveSymbols();
+    logger.info(`WebSocket: Room Subscribed -> [${Array.from(linkedRooms).join(', ')}]`);
+
     // Case-insensitive lookup in currentPrices
     const prices = marketDataService.currentPrices || {};
-    const exactSymbol = Object.keys(prices).find(s => s.toLowerCase() === normalized);
+    const exactSymbol = Object.keys(prices).find((symbol) => linkedRooms.has(symbol.toLowerCase()));
     
     if (exactSymbol && prices[exactSymbol]) {
        const price = prices[exactSymbol];
@@ -295,6 +370,11 @@ const subscribeToRoom = async (ws, roomName) => {
        }
     }
   } catch (e) {
+      trackSocketRoomAliases(ws, roomName, Array.from(linkedRooms));
+      syncPipelineActiveSymbols();
+      if (linkedRooms.size > 0) {
+        logger.info(`WebSocket: Room Subscribed -> [${Array.from(linkedRooms).join(', ')}]`);
+      }
       // Passive fail
   }
 };
@@ -310,14 +390,12 @@ const logActiveRooms = () => {
 
 const unsubscribeFromRoom = (ws, roomName) => {
   if (!roomName) return;
-  const normalized = roomName.toString().trim().toLowerCase();
-  if (!rooms.has(normalized)) return;
-  rooms.get(normalized).delete(ws);
-  if (rooms.get(normalized).size === 0) {
-    rooms.delete(normalized);
-  }
+  const trackedRooms = consumeTrackedSocketRooms(ws, roomName);
+  trackedRooms.forEach((trackedRoom) => {
+    removeClientFromRoom(ws, trackedRoom);
+  });
   syncPipelineActiveSymbols();
-  logger.debug(`WebSocket unsubscribed from room: ${normalized}`);
+  logger.debug(`WebSocket unsubscribed from room: ${Array.from(trackedRooms).join(', ')}`);
 };
 
 const removeFromAllRooms = (ws) => {
@@ -329,6 +407,7 @@ const removeFromAllRooms = (ws) => {
       }
     }
   });
+  socketRoomAliases.delete(ws);
   syncPipelineActiveSymbols();
 };
 
