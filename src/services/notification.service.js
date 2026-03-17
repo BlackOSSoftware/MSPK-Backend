@@ -276,6 +276,7 @@ class NotificationService {
   async scheduleNotifications(signal) {
       try {
           const debugBroadcastAll =
+              config.env !== 'production' &&
               String(process.env.DEBUG_SIGNAL_BROADCAST_ALL || '').trim().toLowerCase() === 'true';
 
           // Fetch Global Notification Settings
@@ -475,6 +476,12 @@ class NotificationService {
               removeOnComplete: { age: jobRetentionSeconds },
               removeOnFail: { age: jobRetentionSeconds },
           };
+          const whatsappJobOptions = {
+              ...baseJobOptions,
+              attempts: Math.max(jobAttempts, 5),
+              backoff: { type: 'exponential', delay: Math.max(jobBackoffMs, 3000) },
+              priority: 1,
+          };
 
           const jobs = [];
           eligibleUsers.forEach((user) => {
@@ -511,7 +518,7 @@ class NotificationService {
                   jobs.push({
                       name: 'send-whatsapp',
                       data: { type: 'whatsapp', userId, signal },
-                      opts: { ...baseJobOptions, jobId: buildJobId(signalEventKey, userId, 'whatsapp') }
+                      opts: { ...whatsappJobOptions, jobId: buildJobId(signalEventKey, userId, 'whatsapp') }
                   });
               }
 

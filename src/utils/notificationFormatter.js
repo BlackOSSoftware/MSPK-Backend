@@ -107,6 +107,10 @@ const resolveDisplayTimestamp = ({
     6 * 60 * 60 * 1000
   );
 
+  if (fallbackDate.getTime() >= primaryDate.getTime()) {
+    return fallbackDate;
+  }
+
   if (Math.abs(fallbackDate.getTime() - primaryDate.getTime()) > maxAllowedSkewMs) {
     return fallbackDate;
   }

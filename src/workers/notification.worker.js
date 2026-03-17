@@ -190,6 +190,7 @@ const notificationWorker = new Worker('notifications', async (job) => {
     notification,
     recipient,
   } = job.data;
+  const queueLatencyMs = typeof job?.timestamp === 'number' ? Math.max(Date.now() - job.timestamp, 0) : 0;
   
   try {
       // Fetch System Settings (cached)
@@ -292,6 +293,11 @@ const notificationWorker = new Worker('notifications', async (job) => {
           }
       } 
        else if (type === 'whatsapp' || type === 'whatsapp-test') {
+           if (queueLatencyMs > 60 * 1000) {
+               logger.warn(
+                 `[WhatsAppWorker] Job ${job.id} started after ${Math.round(queueLatencyMs / 1000)}s in queue`
+               );
+           }
            const waConfig = getSetting('whatsapp_config');
            const whatsappRecipient = recipient || user?.phoneNumber || user?.phone;
            if (
