@@ -1,3 +1,5 @@
+import { normalizeSignalTimeframe } from './timeframe.js';
+
 const normalizeUpper = (value) => String(value ?? '').trim().toUpperCase();
 
 const stripDerivativeSuffix = (symbol) => normalizeUpper(symbol).replace(/(\.P|PERP)$/i, '');
@@ -59,6 +61,36 @@ const isCryptoLikeSymbol = (symbol) => {
 
 const normalizeSignalSymbol = (symbol) => normalizeUpper(symbol);
 
+const normalizeSignalNumber = (value) => {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return String(Math.round(value * 100) / 100);
+  }
+
+  if (typeof value === 'string') {
+    const normalized = value.replace(/,/g, '').trim();
+    if (!normalized) return '';
+    const parsed = Number(normalized);
+    if (Number.isFinite(parsed)) {
+      return String(Math.round(parsed * 100) / 100);
+    }
+    return normalized;
+  }
+
+  return '';
+};
+
+const normalizeSignalTimestamp = (value) => {
+  const raw = String(value ?? '').trim();
+  if (!raw) return '';
+
+  const parsed = value instanceof Date ? value : new Date(raw);
+  if (Number.isNaN(parsed.getTime())) {
+    return raw;
+  }
+
+  return parsed.toISOString();
+};
+
 const normalizeSignalSegment = (segment, symbol = '') => {
   if (isCryptoLikeSymbol(symbol)) return 'CRYPTO';
 
@@ -90,9 +122,9 @@ const buildWebhookSignalId = ({
     normalizeSignalSymbol(symbol),
     normalizeSignalSegment(segment, symbol),
     normalizeUpper(tradeType),
-    String(timeframe || '').trim(),
-    entryPrice !== undefined && entryPrice !== null ? String(entryPrice) : '',
-    String(signalTime || '').trim(),
+    normalizeSignalTimeframe(timeframe),
+    normalizeSignalNumber(entryPrice),
+    normalizeSignalTimestamp(signalTime),
   ].join('|');
 };
 

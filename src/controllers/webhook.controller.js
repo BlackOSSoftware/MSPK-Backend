@@ -10,7 +10,7 @@ import {
   normalizeSignalSymbol,
 } from '../utils/signalRouting.js';
 import { resolveBestMasterSymbol } from '../utils/masterSymbolResolver.js';
-import { buildTimeframeQuery, normalizeSignalTimeframe } from '../utils/timeframe.js';
+import { buildTimeframeQuery, getTimeframeDurationMs, normalizeSignalTimeframe } from '../utils/timeframe.js';
 
 const parseBoolean = (value) => {
   if (value === undefined || value === null) return undefined;
@@ -39,6 +39,8 @@ const toFiniteNumber = (value) => {
 };
 
 const roundSignalValue = (value) => Math.round(value * 100) / 100;
+const MIN_STALE_ENTRY_SIGNAL_AGE_MS = 90 * 60 * 1000;
+const MAX_STALE_ENTRY_SIGNAL_AGE_MS = 48 * 60 * 60 * 1000;
 
 const getSignalClosedStatuses = () => ['Closed', 'Target Hit', 'Partial Profit Book', 'Stoploss Hit'];
 
@@ -125,6 +127,20 @@ const getWebhookSymbolInput = (body = {}) =>
 
 const looksLikeMasterSymbolId = (value) => /-[a-f0-9]{24}$/i.test(String(value || '').trim());
 
+const parseWebhookDate = (value) => {
+  if (!value) return null;
+  const parsed = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return parsed;
+};
+
+const getAllowedSignalAgeMs = (timeframe) => {
+  const timeframeMs = getTimeframeDurationMs(timeframe);
+  if (!timeframeMs) return MIN_STALE_ENTRY_SIGNAL_AGE_MS;
+
+  return Math.min(Math.max(timeframeMs * 4, MIN_STALE_ENTRY_SIGNAL_AGE_MS), MAX_STALE_ENTRY_SIGNAL_AGE_MS);
+};
+
 const resolveMasterSymbol = async (input, { symbolIdRequested = false } = {}) => {
   return resolveBestMasterSymbol(input, { symbolIdRequested });
 };
@@ -149,6 +165,8 @@ const receiveSignal = catchAsync(async (req, res) => {
   const isFreeFromPayload = parseBoolean(req.body.is_free ?? req.body.isFree ?? req.body.free);
   const isFree = isFreeFromPayload ?? false;
   const normalizedTimeframe = normalizeSignalTimeframe(req.body.timeframe);
+  const isEntryEvent = !['INFO', 'EXIT'].includes(event);
+  const parsedSignalTime = parseWebhookDate(req.body.signal_time);
 
   const sendWebhookResponse = (status, payload) => {
     logger.info(
@@ -169,6 +187,23 @@ const receiveSignal = catchAsync(async (req, res) => {
       message: 'Valid symbol and segment are required to process webhook.',
       symbol: symbolInput || req.body.symbol || '',
     });
+  }
+
+  if (isEntryEvent && parsedSignalTime) {
+    const signalAgeMs = Date.now() - parsedSignalTime.getTime();
+    const allowedSignalAgeMs = getAllowedSignalAgeMs(normalizedTimeframe);
+
+    if (signalAgeMs > allowedSignalAgeMs) {
+      logger.warn(
+        `[WEBHOOK] Ignoring stale ENTRY signal for ${symbol}. signalTime=${parsedSignalTime.toISOString()} ageMs=${signalAgeMs} allowedAgeMs=${allowedSignalAgeMs} timeframe=${normalizedTimeframe || 'NA'} webhookId=${webhookId || 'NA'}`
+      );
+      return sendWebhookResponse(httpStatus.OK, {
+        status: 'stale_ignored',
+        symbol,
+        timeframe: normalizedTimeframe || null,
+        signalTime: parsedSignalTime.toISOString(),
+      });
+    }
   }
 
   const findSignalByWebhookId = async (webhookId) => {

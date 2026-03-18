@@ -1,4 +1,4 @@
-import { normalizeSignalTimeframe } from './timeframe.js';
+import { getTimeframeDurationMs, normalizeSignalTimeframe } from './timeframe.js';
 
 const numberFormatter = new Intl.NumberFormat('en-IN', {
   maximumFractionDigits: 2,
@@ -62,32 +62,6 @@ const parseTimestamp = (value) => {
   const date = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(date.getTime())) return null;
   return date;
-};
-
-const getTimeframeDurationMs = (timeframe) => {
-  const raw = String(timeframe || '').trim();
-  if (!raw) return 0;
-
-  const secondsMatch = raw.match(/^(\d+)s$/i);
-  if (secondsMatch) {
-    return Number(secondsMatch[1]) * 1000;
-  }
-
-  const minutesMatch = raw.match(/^(\d+)m$/i);
-  if (minutesMatch) {
-    return Number(minutesMatch[1]) * 60 * 1000;
-  }
-
-  const hoursMatch = raw.match(/^(\d+)h$/i);
-  if (hoursMatch) {
-    return Number(hoursMatch[1]) * 60 * 60 * 1000;
-  }
-
-  if (raw === '1D') return 24 * 60 * 60 * 1000;
-  if (raw === '1W') return 7 * 24 * 60 * 60 * 1000;
-  if (raw === '1M') return 30 * 24 * 60 * 60 * 1000;
-
-  return 0;
 };
 
 export const resolveDisplayTimestamp = ({

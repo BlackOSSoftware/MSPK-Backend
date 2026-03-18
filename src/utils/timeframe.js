@@ -30,6 +30,34 @@ const normalizeSignalTimeframe = (value) => {
   return raw;
 };
 
+const getTimeframeDurationMs = (value) => {
+  const normalized = normalizeSignalTimeframe(value);
+  if (!normalized) return 0;
+
+  if (normalized === 'Scalp') return 5 * 60 * 1000;
+
+  const secondsMatch = normalized.match(/^(\d+)s$/i);
+  if (secondsMatch) {
+    return Number(secondsMatch[1]) * 1000;
+  }
+
+  const minutesMatch = normalized.match(/^(\d+)m$/i);
+  if (minutesMatch) {
+    return Number(minutesMatch[1]) * 60 * 1000;
+  }
+
+  const hoursMatch = normalized.match(/^(\d+)h$/i);
+  if (hoursMatch) {
+    return Number(hoursMatch[1]) * 60 * 60 * 1000;
+  }
+
+  if (normalized === '1D') return 24 * 60 * 60 * 1000;
+  if (normalized === '1W') return 7 * 24 * 60 * 60 * 1000;
+  if (normalized === '1M') return 30 * 24 * 60 * 60 * 1000;
+
+  return 0;
+};
+
 const addAlias = (target, value) => {
   const raw = String(value ?? '').trim();
   if (!raw) return;
@@ -135,5 +163,6 @@ const buildTimeframeQuery = (fieldName, value) => {
 export {
   buildTimeframeAliases,
   buildTimeframeQuery,
+  getTimeframeDurationMs,
   normalizeSignalTimeframe,
 };
