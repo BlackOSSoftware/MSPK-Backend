@@ -2,6 +2,7 @@ import httpStatus from 'http-status';
 import catchAsync from '../utils/catchAsync.js';
 import ApiError from '../utils/ApiError.js';
 import MasterSymbol from '../models/MasterSymbol.js';
+import Signal from '../models/Signal.js';
 import { signalService, technicalAnalysisService, marketDataService } from '../services/index.js';
 import {
   MAX_SELECTED_SYMBOLS_PER_SEGMENT,
@@ -98,6 +99,25 @@ const getResolvedSignalPoints = (signal) => {
 const toCsvCell = (value) => `"${String(value ?? '').replace(/"/g, '""')}"`;
 
 const normalizeSignalLookupKey = (value) => String(value || '').trim().toUpperCase();
+const getDateValue = (value) => {
+  if (!value) return null;
+  const parsed = value instanceof Date ? new Date(value) : new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+};
+
+const getLatestDate = (...values) => {
+  let latest = null;
+
+  values.forEach((value) => {
+    const parsed = getDateValue(value);
+    if (!parsed) return;
+    if (!latest || parsed.getTime() > latest.getTime()) {
+      latest = parsed;
+    }
+  });
+
+  return latest;
+};
 
 const resolvePreferredSignalSymbol = async (symbol = '') => {
   const normalized = normalizeSignalLookupKey(symbol);
@@ -183,19 +203,156 @@ const ensureUserSignalSelectionInitialized = async (user) => {
   return normalizeSelectedSymbols(user?.signalWatchlist);
 };
 
-const buildSelectedScriptsResponse = async (symbols = []) => {
+const buildSelectedScriptsResponse = async (symbols = [], options = {}) => {
   const normalizedSymbols = normalizeSelectedSymbols(symbols);
   if (normalizedSymbols.length === 0) return [];
+  const signalVisibleFrom = getDateValue(options?.signalVisibleFrom);
+  const visibilityMatch =
+    signalVisibleFrom instanceof Date
+      ? { createdAt: { $gte: signalVisibleFrom } }
+      : {};
 
-  const docs = await MasterSymbol.find({ symbol: { $in: normalizedSymbols } })
-    .select('symbol name segment segmentGroup exchange provider')
-    .lean();
+  const aliasesBySelectedSymbol = new Map(
+    normalizedSymbols.map((symbol) => [
+      symbol,
+      Array.from(
+        new Set(expandSelectedSymbols([symbol]).map((item) => normalizeSignalLookupKey(item)).filter(Boolean))
+      ),
+    ])
+  );
+
+  const allAliases = Array.from(
+    new Set(
+      Array.from(aliasesBySelectedSymbol.values()).flat()
+    )
+  );
+
+  const [docs, ongoingSignals, latestSignals] = await Promise.all([
+    MasterSymbol.find({ symbol: { $in: normalizedSymbols } })
+      .select('symbol name segment segmentGroup exchange provider')
+      .lean(),
+    allAliases.length === 0
+      ? Promise.resolve([])
+      : Signal.aggregate([
+          {
+            $match: {
+              symbol: { $in: allAliases },
+              status: { $nin: CLOSED_SIGNAL_STATUSES },
+              ...visibilityMatch,
+            },
+          },
+          {
+            $addFields: {
+              activityAt: { $ifNull: ['$signalTime', '$createdAt'] },
+            },
+          },
+          {
+            $sort: {
+              activityAt: -1,
+              createdAt: -1,
+              updatedAt: -1,
+            },
+          },
+          {
+            $group: {
+              _id: '$symbol',
+              ongoingSignalCount: { $sum: 1 },
+              latestSignalStatus: { $first: '$status' },
+              latestSignalAt: { $first: '$activityAt' },
+            },
+          },
+        ]),
+    allAliases.length === 0
+      ? Promise.resolve([])
+      : Signal.aggregate([
+          {
+            $match: {
+              symbol: { $in: allAliases },
+              ...visibilityMatch,
+            },
+          },
+          {
+            $addFields: {
+              activityAt: { $ifNull: ['$signalTime', '$createdAt'] },
+            },
+          },
+          {
+            $sort: {
+              activityAt: -1,
+              createdAt: -1,
+              updatedAt: -1,
+            },
+          },
+          {
+            $group: {
+              _id: '$symbol',
+              latestSignalStatus: { $first: '$status' },
+              latestSignalAt: { $first: '$activityAt' },
+            },
+          },
+        ]),
+  ]);
   const docsBySymbol = new Map(
     docs.map((doc) => [normalizeSignalLookupKey(doc?.symbol), doc])
+  );
+  const ongoingByAlias = new Map(
+    ongoingSignals.map((item) => [
+      normalizeSignalLookupKey(item?._id),
+      {
+        ongoingSignalCount: Number(item?.ongoingSignalCount || 0),
+        latestSignalStatus: item?.latestSignalStatus || null,
+        latestSignalAt: getDateValue(item?.latestSignalAt),
+      },
+    ])
+  );
+  const latestByAlias = new Map(
+    latestSignals.map((item) => [
+      normalizeSignalLookupKey(item?._id),
+      {
+        latestSignalStatus: item?.latestSignalStatus || null,
+        latestSignalAt: getDateValue(item?.latestSignalAt),
+      },
+    ])
   );
 
   return normalizedSymbols.map((symbol) => {
     const doc = docsBySymbol.get(symbol);
+    const aliases = aliasesBySelectedSymbol.get(symbol) || [symbol];
+    let signalActivityState = 'none';
+    let ongoingSignalCount = 0;
+    let latestSignalStatus = null;
+    let latestSignalAt = null;
+
+    aliases.forEach((alias) => {
+      const ongoingMeta = ongoingByAlias.get(alias);
+      if (ongoingMeta) {
+        signalActivityState = 'ongoing';
+        ongoingSignalCount += ongoingMeta.ongoingSignalCount;
+        const resolvedLatestDate = getLatestDate(latestSignalAt, ongoingMeta.latestSignalAt);
+        if (resolvedLatestDate && (!latestSignalAt || resolvedLatestDate.getTime() > latestSignalAt.getTime())) {
+          latestSignalAt = resolvedLatestDate;
+          latestSignalStatus = ongoingMeta.latestSignalStatus;
+        }
+        return;
+      }
+
+      if (signalActivityState === 'ongoing') {
+        return;
+      }
+
+      const latestMeta = latestByAlias.get(alias);
+      if (!latestMeta) {
+        return;
+      }
+
+      signalActivityState = 'inactive';
+      const resolvedLatestDate = getLatestDate(latestSignalAt, latestMeta.latestSignalAt);
+      if (resolvedLatestDate && (!latestSignalAt || resolvedLatestDate.getTime() > latestSignalAt.getTime())) {
+        latestSignalAt = resolvedLatestDate;
+        latestSignalStatus = latestMeta.latestSignalStatus;
+      }
+    });
+
     if (!doc) {
       return {
         symbol,
@@ -204,12 +361,22 @@ const buildSelectedScriptsResponse = async (symbols = []) => {
         segmentGroup: '',
         exchange: '',
         provider: null,
+        isAdded: true,
+        signalActivityState,
+        ongoingSignalCount,
+        latestSignalStatus,
+        latestSignalAt,
       };
     }
 
     return {
       ...doc,
       symbol,
+      isAdded: true,
+      signalActivityState,
+      ongoingSignalCount,
+      latestSignalStatus,
+      latestSignalAt,
     };
   });
 };
@@ -615,7 +782,10 @@ const createSignal = catchAsync(async (req, res) => {
 
 const getSelectedScripts = catchAsync(async (req, res) => {
   const selectedSymbols = await ensureUserSignalSelectionInitialized(req.user);
-  const scripts = await buildSelectedScriptsResponse(selectedSymbols);
+  const scripts = await buildSelectedScriptsResponse(selectedSymbols, {
+    signalVisibleFrom:
+      req.user?.role === 'user' && req.user?.createdAt ? getStartOfIndiaDay(req.user.createdAt) : null,
+  });
   res.send(scripts);
 });
 
@@ -640,7 +810,10 @@ const addSelectedScript = catchAsync(async (req, res) => {
   if (currentSymbols.includes(normalizedSymbol)) {
     return res.send({
       symbols: currentSymbols,
-      scripts: await buildSelectedScriptsResponse(currentSymbols),
+      scripts: await buildSelectedScriptsResponse(currentSymbols, {
+        signalVisibleFrom:
+          user?.role === 'user' && user?.createdAt ? getStartOfIndiaDay(user.createdAt) : null,
+      }),
     });
   }
 
@@ -668,7 +841,10 @@ const addSelectedScript = catchAsync(async (req, res) => {
 
   res.send({
     symbols: normalizeSelectedSymbols(user.signalWatchlist),
-    scripts: await buildSelectedScriptsResponse(user.signalWatchlist),
+    scripts: await buildSelectedScriptsResponse(user.signalWatchlist, {
+      signalVisibleFrom:
+        user?.role === 'user' && user?.createdAt ? getStartOfIndiaDay(user.createdAt) : null,
+    }),
   });
 });
 
@@ -688,7 +864,10 @@ const removeSelectedScript = catchAsync(async (req, res) => {
 
   res.send({
     symbols: normalizeSelectedSymbols(user.signalWatchlist),
-    scripts: await buildSelectedScriptsResponse(user.signalWatchlist),
+    scripts: await buildSelectedScriptsResponse(user.signalWatchlist, {
+      signalVisibleFrom:
+        user?.role === 'user' && user?.createdAt ? getStartOfIndiaDay(user.createdAt) : null,
+    }),
   });
 });
 
