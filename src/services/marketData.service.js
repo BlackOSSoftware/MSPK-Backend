@@ -14,6 +14,7 @@ import { decrypt, encrypt } from '../utils/encryption.js';
 import cacheManager from './cacheManager.js';
 import { decorateSymbolSegment } from '../utils/marketSegmentResolver.js';
 import { dedupeSymbols } from '../utils/marketSymbolDedupe.js';
+import { MARKET_SYMBOL_ALIAS_DEFINITIONS } from '../utils/marketSymbolAliases.js';
 import {
     hasExplicitContractMonth,
     isCurrentMonthContractDoc,
@@ -70,6 +71,10 @@ const MARKET_DATA_WIRE_ALIASES = new Map([
     ['USOIL', ['USOILROLL', 'USOILJ6', 'USOILK6']],
     ['BRN1!', ['UKOILROLL', 'UKOILK6', 'UKOILM6']],
     ['UKOIL', ['UKOILROLL', 'UKOILK6', 'UKOILM6']],
+    ...MARKET_SYMBOL_ALIAS_DEFINITIONS.map((definition) => [
+        definition.alias,
+        Array.from(new Set([definition.canonical, ...(definition.wireSymbols || [])])),
+    ]),
 ]);
 
 const toNumber = (value, fallback = 0) => {
@@ -2459,59 +2464,80 @@ class MarketDataService extends EventEmitter {
     }
 
     _resolveBestMarketDataSymbol(symbolDoc = null, rawSymbol = '') {
-        const candidates = new Set();
-        const addCandidate = (value) => {
+        const primaryCandidates = new Set();
+        const fallbackCandidates = new Set();
+        const addCandidate = (collection, value) => {
             const normalized = this._normalizeMarketSymbol(value);
             if (!normalized) return;
-            candidates.add(normalized);
+            collection.add(normalized);
+        };
+        const addAliasCandidates = (collection) => {
+            for (const candidate of Array.from(collection)) {
+                const usdUsdtAlias = this._getUsdUsdtAlias(candidate);
+                if (usdUsdtAlias) {
+                    addCandidate(collection, usdUsdtAlias);
+                }
+            }
+        };
+        const resolveFromCandidates = (candidates) => {
+            for (const candidate of candidates) {
+                const exact = this._getMarketDataAvailableSymbol(candidate);
+                if (exact) return exact;
+            }
+
+            for (const candidate of candidates) {
+                const explicitAliases = MARKET_DATA_WIRE_ALIASES.get(candidate) || [];
+                for (const alias of explicitAliases) {
+                    const exact = this._getMarketDataAvailableSymbol(alias);
+                    if (exact) return exact;
+                }
+            }
+
+            for (const candidate of candidates) {
+                const prefixMatch = this._getMarketDataPrefixMatches(candidate)[0];
+                if (prefixMatch?.actual) return prefixMatch.actual;
+            }
+
+            for (const candidate of candidates) {
+                const futuresAlias = this._resolveMarketDataFuturesAlias(candidate);
+                if (futuresAlias) return futuresAlias;
+            }
+
+            return null;
         };
 
-        addCandidate(rawSymbol);
-        addCandidate(symbolDoc?.symbol);
-        addCandidate(symbolDoc?.sourceSymbol);
+        addCandidate(primaryCandidates, rawSymbol);
+        addCandidate(primaryCandidates, symbolDoc?.symbol);
+        addCandidate(fallbackCandidates, symbolDoc?.sourceSymbol);
 
         const normalizedName = this._normalizeMarketSymbol(symbolDoc?.name);
         const normalizedExchange = this._normalizeMarketSymbol(symbolDoc?.exchange);
-        if (normalizedExchange === 'NYMEX' || /(?:CRUDE OIL|WTI|US OIL)/.test(normalizedName)) {
-            addCandidate('USOILROLL');
-            addCandidate('USOIL');
+        const normalizedSymbolFamily = this._normalizeMarketSymbol(rawSymbol || symbolDoc?.symbol);
+        const isBrentInstrument =
+            /(?:BRENT|UK OIL|UKOIL)/.test(normalizedName) ||
+            /(?:BRENTUSD|BRN1!|UKOIL)/.test(normalizedSymbolFamily);
+        const isWtiInstrument =
+            /(?:WTI|US OIL)/.test(normalizedName) ||
+            (/CRUDE OIL/.test(normalizedName) && !isBrentInstrument) ||
+            (normalizedExchange === 'NYMEX' && /(?:CL1!|USOIL|WTICOUSD)/.test(normalizedSymbolFamily));
+
+        if (isWtiInstrument) {
+            addCandidate(primaryCandidates, 'USOILROLL');
+            addCandidate(primaryCandidates, 'USOIL');
         }
-        if (/BRENT/.test(normalizedName)) {
-            addCandidate('UKOILROLL');
-            addCandidate('UKOIL');
+        if (isBrentInstrument) {
+            addCandidate(primaryCandidates, 'UKOILROLL');
+            addCandidate(primaryCandidates, 'UKOIL');
         }
 
-        for (const candidate of Array.from(candidates)) {
-            const usdUsdtAlias = this._getUsdUsdtAlias(candidate);
-            if (usdUsdtAlias) {
-                addCandidate(usdUsdtAlias);
-            }
-        }
+        addAliasCandidates(primaryCandidates);
+        addAliasCandidates(fallbackCandidates);
 
-        for (const candidate of candidates) {
-            const exact = this._getMarketDataAvailableSymbol(candidate);
-            if (exact) return exact;
-        }
-
-        for (const candidate of candidates) {
-            const explicitAliases = MARKET_DATA_WIRE_ALIASES.get(candidate) || [];
-            for (const alias of explicitAliases) {
-                const exact = this._getMarketDataAvailableSymbol(alias);
-                if (exact) return exact;
-            }
-        }
-
-        for (const candidate of candidates) {
-            const prefixMatch = this._getMarketDataPrefixMatches(candidate)[0];
-            if (prefixMatch?.actual) return prefixMatch.actual;
-        }
-
-        for (const candidate of candidates) {
-            const futuresAlias = this._resolveMarketDataFuturesAlias(candidate);
-            if (futuresAlias) return futuresAlias;
-        }
-
-        return null;
+        return (
+            resolveFromCandidates(primaryCandidates) ||
+            resolveFromCandidates(fallbackCandidates) ||
+            null
+        );
     }
 
     _getMarketDataHistoryCount(override = null) {

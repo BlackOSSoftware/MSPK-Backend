@@ -14,6 +14,13 @@ import {
     normalizeUpper,
     resolveSymbolSegmentGroup,
 } from '../utils/marketSegmentResolver.js';
+import {
+    buildAliasBackedMarketSymbol,
+    getMarketAliasLookupSymbols,
+    getMatchingMarketSymbolAliases,
+    getMarketSymbolAliasDefinition,
+    isUnsupportedWatchlistSymbol,
+} from '../utils/marketSymbolAliases.js';
 import { dedupeSymbols } from '../utils/marketSymbolDedupe.js';
 import { SEED_SYMBOLS } from '../config/seedSymbols.js';
 import { DEFAULT_MARKET_WATCHLIST_TEMPLATES } from '../config/defaultMarketWatchlistTemplates.js';
@@ -206,6 +213,33 @@ const resolvePreferredCryptoSpotSymbol = async (symbol = '') => {
         .select('symbol')
         .lean();
     return usdDoc?.symbol ? usdCandidate : normalized;
+};
+
+const buildSymbolDocMap = (docs = []) => new Map(
+    (Array.isArray(docs) ? docs : []).map((doc) => [normalizeUpper(doc?.symbol), doc])
+);
+
+const resolveAliasBackedSymbolDoc = (symbol = '', docsBySymbol = new Map()) => {
+    const normalized = normalizeUpper(symbol);
+    if (!normalized) return null;
+
+    const exact = docsBySymbol.get(normalized);
+    if (exact) return exact;
+
+    const definition = getMarketSymbolAliasDefinition(normalized);
+    if (!definition) return null;
+
+    const canonicalDoc = docsBySymbol.get(definition.canonical);
+    return buildAliasBackedMarketSymbol(normalized, canonicalDoc);
+};
+
+const findSymbolDocBySymbolOrAlias = async (symbol = '') => {
+    const normalized = normalizeUpper(symbol);
+    if (!normalized) return null;
+
+    const docs = await MasterSymbol.find({ symbol: { $in: getMarketAliasLookupSymbols(normalized) } })
+        .lean();
+    return resolveAliasBackedSymbolDoc(normalized, buildSymbolDocMap(docs));
 };
 
 const buildSymbolFilter = (query = {}, { ignoreSegment = false } = {}) => {
@@ -1291,11 +1325,6 @@ const getUserWatchlist = catchAsync(async (req, res) => {
     const { watchlists, activeWatchlist, activeWatchlistId, shouldPersist, templateSymbolMap, templateKeyByName } =
         await resolveUserMarketWatchlistsState(user);
 
-    if (shouldPersist) {
-        commitUserMarketWatchlistsState(user, watchlists, activeWatchlistId);
-        await user.save();
-    }
-
     const targetWatchlist = requestedWatchlistId
         ? watchlists.find((item) => item.id === requestedWatchlistId) || null
         : activeWatchlist;
@@ -1318,12 +1347,16 @@ const getUserWatchlist = catchAsync(async (req, res) => {
     );
     const lockedSet = new Set(lockedSymbols);
 
-    const docs = await MasterSymbol.find({ symbol: { $in: symbols } }).lean();
-    const map = new Map(docs.map(d => [String(d.symbol).trim().toUpperCase(), d]));
+    const docs = await MasterSymbol.find({
+        symbol: {
+            $in: Array.from(new Set(symbols.flatMap((symbol) => getMarketAliasLookupSymbols(symbol))))
+        }
+    }).lean();
+    const map = buildSymbolDocMap(docs);
 
     const ordered = symbols
         .map((sym) => {
-            const doc = map.get(sym);
+            const doc = resolveAliasBackedSymbolDoc(sym, map);
             if (doc) {
                 return { ...doc, isLocked: lockedSet.has(sym) };
             }
@@ -1351,7 +1384,45 @@ const getUserWatchlist = catchAsync(async (req, res) => {
         await marketDataService.fetchQuoteBySymbols(ordered.map(s => s.symbol));
     }
 
-    const enriched = enrichMarketSymbols(ordered);
+    const enriched = enrichMarketSymbols(ordered).filter((item) => {
+        if (isUnsupportedWatchlistSymbol(item.symbol)) {
+            return false;
+        }
+
+        const hasResolvedMetadata =
+            map.has(normalizeUpper(item.symbol)) ||
+            Boolean(getMarketSymbolAliasDefinition(item.symbol));
+        const hasPriceData = [
+            item.price,
+            item.prevClose,
+            item.open,
+            item.high,
+            item.low,
+            item.bid,
+            item.ask,
+        ].some((value) => Number(value) > 0);
+
+        return hasResolvedMetadata || hasPriceData;
+    });
+
+    const cleanedSymbols = enriched.map((item) => item.symbol);
+    const watchlistSymbolsChanged = !isSameSymbolOrder(cleanedSymbols, symbols);
+
+    if (shouldPersist || watchlistSymbolsChanged) {
+        if (watchlistSymbolsChanged) {
+            targetWatchlist.symbols = cleanedSymbols;
+            if (Array.isArray(targetWatchlist.customSymbols)) {
+                const cleanedSet = new Set(cleanedSymbols);
+                targetWatchlist.customSymbols = normalizeSelectedSymbols(targetWatchlist.customSymbols)
+                    .filter((symbol) => cleanedSet.has(symbol));
+            }
+            targetWatchlist.updatedAt = new Date();
+        }
+
+        commitUserMarketWatchlistsState(user, watchlists, activeWatchlistId);
+        await user.save();
+    }
+
     res.send(enriched);
 });
 
@@ -1364,7 +1435,7 @@ const addUserWatchlist = catchAsync(async (req, res) => {
 
     let normalized = String(symbol).trim().toUpperCase();
     normalized = await resolvePreferredCryptoSpotSymbol(normalized);
-    const symbolDoc = await MasterSymbol.findOne({ symbol: normalized });
+    const symbolDoc = await findSymbolDocBySymbolOrAlias(normalized);
     if (!symbolDoc) {
         throw new ApiError(httpStatus.BAD_REQUEST, 'Symbol not found');
     }
@@ -2248,7 +2319,22 @@ const getHistory = catchAsync(async (req, res) => {
 
 const searchInstruments = catchAsync(async (req, res) => {
     const { q } = req.query;
-    let instruments = await marketDataService.searchInstruments(q);
+    const aliasMatches = getMatchingMarketSymbolAliases(q);
+    const aliasDocs = aliasMatches.length > 0
+        ? await MasterSymbol.find({
+            symbol: { $in: Array.from(new Set(aliasMatches.map((item) => item.canonical))) },
+            isActive: true,
+        }).lean()
+        : [];
+    const aliasDocMap = buildSymbolDocMap(aliasDocs);
+    const aliasBackedInstruments = aliasMatches
+        .map((definition) => buildAliasBackedMarketSymbol(definition.alias, aliasDocMap.get(definition.canonical)))
+        .filter(Boolean);
+
+    let instruments = [
+        ...aliasBackedInstruments,
+        ...(await marketDataService.searchInstruments(q)),
+    ];
 
     // Strict Segment Filtering based on User Plan
     if (req.user) {
