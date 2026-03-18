@@ -214,6 +214,7 @@ const buildSymbolFilter = (query = {}, { ignoreSegment = false } = {}) => {
     const segment = String(query.segment || '').trim();
     const watchlist = parseBooleanQuery(query.watchlist);
     const isActive = parseBooleanQuery(query.isActive);
+    const tradingViewAdded = parseBooleanQuery(query.tradingViewAdded);
     const hasSymbolId = parseBooleanQuery(
         query.hasSymbolId ?? (
             query.idStatus === 'with_id' || query.idStatus === 'withId'
@@ -227,6 +228,7 @@ const buildSymbolFilter = (query = {}, { ignoreSegment = false } = {}) => {
     if (segment && !ignoreSegment) clauses.push({ segment: normalizeUpper(segment) });
     if (watchlist !== undefined) clauses.push({ isWatchlist: watchlist });
     if (isActive !== undefined) clauses.push({ isActive });
+    if (tradingViewAdded !== undefined) clauses.push({ tradingViewAdded });
 
     if (hasSymbolId === true) {
         clauses.push({ symbolId: { $exists: true, $ne: '' } });
@@ -1913,6 +1915,25 @@ const generateSymbolId = catchAsync(async (req, res) => {
     res.send(enrichSymbol(symbol));
 });
 
+const updateTradingViewStatus = catchAsync(async (req, res) => {
+    const { id } = req.params;
+    const { tradingViewAdded } = req.body || {};
+
+    if (typeof tradingViewAdded !== 'boolean') {
+        throw new ApiError(httpStatus.BAD_REQUEST, 'tradingViewAdded must be a boolean');
+    }
+
+    const symbol = await MasterSymbol.findById(id);
+    if (!symbol) {
+        return res.status(httpStatus.NOT_FOUND).send({ message: 'Symbol not found' });
+    }
+
+    symbol.tradingViewAdded = tradingViewAdded;
+    await symbol.save();
+
+    res.send(enrichSymbol(symbol));
+});
+
 const getSegments = catchAsync(async (req, res) => {
     const segments = await MasterSegment.find(); // Return all, let frontend filter active if needed or admin sees all
     res.send(segments);
@@ -2002,7 +2023,7 @@ const getSymbols = catchAsync(async (req, res) => {
 
     const requestedPage = parseIntegerQuery(req.query.page, 1, 1, 100000);
     const limit = parseIntegerQuery(req.query.limit, 20, 1, 200);
-    const [allMatchingDocs, overallTotal, activeTotal, inactiveTotal, withSymbolIdTotal, withoutSymbolIdTotal] = await Promise.all([
+    const [allMatchingDocs, overallTotal, activeTotal, inactiveTotal, withSymbolIdTotal, withoutSymbolIdTotal, tradingViewAddedTotal] = await Promise.all([
         MasterSymbol.find(filter).lean(),
         MasterSymbol.countDocuments(),
         MasterSymbol.countDocuments({ isActive: true }),
@@ -2014,7 +2035,8 @@ const getSymbols = catchAsync(async (req, res) => {
                 { symbolId: null },
                 { symbolId: '' }
             ]
-        })
+        }),
+        MasterSymbol.countDocuments({ tradingViewAdded: true }),
     ]);
 
     const filteredSymbols = applySegmentFilter(allMatchingDocs);
@@ -2040,6 +2062,7 @@ const getSymbols = catchAsync(async (req, res) => {
             inactive: inactiveTotal,
             withSymbolId: withSymbolIdTotal,
             withoutSymbolId: withoutSymbolIdTotal,
+            tradingViewAdded: tradingViewAddedTotal,
             matched: total,
         },
     });
@@ -2315,6 +2338,7 @@ export default {
     createSymbol,
     updateSymbol,
     generateSymbolId,
+    updateTradingViewStatus,
     deleteSymbol,
     handleLogin,
     handleLoginCallback,

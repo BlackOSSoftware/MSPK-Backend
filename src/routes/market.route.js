@@ -23,6 +23,7 @@ router.delete('/watchlist-templates/:id', auth(['admin']), marketController.dele
 router.get('/symbols', marketController.getSymbols);
 router.post('/symbols', marketController.createSymbol);
 router.post('/symbols/:id/generate-id', marketController.generateSymbolId);
+router.patch('/symbols/:id/tradingview-status', marketController.updateTradingViewStatus);
 router.patch('/symbols/:id', marketController.updateSymbol);
 router.delete('/symbols/:id', marketController.deleteSymbol);
 

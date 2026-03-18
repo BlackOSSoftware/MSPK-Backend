@@ -76,6 +76,10 @@ const masterSymbolSchema = new mongoose.Schema(
     isWatchlist: {
         type: Boolean,
         default: false
+    },
+    tradingViewAdded: {
+        type: Boolean,
+        default: false
     }
   },
   {
