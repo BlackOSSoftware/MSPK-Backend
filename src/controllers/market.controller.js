@@ -2313,8 +2313,88 @@ const searchInstruments = catchAsync(async (req, res) => {
         }
     }
 
+    const normalizedQuery = normalizeUpper(q);
+    const SEARCH_ALIAS_SUFFIX_PATTERN = /(?:\.PR|\.P|\.X|\.LV|\.PERP|PERP)$/i;
+    const STABLE_QUOTE_SUFFIX_PATTERN = /(USDT|USDC|BUSD)$/i;
+    const getSearchAliasBase = (value = '') => {
+        let normalized = normalizeUpper(value).split(':').pop() || '';
+        if (!normalized) return '';
+
+        let previous = '';
+        while (normalized && normalized !== previous) {
+            previous = normalized;
+            normalized = normalized.replace(SEARCH_ALIAS_SUFFIX_PATTERN, '');
+        }
+
+        return normalized.replace(STABLE_QUOTE_SUFFIX_PATTERN, 'USD');
+    };
+    const queryAliasBase = getSearchAliasBase(normalizedQuery);
+    const matchesSearchSymbol = (item = {}) => {
+        const symbol = normalizeUpper(item.symbol);
+        const aliasBase = getSearchAliasBase(symbol);
+        if (!normalizedQuery || !symbol) return false;
+        if (symbol.includes(normalizedQuery)) return true;
+        if (queryAliasBase && aliasBase.includes(queryAliasBase)) return true;
+        return false;
+    };
+    const getSearchCandidateRank = (item = {}) => {
+        const symbol = normalizeUpper(item.symbol);
+        const name = normalizeUpper(item.name);
+        let rank = 0;
+
+        if (/\.LV$/i.test(symbol) || /\.P(R)?$/i.test(symbol) || /LEVERAGE|PERP|PERPETUAL|FUT/i.test(name)) {
+            rank += 20;
+        }
+        if (symbol.endsWith('USDT') || symbol.endsWith('USDC') || symbol.endsWith('BUSD')) {
+            rank += 5;
+        }
+        if (!item.symbolId) {
+            rank += 1;
+        }
+
+        return rank;
+    };
+    const dedupeSearchResults = (items = []) => {
+        const map = new Map();
+
+        items.forEach((item) => {
+            const key = getSearchAliasBase(item.symbol);
+            if (!key) return;
+
+            const existing = map.get(key);
+            if (!existing) {
+                map.set(key, item);
+                return;
+            }
+
+            const existingRank = getSearchCandidateRank(existing);
+            const candidateRank = getSearchCandidateRank(item);
+            if (candidateRank < existingRank) {
+                map.set(key, item);
+                return;
+            }
+            if (candidateRank > existingRank) {
+                return;
+            }
+
+            const existingSymbolLength = String(existing.symbol || '').length;
+            const candidateSymbolLength = String(item.symbol || '').length;
+            if (candidateSymbolLength && existingSymbolLength && candidateSymbolLength < existingSymbolLength) {
+                map.set(key, item);
+            }
+        });
+
+        return Array.from(map.values());
+    };
+
     const decorated = instruments.map((item) => decorateSymbolSegment(item));
-    const deduped = dedupeSymbols(decorated);
+    const narrowed = normalizedQuery
+        ? (() => {
+            const symbolMatches = decorated.filter(matchesSearchSymbol);
+            return symbolMatches.length > 0 ? symbolMatches : decorated;
+        })()
+        : decorated;
+    const deduped = dedupeSearchResults(narrowed);
     const spotFiltered = deduped.filter(isCryptoSpotItem);
     const preferred = preferCryptoUsdOverUsdt(spotFiltered);
     res.send(preferred);
