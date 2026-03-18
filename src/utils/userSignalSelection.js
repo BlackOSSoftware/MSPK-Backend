@@ -1,6 +1,16 @@
-import { isCryptoLikeSymbol } from './signalRouting.js';
+import { isCryptoLikeSymbol, mapPreferredSegmentsToAudienceGroups } from './signalRouting.js';
 
 const MAX_SELECTED_SYMBOLS_PER_SEGMENT = 10;
+const DEFAULT_SIGNAL_SELECTION_BY_GROUP = {
+  EQUITY: ['NSE:NIFTY 50-INDEX', 'NSE:BANKNIFTY', 'NSE:RELIANCE'],
+  FNO: ['NSE:BANKNIFTY', 'NSE:NIFTY 50-INDEX'],
+  COMMODITY: ['XAUUSD', 'XAGUSD', 'GC1!', 'MCX:SILVER'],
+  CURRENCY: ['EURUSD'],
+  CRYPTO: ['BTCUSD', 'ETHUSDT'],
+};
+const DEFAULT_SIGNAL_SELECTION_FALLBACK = Array.from(
+  new Set(Object.values(DEFAULT_SIGNAL_SELECTION_BY_GROUP).flat())
+);
 const INDEX_SYMBOL_ALIAS_GROUPS = [
   ['NIFTY', 'NIFTY1!', 'NIFTY50', 'NSE:NIFTY', 'NSE:NIFTY50', 'NSE:NIFTY 50', 'NSE:NIFTY 50-INDEX'],
   ['BANKNIFTY', 'BANKNIFTY1!', 'NSE:BANKNIFTY', 'NSE:NIFTYBANK', 'NSE:NIFTY BANK', 'NSE:NIFTY BANK-INDEX'],
@@ -85,6 +95,19 @@ const buildSelectedSymbolDocsMap = (symbolDocs = []) =>
       .filter(([symbol]) => Boolean(symbol))
   );
 
+const deriveDefaultSignalSelectionSymbols = (preferredSegments = []) => {
+  const audienceGroups = mapPreferredSegmentsToAudienceGroups(preferredSegments);
+  const resolvedGroups = audienceGroups.includes('ALL') || audienceGroups.length === 0
+    ? ['EQUITY', 'FNO', 'COMMODITY', 'CURRENCY', 'CRYPTO']
+    : audienceGroups.filter((group) => Object.prototype.hasOwnProperty.call(DEFAULT_SIGNAL_SELECTION_BY_GROUP, group));
+
+  const fallbackSymbols = resolvedGroups.length > 0
+    ? resolvedGroups.flatMap((group) => DEFAULT_SIGNAL_SELECTION_BY_GROUP[group] || [])
+    : DEFAULT_SIGNAL_SELECTION_FALLBACK;
+
+  return normalizeSelectedSymbols(fallbackSymbols);
+};
+
 const getSelectionBucketKey = (symbolDoc = {}) => {
   const segment = String(symbolDoc?.segment || '').trim().toUpperCase();
   const exchange = String(symbolDoc?.exchange || '').trim().toUpperCase();
@@ -149,10 +172,25 @@ const getUserSelectedSymbols = (user, symbolDocsBySymbol = null) =>
     ? limitSelectedSymbolsPerSegment(user?.marketWatchlist, symbolDocsBySymbol)
     : normalizeSelectedSymbols(user?.marketWatchlist);
 
-const hasExplicitUserSignalSelection = (user) => Array.isArray(user?.signalWatchlist);
+const isSignalSelectionInitialized = (user) =>
+  Boolean(user?.signalWatchlistInitializedAt) ||
+  normalizeSelectedSymbols(user?.signalWatchlist).length > 0;
 
-const getUserSignalSelectionSource = (user) =>
-  hasExplicitUserSignalSelection(user) ? user?.signalWatchlist : user?.marketWatchlist;
+const hasExplicitUserSignalSelection = (user) =>
+  Array.isArray(user?.signalWatchlist) && isSignalSelectionInitialized(user);
+
+const getUserSignalSelectionSource = (user) => {
+  if (hasExplicitUserSignalSelection(user)) {
+    return user?.signalWatchlist;
+  }
+
+  const marketWatchlist = normalizeSelectedSymbols(user?.marketWatchlist);
+  if (marketWatchlist.length > 0) {
+    return marketWatchlist;
+  }
+
+  return deriveDefaultSignalSelectionSymbols(user?.preferredSegments);
+};
 
 const getUserSignalSelectedSymbols = (user, symbolDocsBySymbol = null) =>
   symbolDocsBySymbol instanceof Map
@@ -167,9 +205,50 @@ const setUserSignalSelectedSymbols = (user, symbols = [], symbolDocsBySymbol = n
 
   if (user) {
     user.signalWatchlist = normalizedSymbols;
+    user.signalWatchlistInitializedAt = new Date();
   }
 
   return normalizedSymbols;
+};
+
+const initializeUserSignalSelectedSymbols = (user, symbolDocsBySymbol = null) => {
+  if (!user || user.role === 'admin') {
+    return {
+      symbols: normalizeSelectedSymbols(user?.signalWatchlist),
+      didUpdate: false,
+    };
+  }
+
+  const currentSymbols = normalizeSelectedSymbols(user?.signalWatchlist);
+  const hadInitializedAt = Boolean(user?.signalWatchlistInitializedAt);
+
+  if (hasExplicitUserSignalSelection(user) && currentSymbols.length > 0) {
+    if (hadInitializedAt) {
+      return { symbols: currentSymbols, didUpdate: false };
+    }
+
+    user.signalWatchlistInitializedAt = new Date();
+    return { symbols: currentSymbols, didUpdate: true };
+  }
+
+  const derivedSymbols = symbolDocsBySymbol instanceof Map
+    ? limitSelectedSymbolsPerSegment(getUserSignalSelectionSource(user), symbolDocsBySymbol)
+    : normalizeSelectedSymbols(getUserSignalSelectionSource(user));
+
+  if (derivedSymbols.length === 0) {
+    return {
+      symbols: currentSymbols,
+      didUpdate: false,
+    };
+  }
+
+  setUserSignalSelectedSymbols(user, derivedSymbols, symbolDocsBySymbol);
+  const nextSymbols = normalizeSelectedSymbols(user?.signalWatchlist);
+
+  return {
+    symbols: nextSymbols,
+    didUpdate: currentSymbols.join('|') !== nextSymbols.join('|') || !hadInitializedAt,
+  };
 };
 
 const buildSelectedSignalFilter = (symbols = []) => {
@@ -192,13 +271,16 @@ export {
   MAX_SELECTED_SYMBOLS_PER_SEGMENT,
   buildSelectedSignalFilter,
   buildSelectedSymbolDocsMap,
+  deriveDefaultSignalSelectionSymbols,
   expandSelectedSymbols,
   getSelectionBucketKey,
+  initializeUserSignalSelectedSymbols,
   getUserSignalSelectedSymbols,
   getUserSelectedSymbols,
   getUserSignalSelectionSource,
   hasExplicitUserSignalSelection,
   hasSelectedSignalSymbol,
+  isSignalSelectionInitialized,
   limitSelectedSymbolsPerSegment,
   normalizeSelectedSymbols,
   setUserSignalSelectedSymbols,

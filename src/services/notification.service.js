@@ -375,7 +375,7 @@ class NotificationService {
           if (debugBroadcastAll) {
               logger.warn('[ALERT] DEBUG_SIGNAL_BROADCAST_ALL enabled - sending to all active users.');
               users = await User.find({ status: 'Active' })
-                  .select('_id name email role fcmTokens phone phoneNumber preferredSegments marketWatchlist signalWatchlist isNotificationEnabled isWhatsAppEnabled isEmailAlertEnabled telegramChatId telegramUsername')
+                  .select('_id name email role fcmTokens phone phoneNumber preferredSegments marketWatchlist signalWatchlist signalWatchlistInitializedAt isNotificationEnabled isWhatsAppEnabled isEmailAlertEnabled telegramChatId telegramUsername')
                   .lean();
           } else {
               const candidateIds = Array.from(candidateUserIds);
@@ -383,7 +383,7 @@ class NotificationService {
                   ? await User.find({
                         _id: { $in: candidateIds },
                         status: 'Active'
-                    }).select('_id name email role fcmTokens phone phoneNumber preferredSegments marketWatchlist signalWatchlist isNotificationEnabled isWhatsAppEnabled isEmailAlertEnabled telegramChatId telegramUsername')
+                    }).select('_id name email role fcmTokens phone phoneNumber preferredSegments marketWatchlist signalWatchlist signalWatchlistInitializedAt isNotificationEnabled isWhatsAppEnabled isEmailAlertEnabled telegramChatId telegramUsername')
                   : [];
           }
           const allSelectedSymbols = users.flatMap((user) => getUserSignalSelectedSymbols(user));

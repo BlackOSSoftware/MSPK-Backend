@@ -10,6 +10,7 @@ import {
   buildSelectedSymbolDocsMap,
   expandSelectedSymbols,
   getSelectionBucketKey,
+  initializeUserSignalSelectedSymbols,
   getUserSignalSelectedSymbols,
   hasExplicitUserSignalSelection,
   hasSelectedSignalSymbol,
@@ -186,11 +187,13 @@ const resolveSignalMasterSymbols = async (signals = []) => {
 };
 
 const ensureUserSignalSelectionInitialized = async (user) => {
-  if (!user || user.role === 'admin' || hasExplicitUserSignalSelection(user)) {
+  if (!user || user.role === 'admin') {
     return normalizeSelectedSymbols(user?.signalWatchlist);
   }
 
-  const fallbackSymbols = normalizeSelectedSymbols(user?.marketWatchlist);
+  const fallbackSymbols = normalizeSelectedSymbols(
+    hasExplicitUserSignalSelection(user) ? user?.signalWatchlist : getUserSignalSelectedSymbols(user)
+  );
   const fallbackDocs = fallbackSymbols.length > 0
     ? await MasterSymbol.find({ symbol: { $in: fallbackSymbols } })
       .select('symbol segment exchange')
@@ -198,9 +201,11 @@ const ensureUserSignalSelectionInitialized = async (user) => {
     : [];
   const fallbackDocsMap = buildSelectedSymbolDocsMap(fallbackDocs);
 
-  setUserSignalSelectedSymbols(user, fallbackSymbols, fallbackDocsMap);
-  await user.save();
-  return normalizeSelectedSymbols(user?.signalWatchlist);
+  const { symbols, didUpdate } = initializeUserSignalSelectedSymbols(user, fallbackDocsMap);
+  if (didUpdate) {
+    await user.save();
+  }
+  return symbols;
 };
 
 const buildSelectedScriptsResponse = async (symbols = [], options = {}) => {

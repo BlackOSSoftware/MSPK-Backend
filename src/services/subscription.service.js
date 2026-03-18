@@ -2,8 +2,10 @@ import Segment from '../models/Segment.js';
 import UserSubscription from '../models/UserSubscription.js';
 import Subscription from '../models/Subscription.js';
 import AdminSetting from '../models/AdminSetting.js';
+import User from '../models/User.js';
 import httpStatus from 'http-status';
 import ApiError from '../utils/ApiError.js';
+import { initializeUserSignalSelectedSymbols } from '../utils/userSignalSelection.js';
 
 // --- Core Service Functions ---
 
@@ -127,6 +129,12 @@ const purchaseSegments = async (userId, segmentCodes, planType = 'premium') => {
     plan_type: planType,
     status: 'active'
   });
+
+  const user = await User.findById(userId);
+  if (user) {
+    initializeUserSignalSelectedSymbols(user);
+    await user.save();
+  }
 
   return subscription;
 };

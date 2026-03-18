@@ -14,6 +14,7 @@ import { subBrokerService, announcementService } from '../services/index.js';
 import subscriptionService from '../services/subscription.service.js';
 import planService from '../services/plan.service.js';
 import subscriptionCron from '../jobs/subscriptionCron.js';
+import { initializeUserSignalSelectedSymbols } from '../utils/userSignalSelection.js';
 
 const normalizeSubscriptionSegments = (segments) => {
     if (!Array.isArray(segments)) return [];
@@ -256,6 +257,7 @@ const assignPlanWithCommission = async ({ user, plan, adminCreated = true }) => 
         plan: plan.name,
         expiresAt: endDate
     };
+    initializeUserSignalSelectedSymbols(user);
     await user.save();
 
     await subBrokerService.recordCommission(transaction, user, plan);
