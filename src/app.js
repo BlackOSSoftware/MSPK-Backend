@@ -12,6 +12,27 @@ import marketController from './controllers/market.controller.js';
 const app = express();
 app.set('trust proxy', config.trustProxy);
 
+const HTTP_LOG_NOISE_PATHS = [
+  '/v1/health',
+  '/v1/notifications',
+  '/v1/auth/me',
+  '/v1/market/symbols',
+  '/v1/signals',
+  '/v1/sub-brokers',
+  '/v1/admin/users',
+];
+
+const shouldSkipHttpLog = (req, res) => {
+  const statusCode = Number(res?.statusCode || 0);
+  const url = String(req?.originalUrl || req?.url || '');
+  const isPollingGet = req?.method === 'GET' && HTTP_LOG_NOISE_PATHS.some((prefix) => url.startsWith(prefix));
+
+  if (!isPollingGet) return false;
+  if (statusCode >= 400) return false;
+
+  return true;
+};
+
 const allowedOrigins = [
   'http://localhost:5173',
   'http://localhost:3000',
@@ -64,7 +85,11 @@ app.use('/uploads', express.static('uploads', {
 
 // Logger
 if (config.env === 'development') {
-  app.use(morgan('dev'));
+  app.use(
+    morgan('dev', {
+      skip: shouldSkipHttpLog,
+    })
+  );
 }
 
 // Direct Route for Fyers Login Callback to match User's App Config (No /v1)
