@@ -266,6 +266,7 @@ const enrichSymbol = (symbolLike) => {
     const symbol = decorateSymbolSegment(typeof symbolLike?.toObject === 'function' ? symbolLike.toObject() : { ...symbolLike });
     symbol.lastPrice = marketDataService.getBestLivePrice(symbol.symbol, symbol, symbol.lastPrice || 0);
     symbol.ltp = symbol.lastPrice;
+    symbol.tradingViewAdded = Boolean(symbol.tradingViewAdded);
 
     const quote = marketDataService.getBestQuote(symbol.symbol, symbol);
     if (quote?.ohlc) {
