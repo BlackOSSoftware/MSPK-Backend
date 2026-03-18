@@ -4,6 +4,7 @@ import Signal from '../models/Signal.js';
 import catchAsync from '../utils/catchAsync.js';
 import logger from '../config/log.js';
 import { signalService } from '../services/index.js';
+import { connectRedis, redisClient } from '../services/redis.service.js';
 import {
   buildWebhookSignalId,
   normalizeSignalSegment,
@@ -41,6 +42,8 @@ const toFiniteNumber = (value) => {
 const roundSignalValue = (value) => Math.round(value * 100) / 100;
 const MIN_STALE_ENTRY_SIGNAL_AGE_MS = 90 * 60 * 1000;
 const MAX_STALE_ENTRY_SIGNAL_AGE_MS = 48 * 60 * 60 * 1000;
+const ABSOLUTE_MAX_ENTRY_SIGNAL_AGE_MS = 14 * 24 * 60 * 60 * 1000;
+const PROCESSED_ENTRY_SIGNAL_TTL_SECONDS = 30 * 24 * 60 * 60;
 
 const getSignalClosedStatuses = () => ['Closed', 'Target Hit', 'Partial Profit Book', 'Stoploss Hit'];
 
@@ -141,6 +144,40 @@ const getAllowedSignalAgeMs = (timeframe) => {
   return Math.min(Math.max(timeframeMs * 4, MIN_STALE_ENTRY_SIGNAL_AGE_MS), MAX_STALE_ENTRY_SIGNAL_AGE_MS);
 };
 
+const buildProcessedEntrySignalKey = (uniqueId = '') => {
+  const normalized = String(uniqueId || '').trim();
+  if (!normalized) return '';
+  return `processed_signal_entry:${normalized}`;
+};
+
+const hasProcessedEntrySignal = async (uniqueId = '') => {
+  const cacheKey = buildProcessedEntrySignalKey(uniqueId);
+  if (!cacheKey) return false;
+
+  try {
+    const redisReady = await connectRedis();
+    if (!redisReady) return false;
+    const value = await redisClient.get(cacheKey);
+    return Boolean(value);
+  } catch (error) {
+    logger.warn(`[WEBHOOK] Failed to check processed entry cache for ${uniqueId}: ${error.message}`);
+    return false;
+  }
+};
+
+const rememberProcessedEntrySignal = async (uniqueId = '') => {
+  const cacheKey = buildProcessedEntrySignalKey(uniqueId);
+  if (!cacheKey) return;
+
+  try {
+    const redisReady = await connectRedis();
+    if (!redisReady) return;
+    await redisClient.set(cacheKey, '1', 'EX', PROCESSED_ENTRY_SIGNAL_TTL_SECONDS);
+  } catch (error) {
+    logger.warn(`[WEBHOOK] Failed to persist processed entry cache for ${uniqueId}: ${error.message}`);
+  }
+};
+
 const resolveMasterSymbol = async (input, { symbolIdRequested = false } = {}) => {
   return resolveBestMasterSymbol(input, { symbolIdRequested });
 };
@@ -167,6 +204,17 @@ const receiveSignal = catchAsync(async (req, res) => {
   const normalizedTimeframe = normalizeSignalTimeframe(req.body.timeframe);
   const isEntryEvent = !['INFO', 'EXIT'].includes(event);
   const parsedSignalTime = parseWebhookDate(req.body.signal_time);
+  const signalAgeMs =
+    isEntryEvent && parsedSignalTime ? Date.now() - parsedSignalTime.getTime() : null;
+  const allowedSignalAgeMs =
+    isEntryEvent && parsedSignalTime ? getAllowedSignalAgeMs(normalizedTimeframe) : null;
+  const isUnexpectedlyOldEntry =
+    typeof signalAgeMs === 'number' &&
+    typeof allowedSignalAgeMs === 'number' &&
+    signalAgeMs > allowedSignalAgeMs;
+  const isAbsurdlyOldEntry =
+    typeof signalAgeMs === 'number' &&
+    signalAgeMs > ABSOLUTE_MAX_ENTRY_SIGNAL_AGE_MS;
 
   const sendWebhookResponse = (status, payload) => {
     logger.info(
@@ -187,23 +235,6 @@ const receiveSignal = catchAsync(async (req, res) => {
       message: 'Valid symbol and segment are required to process webhook.',
       symbol: symbolInput || req.body.symbol || '',
     });
-  }
-
-  if (isEntryEvent && parsedSignalTime) {
-    const signalAgeMs = Date.now() - parsedSignalTime.getTime();
-    const allowedSignalAgeMs = getAllowedSignalAgeMs(normalizedTimeframe);
-
-    if (signalAgeMs > allowedSignalAgeMs) {
-      logger.warn(
-        `[WEBHOOK] Ignoring stale ENTRY signal for ${symbol}. signalTime=${parsedSignalTime.toISOString()} ageMs=${signalAgeMs} allowedAgeMs=${allowedSignalAgeMs} timeframe=${normalizedTimeframe || 'NA'} webhookId=${webhookId || 'NA'}`
-      );
-      return sendWebhookResponse(httpStatus.OK, {
-        status: 'stale_ignored',
-        symbol,
-        timeframe: normalizedTimeframe || null,
-        signalTime: parsedSignalTime.toISOString(),
-      });
-    }
   }
 
   const findSignalByWebhookId = async (webhookId) => {
@@ -457,6 +488,7 @@ const receiveSignal = catchAsync(async (req, res) => {
     isFree,
     status: 'Active',
   };
+  const processedEntryAlreadySeen = await hasProcessedEntrySignal(signalBody.uniqueId);
 
   // Upsert behavior for ENTRY webhooks: if the same `uniqueId` arrives again with updated fields,
   // update the existing signal instead of returning stale data.
@@ -480,8 +512,41 @@ const receiveSignal = catchAsync(async (req, res) => {
 
     if (!isClosedSignal) {
       const updated = await signalService.updateSignalById(existingByUniqueId.id, updateBody);
+      await rememberProcessedEntrySignal(signalBody.uniqueId);
       return sendWebhookResponse(httpStatus.OK, { status: 'ok', signal: updated, updatedExisting: true });
     }
+  }
+
+  if (processedEntryAlreadySeen) {
+    logger.warn(
+      `[WEBHOOK] Ignoring already processed ENTRY signal for ${symbol}. signalTime=${parsedSignalTime?.toISOString?.() || 'NA'} timeframe=${normalizedTimeframe || 'NA'} webhookId=${webhookId || 'NA'} uniqueId=${signalBody.uniqueId}`
+    );
+    return sendWebhookResponse(httpStatus.OK, {
+      status: 'duplicate_processed',
+      symbol,
+      timeframe: normalizedTimeframe || null,
+      signalTime: parsedSignalTime?.toISOString?.() || null,
+      uniqueId: signalBody.uniqueId,
+    });
+  }
+
+  if (isAbsurdlyOldEntry) {
+    logger.warn(
+      `[WEBHOOK] Ignoring very old ENTRY signal for ${symbol}. signalTime=${parsedSignalTime.toISOString()} ageMs=${signalAgeMs} timeframe=${normalizedTimeframe || 'NA'} webhookId=${webhookId || 'NA'} uniqueId=${signalBody.uniqueId}`
+    );
+    return sendWebhookResponse(httpStatus.OK, {
+      status: 'stale_ignored',
+      symbol,
+      timeframe: normalizedTimeframe || null,
+      signalTime: parsedSignalTime.toISOString(),
+      uniqueId: signalBody.uniqueId,
+    });
+  }
+
+  if (isUnexpectedlyOldEntry) {
+    logger.warn(
+      `[WEBHOOK] Accepting delayed first-time ENTRY signal for ${symbol}. signalTime=${parsedSignalTime.toISOString()} ageMs=${signalAgeMs} allowedAgeMs=${allowedSignalAgeMs} timeframe=${normalizedTimeframe || 'NA'} webhookId=${webhookId || 'NA'} uniqueId=${signalBody.uniqueId}`
+    );
   }
 
   const created = await signalService.createSignal(signalBody, null);
@@ -489,9 +554,13 @@ const receiveSignal = catchAsync(async (req, res) => {
   // signalService has an in-memory 5m dedup guard that can return null.
   if (!created) {
     const afterGuard = await Signal.findOne({ uniqueId: signalBody.uniqueId });
+    if (afterGuard) {
+      await rememberProcessedEntrySignal(signalBody.uniqueId);
+    }
     return sendWebhookResponse(httpStatus.OK, { status: 'duplicate_blocked', signal: afterGuard || null });
   }
 
+  await rememberProcessedEntrySignal(signalBody.uniqueId);
   return sendWebhookResponse(httpStatus.OK, { status: 'ok', signal: created });
 });
 
