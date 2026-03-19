@@ -104,19 +104,20 @@ const resolveSymbolSegmentGroup = (symbolDoc = {}) => {
       return 'CURRENCY';
     }
 
+    // Index-named derivatives like NIFTY/BANKNIFTY futures should stay in FNO.
+    if (
+      ['FNO', 'FO', 'NFO', 'OPTIONS', 'OPTION', 'FUTURES'].includes(segment) ||
+      exchange === 'NFO'
+    ) {
+      return 'FNO';
+    }
+
     if (
       ['INDICES', 'INDEX', 'NSEIX'].includes(segment) ||
       exchange === 'NSEIX' ||
       isIndexLikeSymbol(symbol, name)
     ) {
       return 'INDICES';
-    }
-
-    if (
-      ['FNO', 'FO', 'NFO', 'OPTIONS', 'OPTION', 'FUTURES'].includes(segment) ||
-      exchange === 'NFO'
-    ) {
-      return 'FNO';
     }
 
     if (
@@ -155,18 +156,18 @@ const resolveSymbolSegmentGroup = (symbolDoc = {}) => {
   }
 
   if (
+    ['FNO', 'FO', 'NFO', 'OPTIONS', 'OPTION', 'FUTURES'].includes(segment) ||
+    exchange === 'NFO'
+  ) {
+    return 'FNO';
+  }
+
+  if (
     ['INDICES', 'INDEX', 'NSEIX'].includes(segment) ||
     exchange === 'NSEIX' ||
     isIndexLikeSymbol(symbol, name)
   ) {
     return 'INDICES';
-  }
-
-  if (
-    ['FNO', 'FO', 'NFO', 'OPTIONS', 'OPTION', 'FUTURES'].includes(segment) ||
-    exchange === 'NFO'
-  ) {
-    return 'FNO';
   }
 
   if (
