@@ -131,6 +131,9 @@ export const buildSignalTemplateData = (signal = {}) => {
   const normalizedTimeframe =
     normalizeSignalTimeframe(signal.timeframe) || String(signal.timeframe || '').trim();
   const timeframeLabel = normalizedTimeframe ? humanizeTimeframe(normalizedTimeframe) : '';
+  const normalizedTargetLevel = String(signal.targetLevel || signal.messageCode || 'TP1')
+    .trim()
+    .toUpperCase();
   const isClosedSignal = isClosedSignalStatus(signal.status);
   const resolvedSignalTime = resolveDisplayTimestamp({
     primary: signal.signalTime,
@@ -160,6 +163,14 @@ export const buildSignalTemplateData = (signal = {}) => {
   const target1 = toFiniteNumber(signal.targets?.target1);
   const target2 = toFiniteNumber(signal.targets?.target2);
   const target3 = toFiniteNumber(signal.targets?.target3);
+  const targetPrice =
+    normalizedTargetLevel.includes('3')
+      ? target3
+      : normalizedTargetLevel.includes('2')
+        ? target2
+        : normalizedTargetLevel.includes('1')
+          ? target1
+          : undefined;
   const exitPrice = toFiniteNumber(signal.exitPrice ?? signal.currentPrice);
   const storedPoints = toFiniteNumber(signal.totalPoints);
   const signalType = String(signal.type || 'BUY').trim().toUpperCase();
@@ -190,7 +201,8 @@ export const buildSignalTemplateData = (signal = {}) => {
     target3: formatNotificationNumber(target3),
     notes: signal.notes || '',
     updateMessage: signal.updateMessage || signal.notes || signal.message || '',
-    targetLevel: signal.targetLevel || signal.messageCode || 'TP1',
+    targetLevel: normalizedTargetLevel || 'TP1',
+    targetPrice: formatNotificationNumber(targetPrice),
     messageCode: signal.messageCode || '',
     currentPrice: formatNotificationNumber(signal.currentPrice ?? exitPrice ?? entryPrice),
     exitPrice: formatNotificationNumber(exitPrice),

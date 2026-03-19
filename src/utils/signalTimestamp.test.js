@@ -1,7 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildSignalTemplateData, isClosedSignalStatus, resolveDisplayTimestamp } from './notificationFormatter.js';
+import notificationTemplates from '../config/notificationTemplates.js';
+import {
+  buildSignalTemplateData,
+  isClosedSignalStatus,
+  renderNotificationTemplate,
+  resolveDisplayTimestamp,
+} from './notificationFormatter.js';
 import { parseSignalTimestamp } from './signalTimestamp.js';
 
 test('parseSignalTimestamp treats timezone-less webhook timestamps as IST', () => {
@@ -89,4 +95,29 @@ test('buildSignalTemplateData prefers createdAt when signal_time is stale by man
 
   assert.equal(data.signalTime, '19 Mar 2026, 7:45 pm');
   assert.equal(data.exitTime, '-');
+});
+
+test('target update notification includes target price, points, and target ladder', () => {
+  const signalData = buildSignalTemplateData({
+    subType: 'SIGNAL_INFO',
+    status: 'Active',
+    symbol: 'MCX:GOLD',
+    timeframe: '5m',
+    type: 'BUY',
+    signalTime: '2026-03-19T19:00:00',
+    entryPrice: 145000,
+    currentPrice: 145279.5,
+    targetLevel: 'TP2',
+    targets: {
+      target1: 145140,
+      target2: 145279.5,
+      target3: 145420,
+    },
+  });
+
+  const rendered = renderNotificationTemplate(notificationTemplates, 'SIGNAL_INFO', signalData);
+
+  assert.match(rendered.body, /Target Price: 1,45,279\.5/);
+  assert.match(rendered.body, /Points: \+279\.5/);
+  assert.match(rendered.body, /Targets: TP1 1,45,140 \| TP2 1,45,279\.5 \| TP3 1,45,420/);
 });

@@ -17,7 +17,7 @@ export default {
     SIGNAL_INFO: {
         title: "Target Update | {{symbol}} | {{timeframeLabel}}",
         body:
-            "{{targetLevel}} reached on {{symbol}}.\nTimeframe: {{timeframeLabel}}\nEntry Time (IST): {{signalTime}}\nCurrent Price: {{currentPrice}}\nPosition remains active."
+            "{{targetLevel}} reached on {{symbol}}.\nTimeframe: {{timeframeLabel}}\nEntry Time (IST): {{signalTime}}\nTarget Price: {{targetPrice}}\nPoints: {{pointsLabel}}\nTargets: TP1 {{target1}} | TP2 {{target2}} | TP3 {{target3}}\nCurrent Price: {{currentPrice}}\nPosition remains active."
     },
     SIGNAL_TARGET: {
         title: "Target Hit | {{symbol}} | {{timeframeLabel}}",
