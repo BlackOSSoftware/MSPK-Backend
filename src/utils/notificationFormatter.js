@@ -5,6 +5,10 @@ const numberFormatter = new Intl.NumberFormat('en-IN', {
   maximumFractionDigits: 2,
 });
 
+export const CLOSED_SIGNAL_STATUSES = ['Closed', 'Target Hit', 'Partial Profit Book', 'Stoploss Hit'];
+export const isClosedSignalStatus = (status) =>
+  CLOSED_SIGNAL_STATUSES.includes(String(status || '').trim());
+
 export const toFiniteNumber = (value) => {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
   if (typeof value === 'string') {
@@ -123,17 +127,20 @@ export const buildSignalTemplateData = (signal = {}) => {
   const normalizedTimeframe =
     normalizeSignalTimeframe(signal.timeframe) || String(signal.timeframe || '').trim();
   const timeframeLabel = normalizedTimeframe ? humanizeTimeframe(normalizedTimeframe) : '';
+  const isClosedSignal = isClosedSignalStatus(signal.status);
   const resolvedSignalTime = resolveDisplayTimestamp({
     primary: signal.signalTime,
     fallback: signal.createdAt,
     timeframe: normalizedTimeframe,
   });
-  const resolvedExitTime = resolveDisplayTimestamp({
-    primary: signal.exitTime,
-    fallback: signal.updatedAt || signal.createdAt,
-    timeframe: normalizedTimeframe,
-    floor: resolvedSignalTime,
-  });
+  const resolvedExitTime = isClosedSignal
+    ? resolveDisplayTimestamp({
+        primary: signal.exitTime,
+        fallback: signal.updatedAt || signal.createdAt,
+        timeframe: normalizedTimeframe,
+        floor: resolvedSignalTime,
+      })
+    : null;
   const signalTime = formatSignalTimestamp(resolvedSignalTime);
   const exitTime = formatSignalTimestamp(resolvedExitTime);
   const eventTime = formatSignalTimestamp(

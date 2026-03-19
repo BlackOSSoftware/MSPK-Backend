@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { resolveDisplayTimestamp } from './notificationFormatter.js';
+import { buildSignalTemplateData, isClosedSignalStatus, resolveDisplayTimestamp } from './notificationFormatter.js';
 import { parseSignalTimestamp } from './signalTimestamp.js';
 
 test('parseSignalTimestamp treats timezone-less webhook timestamps as IST', () => {
@@ -43,4 +43,25 @@ test('resolveDisplayTimestamp prevents exit time from rendering before entry tim
 
   assert.ok(resolved instanceof Date);
   assert.equal(resolved.toISOString(), '2026-03-19T12:50:00.000Z');
+});
+
+test('isClosedSignalStatus only treats settled statuses as closed', () => {
+  assert.equal(isClosedSignalStatus('Active'), false);
+  assert.equal(isClosedSignalStatus('Open'), false);
+  assert.equal(isClosedSignalStatus('Target Hit'), true);
+  assert.equal(isClosedSignalStatus('Closed'), true);
+});
+
+test('buildSignalTemplateData keeps exit time blank for active signals', () => {
+  const data = buildSignalTemplateData({
+    status: 'Active',
+    symbol: 'XAUUSD',
+    timeframe: '5m',
+    signalTime: '2026-03-19T09:50:00',
+    updatedAt: '2026-03-19T19:25:00+05:30',
+    createdAt: '2026-03-19T09:50:00+05:30',
+  });
+
+  assert.equal(data.signalTime, '19 Mar 2026, 9:50 am');
+  assert.equal(data.exitTime, '-');
 });

@@ -17,7 +17,7 @@ import {
   normalizeSelectedSymbols,
   setUserSignalSelectedSymbols,
 } from '../utils/userSignalSelection.js';
-import { resolveDisplayTimestamp } from '../utils/notificationFormatter.js';
+import { isClosedSignalStatus, resolveDisplayTimestamp } from '../utils/notificationFormatter.js';
 import { pickBestMasterSymbol } from '../utils/masterSymbolResolver.js';
 import { resolveSymbolSegmentGroup } from '../utils/marketSegmentResolver.js';
 import { buildTimeframeQuery, normalizeSignalTimeframe } from '../utils/timeframe.js';
@@ -396,12 +396,16 @@ const formatSignalResponse = (signal, resolvedMasterSymbol = null) => {
     fallback: signal.createdAt,
     timeframe: normalizedTimeframe,
   });
-  const displayExitTime = resolveDisplayTimestamp({
-    primary: signal.exitTime,
-    fallback: signal.updatedAt || signal.createdAt,
-    timeframe: normalizedTimeframe,
-    floor: displaySignalTime,
-  });
+  const isClosedSignal = isClosedSignalStatus(signal.status);
+  const resolvedExitTime = isClosedSignal ? signal.exitTime || null : null;
+  const displayExitTime = isClosedSignal
+    ? resolveDisplayTimestamp({
+        primary: resolvedExitTime,
+        fallback: signal.updatedAt || signal.createdAt,
+        timeframe: normalizedTimeframe,
+        floor: displaySignalTime,
+      })
+    : null;
   const segment = resolvedMasterSymbol
     ? resolveSignalDisplaySegment({
         ...signal,
@@ -431,7 +435,7 @@ const formatSignalResponse = (signal, resolvedMasterSymbol = null) => {
     exitPrice: getResolvedSignalExitPrice(signal),
     totalPoints: getResolvedSignalPoints(signal),
     exitReason: signal.exitReason,
-    exitTime: signal.exitTime,
+    exitTime: resolvedExitTime,
     displayExitTime,
     segment,
     category: signal.category,
