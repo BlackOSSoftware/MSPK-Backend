@@ -32,6 +32,17 @@ test('resolveDisplayTimestamp falls back when webhook time is unrealistically ah
   assert.equal(resolved.toISOString(), '2026-03-19T12:35:00.000Z');
 });
 
+test('resolveDisplayTimestamp falls back when webhook time is unrealistically stale', () => {
+  const resolved = resolveDisplayTimestamp({
+    primary: '2026-03-19T10:00:00',
+    fallback: '2026-03-19T19:45:04+05:30',
+    timeframe: '15m',
+  });
+
+  assert.ok(resolved instanceof Date);
+  assert.equal(resolved.toISOString(), '2026-03-19T14:15:04.000Z');
+});
+
 test('resolveDisplayTimestamp prevents exit time from rendering before entry time', () => {
   const entryTime = parseSignalTimestamp('2026-03-19T18:00:00');
   const resolved = resolveDisplayTimestamp({
@@ -63,5 +74,19 @@ test('buildSignalTemplateData keeps exit time blank for active signals', () => {
   });
 
   assert.equal(data.signalTime, '19 Mar 2026, 9:50 am');
+  assert.equal(data.exitTime, '-');
+});
+
+test('buildSignalTemplateData prefers createdAt when signal_time is stale by many hours', () => {
+  const data = buildSignalTemplateData({
+    status: 'Active',
+    symbol: 'XAUUSD',
+    timeframe: '15m',
+    signalTime: '2026-03-19T10:00:00',
+    createdAt: '2026-03-19T19:45:04+05:30',
+    updatedAt: '2026-03-19T19:45:04+05:30',
+  });
+
+  assert.equal(data.signalTime, '19 Mar 2026, 7:45 pm');
   assert.equal(data.exitTime, '-');
 });

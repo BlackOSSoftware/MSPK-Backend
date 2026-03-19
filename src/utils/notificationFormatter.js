@@ -93,7 +93,7 @@ export const resolveDisplayTimestamp = ({
   }
 
   const timeframeMs = getTimeframeDurationMs(timeframe);
-  const maxAllowedFutureSkewMs = Math.min(
+  const maxAllowedSkewMs = Math.min(
     Math.max(timeframeMs * 3, 30 * 60 * 1000),
     6 * 60 * 60 * 1000
   );
@@ -102,7 +102,11 @@ export const resolveDisplayTimestamp = ({
     return resolveFallback() || primaryDate;
   }
 
-  if (primaryDate.getTime() - fallbackDate.getTime() > maxAllowedFutureSkewMs) {
+  if (primaryDate.getTime() - fallbackDate.getTime() > maxAllowedSkewMs) {
+    return resolveFallback() || primaryDate;
+  }
+
+  if (fallbackDate.getTime() - primaryDate.getTime() > maxAllowedSkewMs) {
     return resolveFallback() || primaryDate;
   }
 
