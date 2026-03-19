@@ -13,6 +13,7 @@ import {
 import { resolveBestMasterSymbol } from '../utils/masterSymbolResolver.js';
 import { buildTimeframeQuery, getTimeframeDurationMs, normalizeSignalTimeframe } from '../utils/timeframe.js';
 import { parseSignalTimestamp } from '../utils/signalTimestamp.js';
+import { resolveExitedSignalType, selectWebhookSignalCandidate } from '../utils/webhookSignalMatcher.js';
 
 const parseBoolean = (value) => {
   if (value === undefined || value === null) return undefined;
@@ -135,15 +136,6 @@ const parseWebhookDate = (value) => {
   return parseSignalTimestamp(value);
 };
 
-const getSignalStartTimeMs = (signal) => {
-  const rawValue = signal?.signalTime || signal?.createdAt || signal?.updatedAt;
-  if (!rawValue) return Number.NEGATIVE_INFINITY;
-
-  const parsed = rawValue instanceof Date ? new Date(rawValue) : new Date(rawValue);
-  const timestamp = parsed.getTime();
-  return Number.isFinite(timestamp) ? timestamp : Number.NEGATIVE_INFINITY;
-};
-
 const getAllowedSignalAgeMs = (timeframe) => {
   const timeframeMs = getTimeframeDurationMs(timeframe);
   if (!timeframeMs) return MIN_STALE_ENTRY_SIGNAL_AGE_MS;
@@ -244,83 +236,28 @@ const receiveSignal = catchAsync(async (req, res) => {
     });
   }
 
-  const findSignalByWebhookId = async (webhookId, { eventTime = null } = {}) => {
+  const findSignalByWebhookId = async (webhookId, { eventTime = null, expectedType = null } = {}) => {
     if (!webhookId) return { signal: null, ambiguous: false };
     const id = String(webhookId).trim();
     const baseFilter = symbol ? { symbol, segment } : { segment };
     const timeframeFilter = buildTimeframeQuery('timeframe', normalizedTimeframe);
-    const parsedEventTime = parseWebhookDate(eventTime) || null;
     const buildScopedFilters = (filter) =>
       timeframeFilter ? [{ ...filter, ...timeframeFilter }] : [filter];
-    const dedupeSignals = (signals = []) => {
-      const uniqueSignals = new Map();
-      signals.forEach((candidate) => {
-        if (!candidate?._id) return;
-        uniqueSignals.set(String(candidate._id), candidate);
-      });
-      return Array.from(uniqueSignals.values());
-    };
-    const sortCandidates = (signals = []) =>
-      [...signals].sort((left, right) => {
-        const leftStartedAt = getSignalStartTimeMs(left);
-        const rightStartedAt = getSignalStartTimeMs(right);
-
-        if (leftStartedAt !== rightStartedAt) {
-          return rightStartedAt - leftStartedAt;
-        }
-
-        const leftUpdated = new Date(left?.updatedAt || left?.createdAt || 0).getTime();
-        const rightUpdated = new Date(right?.updatedAt || right?.createdAt || 0).getTime();
-        return rightUpdated - leftUpdated;
-      });
     const resolveCandidateResult = (signals = []) => {
-      const candidates = sortCandidates(dedupeSignals(signals));
-      if (candidates.length === 0) {
-        return { signal: null, ambiguous: false };
-      }
+      const result = selectWebhookSignalCandidate({
+        signals,
+        eventTime,
+        timeframe: normalizedTimeframe,
+        expectedType,
+      });
 
-      if (parsedEventTime instanceof Date && !Number.isNaN(parsedEventTime.getTime())) {
-        const eligibleCandidates = candidates.filter((candidate) => {
-          const startedAt = getSignalStartTimeMs(candidate);
-          return Number.isFinite(startedAt) && startedAt <= parsedEventTime.getTime();
-        });
-
-        if (eligibleCandidates.length === 1) {
-          return { signal: eligibleCandidates[0], ambiguous: false };
-        }
-
-        if (eligibleCandidates.length > 1) {
-          const latestStartedAt = Math.max(...eligibleCandidates.map((candidate) => getSignalStartTimeMs(candidate)));
-          const closestCandidates = eligibleCandidates.filter(
-            (candidate) => getSignalStartTimeMs(candidate) === latestStartedAt
-          );
-
-          if (closestCandidates.length === 1) {
-            return { signal: closestCandidates[0], ambiguous: false };
-          }
-
-          return { signal: null, ambiguous: true };
-        }
-      }
-
-      if (timeframeFilter) {
-        return { signal: candidates[0], ambiguous: false };
-      }
-
-      const distinctTimeframes = new Set(
-        candidates
-          .map((candidate) => normalizeSignalTimeframe(candidate?.timeframe) || String(candidate?.timeframe || '').trim())
-          .filter(Boolean)
-      );
-
-      if (distinctTimeframes.size > 1) {
+      if (result.ambiguous && !timeframeFilter) {
         logger.warn(
           `[WEBHOOK] Ambiguous signal match for ${symbol || 'unknown'} webhookId=${id}. Multiple timeframes active; include timeframe in webhook EXIT/INFO payload.`
         );
-        return { signal: null, ambiguous: true };
       }
 
-      return { signal: candidates[0], ambiguous: false };
+      return result;
     };
     const collectCandidates = async ({ includeClosed = false } = {}) => {
       const scopedFilters = buildScopedFilters(baseFilter);
@@ -442,8 +379,10 @@ const receiveSignal = catchAsync(async (req, res) => {
   }
 
   if (event === 'EXIT') {
+    const expectedType = resolveExitedSignalType(req.body.trade_type || req.body.tradeType);
     const { signal: existing, ambiguous } = await findSignalByWebhookId(webhookId, {
       eventTime: req.body.exit_time,
+      expectedType,
     });
     if (ambiguous) {
       return sendWebhookResponse(httpStatus.OK, {
