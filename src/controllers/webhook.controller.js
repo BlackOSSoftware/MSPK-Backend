@@ -135,6 +135,15 @@ const parseWebhookDate = (value) => {
   return parseSignalTimestamp(value);
 };
 
+const getSignalStartTimeMs = (signal) => {
+  const rawValue = signal?.signalTime || signal?.createdAt || signal?.updatedAt;
+  if (!rawValue) return Number.NEGATIVE_INFINITY;
+
+  const parsed = rawValue instanceof Date ? new Date(rawValue) : new Date(rawValue);
+  const timestamp = parsed.getTime();
+  return Number.isFinite(timestamp) ? timestamp : Number.NEGATIVE_INFINITY;
+};
+
 const getAllowedSignalAgeMs = (timeframe) => {
   const timeframeMs = getTimeframeDurationMs(timeframe);
   if (!timeframeMs) return MIN_STALE_ENTRY_SIGNAL_AGE_MS;
@@ -235,11 +244,12 @@ const receiveSignal = catchAsync(async (req, res) => {
     });
   }
 
-  const findSignalByWebhookId = async (webhookId) => {
+  const findSignalByWebhookId = async (webhookId, { eventTime = null } = {}) => {
     if (!webhookId) return { signal: null, ambiguous: false };
     const id = String(webhookId).trim();
     const baseFilter = symbol ? { symbol, segment } : { segment };
     const timeframeFilter = buildTimeframeQuery('timeframe', normalizedTimeframe);
+    const parsedEventTime = parseWebhookDate(eventTime) || null;
     const buildScopedFilters = (filter) =>
       timeframeFilter ? [{ ...filter, ...timeframeFilter }] : [filter];
     const dedupeSignals = (signals = []) => {
@@ -252,6 +262,13 @@ const receiveSignal = catchAsync(async (req, res) => {
     };
     const sortCandidates = (signals = []) =>
       [...signals].sort((left, right) => {
+        const leftStartedAt = getSignalStartTimeMs(left);
+        const rightStartedAt = getSignalStartTimeMs(right);
+
+        if (leftStartedAt !== rightStartedAt) {
+          return rightStartedAt - leftStartedAt;
+        }
+
         const leftUpdated = new Date(left?.updatedAt || left?.createdAt || 0).getTime();
         const rightUpdated = new Date(right?.updatedAt || right?.createdAt || 0).getTime();
         return rightUpdated - leftUpdated;
@@ -260,6 +277,30 @@ const receiveSignal = catchAsync(async (req, res) => {
       const candidates = sortCandidates(dedupeSignals(signals));
       if (candidates.length === 0) {
         return { signal: null, ambiguous: false };
+      }
+
+      if (parsedEventTime instanceof Date && !Number.isNaN(parsedEventTime.getTime())) {
+        const eligibleCandidates = candidates.filter((candidate) => {
+          const startedAt = getSignalStartTimeMs(candidate);
+          return Number.isFinite(startedAt) && startedAt <= parsedEventTime.getTime();
+        });
+
+        if (eligibleCandidates.length === 1) {
+          return { signal: eligibleCandidates[0], ambiguous: false };
+        }
+
+        if (eligibleCandidates.length > 1) {
+          const latestStartedAt = Math.max(...eligibleCandidates.map((candidate) => getSignalStartTimeMs(candidate)));
+          const closestCandidates = eligibleCandidates.filter(
+            (candidate) => getSignalStartTimeMs(candidate) === latestStartedAt
+          );
+
+          if (closestCandidates.length === 1) {
+            return { signal: closestCandidates[0], ambiguous: false };
+          }
+
+          return { signal: null, ambiguous: true };
+        }
       }
 
       if (timeframeFilter) {
@@ -341,7 +382,9 @@ const receiveSignal = catchAsync(async (req, res) => {
   };
 
   if (event === 'INFO') {
-    const { signal: existing, ambiguous } = await findSignalByWebhookId(webhookId);
+    const { signal: existing, ambiguous } = await findSignalByWebhookId(webhookId, {
+      eventTime: req.body.time,
+    });
     if (ambiguous) {
       return sendWebhookResponse(httpStatus.OK, {
         status: 'ambiguous_timeframe',
@@ -399,7 +442,9 @@ const receiveSignal = catchAsync(async (req, res) => {
   }
 
   if (event === 'EXIT') {
-    const { signal: existing, ambiguous } = await findSignalByWebhookId(webhookId);
+    const { signal: existing, ambiguous } = await findSignalByWebhookId(webhookId, {
+      eventTime: req.body.exit_time,
+    });
     if (ambiguous) {
       return sendWebhookResponse(httpStatus.OK, {
         status: 'ambiguous_timeframe',
@@ -561,6 +606,17 @@ const receiveSignal = catchAsync(async (req, res) => {
     }
     return sendWebhookResponse(httpStatus.OK, { status: 'duplicate_blocked', signal: afterGuard || null });
   }
+
+  await signalService.settleOppositeActiveSignalsForEntry({
+    symbol: created.symbol,
+    segment: created.segment,
+    timeframe: created.timeframe,
+    type: created.type,
+    entryPrice: created.entryPrice,
+    signalTime: created.signalTime || created.createdAt,
+    excludeSignalId: created.id,
+    skipSideEffects: true,
+  });
 
   await rememberProcessedEntrySignal(signalBody.uniqueId);
   return sendWebhookResponse(httpStatus.OK, { status: 'ok', signal: created });

@@ -10,6 +10,7 @@ import { resolveBestMasterSymbol } from '../utils/masterSymbolResolver.js';
 import { normalizeSignalTimestampInput } from '../utils/signalTimestamp.js';
 
 const CLOSED_SIGNAL_STATUSES = ['Closed', 'Target Hit', 'Partial Profit Book', 'Stoploss Hit'];
+const OPEN_SIGNAL_STATUSES = ['Active', 'Open', 'Paused'];
 const SIGNAL_DERIVED_DATES = {
   timezone: 'Asia/Kolkata',
 };
@@ -130,6 +131,45 @@ const resolveTotalPoints = (signal, exitPrice) => {
   const isSell = String(signal?.type || '').trim().toUpperCase() === 'SELL';
   const points = isSell ? entry - exit : exit - entry;
   return Math.round(points * 100) / 100;
+};
+
+const getSignalStartDate = (signal) => {
+  const rawValue = signal?.signalTime ?? signal?.createdAt;
+  if (!rawValue) return null;
+
+  const parsed = rawValue instanceof Date ? new Date(rawValue) : new Date(rawValue);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return parsed;
+};
+
+const inferSignalStatusFromExitPrice = (signal, exitPrice) => {
+  const resolvedExitPrice = toFiniteNumber(exitPrice);
+  const entryPrice = toFiniteNumber(signal?.entryPrice);
+  const stopLoss = toFiniteNumber(signal?.stopLoss);
+  const target1 = toFiniteNumber(signal?.targets?.target1);
+
+  if (typeof resolvedExitPrice !== 'number' || typeof entryPrice !== 'number') {
+    return 'Closed';
+  }
+
+  const isSell = String(signal?.type || '').trim().toUpperCase() === 'SELL';
+
+  if (typeof target1 === 'number') {
+    const targetReached = isSell ? resolvedExitPrice <= target1 : resolvedExitPrice >= target1;
+    if (targetReached) return 'Target Hit';
+  }
+
+  if (typeof stopLoss === 'number') {
+    const stopReached = isSell ? resolvedExitPrice >= stopLoss : resolvedExitPrice <= stopLoss;
+    if (stopReached) return 'Stoploss Hit';
+  }
+
+  const resolvedPoints = resolveTotalPoints(signal, resolvedExitPrice);
+  if (typeof resolvedPoints === 'number' && resolvedPoints > 0) {
+    return 'Partial Profit Book';
+  }
+
+  return 'Closed';
 };
 
 const scheduleCreateSideEffects = (signal, userId) => {
@@ -720,7 +760,7 @@ const updateSignalById = async (signalId, updateBody) => {
     throw new Error('Signal not found');
   }
 
-  const { notificationMeta = null, ...persistedUpdateBody } = updateBody || {};
+  const { notificationMeta = null, skipSideEffects = false, ...persistedUpdateBody } = updateBody || {};
   if (persistedUpdateBody.timeframe !== undefined) {
     const normalizedTimeframe = normalizeSignalTimeframe(persistedUpdateBody.timeframe);
     persistedUpdateBody.timeframe = normalizedTimeframe || persistedUpdateBody.timeframe;
@@ -771,8 +811,76 @@ const updateSignalById = async (signalId, updateBody) => {
   }
 
   await signal.save();
-  scheduleUpdateSideEffects(signal, persistedUpdateBody, signalId, notificationMeta);
+  if (!skipSideEffects) {
+    scheduleUpdateSideEffects(signal, persistedUpdateBody, signalId, notificationMeta);
+  }
   return signal;
+};
+
+const settleOppositeActiveSignalsForEntry = async ({
+  symbol,
+  segment,
+  timeframe,
+  type,
+  entryPrice,
+  signalTime,
+  excludeSignalId = null,
+  skipSideEffects = true,
+} = {}) => {
+  const normalizedSymbol = String(symbol || '').trim().toUpperCase();
+  const normalizedSegment = String(segment || '').trim().toUpperCase();
+  const normalizedTimeframe = normalizeSignalTimeframe(timeframe) || String(timeframe || '').trim();
+  const normalizedType = String(type || '').trim().toUpperCase();
+  const nextEntryPrice = toFiniteNumber(entryPrice);
+  const nextSignalTime = normalizeSignalTimestampInput(signalTime) || new Date();
+
+  if (!normalizedSymbol || !normalizedType || typeof nextEntryPrice !== 'number') {
+    return [];
+  }
+
+  const filter = {
+    symbol: normalizedSymbol,
+    status: { $in: OPEN_SIGNAL_STATUSES },
+    type: { $ne: normalizedType },
+  };
+
+  if (normalizedSegment) {
+    filter.segment = normalizedSegment;
+  }
+
+  if (normalizedTimeframe) {
+    filter.timeframe = normalizedTimeframe;
+  }
+
+  if (excludeSignalId) {
+    filter._id = { $ne: excludeSignalId };
+  }
+
+  const activeSignals = await Signal.find(filter).sort({ signalTime: -1, createdAt: -1, _id: -1 });
+  const eligibleSignals = activeSignals.filter((candidate) => {
+    const startedAt = getSignalStartDate(candidate);
+    return startedAt instanceof Date && startedAt.getTime() < nextSignalTime.getTime();
+  });
+
+  const settledSignals = [];
+
+  for (const candidate of eligibleSignals) {
+    const status = inferSignalStatusFromExitPrice(candidate, nextEntryPrice);
+    const totalPoints = resolveTotalPoints(candidate, nextEntryPrice);
+
+    const updated = await updateSignalById(candidate.id, {
+      status,
+      exitPrice: nextEntryPrice,
+      totalPoints,
+      exitReason: 'AUTO_SETTLED_ON_OPPOSITE_ENTRY',
+      exitTime: nextSignalTime,
+      skipSideEffects,
+    });
+
+    settledSignals.push(updated);
+  }
+
+  return settledSignals;
 };
 
 const deleteSignalById = async (signalId) => {
@@ -792,5 +900,6 @@ export default {
   getSignalPeriodStats,
   getSignalReport,
   updateSignalById,
+  settleOppositeActiveSignalsForEntry,
   deleteSignalById,
 };

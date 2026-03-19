@@ -8,6 +8,7 @@
     "dev": "nodemon server.js",
     "test": "node --test",
     "loadtest:signals": "node src/scripts/simulateSignalBurst.js",
+    "repair:signals": "node src/scripts/reconcileActiveSignalsOnOppositeEntry.js",
     "purge:signals": "node src/scripts/purgeSignals.js",
     "purge:users-signals": "node src/scripts/purgeUsersAndSignals.js",
     "create:admin": "node src/scripts/createAdminUser.js",
