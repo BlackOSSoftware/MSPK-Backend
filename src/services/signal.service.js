@@ -7,6 +7,7 @@ import { getSignalAudienceGroups } from '../utils/signalRouting.js';
 import { resolveSymbolSegmentGroup } from '../utils/marketSegmentResolver.js';
 import { normalizeSignalTimeframe } from '../utils/timeframe.js';
 import { resolveBestMasterSymbol } from '../utils/masterSymbolResolver.js';
+import { normalizeSignalTimestampInput } from '../utils/signalTimestamp.js';
 
 const CLOSED_SIGNAL_STATUSES = ['Closed', 'Target Hit', 'Partial Profit Book', 'Stoploss Hit'];
 const SIGNAL_DERIVED_DATES = {
@@ -228,6 +229,16 @@ const scheduleUpdateSideEffects = (signal, updateBody, signalId, notificationMet
 
 const signalCreationGuard = new Map();
 
+const normalizePersistedSignalDates = (payload = {}) => {
+  if (payload.signalTime !== undefined) {
+    payload.signalTime = normalizeSignalTimestampInput(payload.signalTime);
+  }
+
+  if (payload.exitTime !== undefined) {
+    payload.exitTime = normalizeSignalTimestampInput(payload.exitTime);
+  }
+};
+
 const hydrateSignalSegment = async (signalBody = {}) => {
   const normalizedSymbol = String(signalBody?.symbol || '').trim().toUpperCase();
   if (!normalizedSymbol) return signalBody;
@@ -270,6 +281,7 @@ const createSignal = async (signalBody, user) => {
   if (!signalBody.signalTime) {
     signalBody.signalTime = new Date();
   }
+  normalizePersistedSignalDates(signalBody);
 
   await hydrateSignalSegment(signalBody);
   if (signalBody.uniqueId) {
@@ -713,6 +725,7 @@ const updateSignalById = async (signalId, updateBody) => {
     const normalizedTimeframe = normalizeSignalTimeframe(persistedUpdateBody.timeframe);
     persistedUpdateBody.timeframe = normalizedTimeframe || persistedUpdateBody.timeframe;
   }
+  normalizePersistedSignalDates(persistedUpdateBody);
   if (persistedUpdateBody.symbol || persistedUpdateBody.segment) {
     await hydrateSignalSegment(persistedUpdateBody);
   }

@@ -1,4 +1,5 @@
 import { getTimeframeDurationMs, normalizeSignalTimeframe } from './timeframe.js';
+import { parseSignalTimestamp } from './signalTimestamp.js';
 
 const numberFormatter = new Intl.NumberFormat('en-IN', {
   maximumFractionDigits: 2,
@@ -58,35 +59,47 @@ const humanizeTimeframe = (value) => {
 };
 
 const parseTimestamp = (value) => {
-  if (!value) return null;
-  const date = value instanceof Date ? value : new Date(value);
-  if (Number.isNaN(date.getTime())) return null;
-  return date;
+  return parseSignalTimestamp(value);
 };
 
 export const resolveDisplayTimestamp = ({
   primary,
   fallback,
   timeframe,
+  floor,
 }) => {
   const primaryDate = parseTimestamp(primary);
   const fallbackDate = parseTimestamp(fallback);
+  const floorDate = parseTimestamp(floor);
 
-  if (!primaryDate) return fallbackDate;
-  if (!fallbackDate) return primaryDate;
+  const resolveFallback = () => {
+    if (fallbackDate && floorDate && fallbackDate.getTime() < floorDate.getTime()) {
+      return floorDate;
+    }
+
+    return fallbackDate || floorDate || null;
+  };
+
+  if (!primaryDate) return resolveFallback();
+  if (!fallbackDate) {
+    if (floorDate && primaryDate.getTime() < floorDate.getTime()) {
+      return floorDate;
+    }
+    return primaryDate;
+  }
 
   const timeframeMs = getTimeframeDurationMs(timeframe);
-  const maxAllowedSkewMs = Math.min(
+  const maxAllowedFutureSkewMs = Math.min(
     Math.max(timeframeMs * 3, 30 * 60 * 1000),
     6 * 60 * 60 * 1000
   );
 
-  if (fallbackDate.getTime() >= primaryDate.getTime()) {
-    return fallbackDate;
+  if (floorDate && primaryDate.getTime() < floorDate.getTime()) {
+    return resolveFallback() || primaryDate;
   }
 
-  if (Math.abs(fallbackDate.getTime() - primaryDate.getTime()) > maxAllowedSkewMs) {
-    return fallbackDate;
+  if (primaryDate.getTime() - fallbackDate.getTime() > maxAllowedFutureSkewMs) {
+    return resolveFallback() || primaryDate;
   }
 
   return primaryDate;
@@ -119,6 +132,7 @@ export const buildSignalTemplateData = (signal = {}) => {
     primary: signal.exitTime,
     fallback: signal.updatedAt || signal.createdAt,
     timeframe: normalizedTimeframe,
+    floor: resolvedSignalTime,
   });
   const signalTime = formatSignalTimestamp(resolvedSignalTime);
   const exitTime = formatSignalTimestamp(resolvedExitTime);

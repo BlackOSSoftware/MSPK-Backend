@@ -12,6 +12,7 @@ import {
 } from '../utils/signalRouting.js';
 import { resolveBestMasterSymbol } from '../utils/masterSymbolResolver.js';
 import { buildTimeframeQuery, getTimeframeDurationMs, normalizeSignalTimeframe } from '../utils/timeframe.js';
+import { parseSignalTimestamp } from '../utils/signalTimestamp.js';
 
 const parseBoolean = (value) => {
   if (value === undefined || value === null) return undefined;
@@ -131,10 +132,7 @@ const getWebhookSymbolInput = (body = {}) =>
 const looksLikeMasterSymbolId = (value) => /-[a-f0-9]{24}$/i.test(String(value || '').trim());
 
 const parseWebhookDate = (value) => {
-  if (!value) return null;
-  const parsed = value instanceof Date ? value : new Date(value);
-  if (Number.isNaN(parsed.getTime())) return null;
-  return parsed;
+  return parseSignalTimestamp(value);
 };
 
 const getAllowedSignalAgeMs = (timeframe) => {
@@ -328,7 +326,10 @@ const receiveSignal = catchAsync(async (req, res) => {
 
     // 3) If already closed (idempotent EXIT), match on exit_time too.
     if (req.body.exit_time) {
-      const exitTime = new Date(req.body.exit_time);
+      const exitTime = parseWebhookDate(req.body.exit_time);
+      if (!exitTime) {
+        return { signal: null, ambiguous: false };
+      }
       const closedCandidates = (await collectCandidates({ includeClosed: true })).filter((candidate) => {
         const candidateExitTime = candidate?.exitTime ? new Date(candidate.exitTime).getTime() : NaN;
         return Number.isFinite(candidateExitTime) && candidateExitTime === exitTime.getTime();
@@ -359,7 +360,7 @@ const receiveSignal = catchAsync(async (req, res) => {
     }
 
     const currentPrice = toFiniteNumber(req.body.price);
-    const infoTime = req.body.time;
+    const infoTime = parseWebhookDate(req.body.time) || req.body.time;
     const targetLevel = resolveInfoTargetLevel(req.body.message);
     const noteText = buildInfoUpdateMessage({
       message: req.body.message,
@@ -422,7 +423,7 @@ const receiveSignal = catchAsync(async (req, res) => {
       exitPrice: req.body.exit_price,
       totalPoints: req.body.total_points,
     });
-    const incomingExitTime = new Date(req.body.exit_time);
+    const incomingExitTime = parseWebhookDate(req.body.exit_time);
     const incomingExitPrice = toFiniteNumber(req.body.exit_price);
     const resolvedTotalPoints = deriveExitPoints({
       signal: existing,
@@ -442,6 +443,7 @@ const receiveSignal = catchAsync(async (req, res) => {
       existing.exitReason === resolvedExitReason &&
       isNumberClose(existing.exitPrice, incomingExitPrice) &&
       isNumberClose(existing.totalPoints, resolvedTotalPoints) &&
+      Boolean(incomingExitTime) &&
       new Date(existing.exitTime).getTime() === incomingExitTime.getTime();
 
     if (alreadyApplied) {
@@ -452,7 +454,7 @@ const receiveSignal = catchAsync(async (req, res) => {
       exitPrice: incomingExitPrice,
       totalPoints: resolvedTotalPoints,
       exitReason: resolvedExitReason,
-      exitTime: req.body.exit_time,
+      exitTime: incomingExitTime,
       status: desiredStatus,
     };
 
@@ -484,7 +486,7 @@ const receiveSignal = catchAsync(async (req, res) => {
       target2: req.body.targets?.t2,
       target3: req.body.targets?.t3,
     },
-    signalTime: req.body.signal_time,
+    signalTime: parsedSignalTime || req.body.signal_time,
     isFree,
     status: 'Active',
   };

@@ -400,6 +400,7 @@ const formatSignalResponse = (signal, resolvedMasterSymbol = null) => {
     primary: signal.exitTime,
     fallback: signal.updatedAt || signal.createdAt,
     timeframe: normalizedTimeframe,
+    floor: displaySignalTime,
   });
   const segment = resolvedMasterSymbol
     ? resolveSignalDisplaySegment({
