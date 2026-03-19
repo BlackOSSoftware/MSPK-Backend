@@ -125,6 +125,17 @@ const unregisterFCMToken = catchAsync(async (req, res) => {
   res.status(httpStatus.NO_CONTENT).send();
 });
 
+const getMyFcmTokens = catchAsync(async (req, res) => {
+  const tokens = await FCMToken.find({ user: req.user._id })
+    .select('token platform createdAt updatedAt')
+    .sort({ updatedAt: -1 });
+
+  res.send({
+    count: tokens.length,
+    tokens,
+  });
+});
+
 const getNotification = catchAsync(async (req, res) => {
     const notification = await Notification.findOne({
         _id: req.params.notificationId,
@@ -374,6 +385,7 @@ export default {
   markAllAsRead,
   registerFCMToken,
   unregisterFCMToken,
+  getMyFcmTokens,
   getNotification,
   deleteNotification,
   disconnectTelegram,

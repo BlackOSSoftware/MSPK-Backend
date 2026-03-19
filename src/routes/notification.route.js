@@ -11,6 +11,7 @@ router.use(auth());
 
 router.get('/', notificationController.getMyNotifications);
 router.post('/fcm-token', notificationController.registerFCMToken);
+router.get('/fcm-token', notificationController.getMyFcmTokens);
 router.delete('/fcm-token', notificationController.unregisterFCMToken);
 router.patch('/read-all', notificationController.markAllAsRead);
 router.get('/telegram/connect-link', notificationController.getTelegramConnectLink);
