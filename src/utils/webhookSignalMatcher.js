@@ -1,5 +1,5 @@
 import { parseSignalTimestamp } from './signalTimestamp.js';
-import { normalizeSignalTimeframe } from './timeframe.js';
+import { buildTimeframeAliases, normalizeSignalTimeframe } from './timeframe.js';
 
 export const getWebhookSignalStartTimeMs = (signal) => {
   const rawValue = signal?.signalTime || signal?.createdAt || signal?.updatedAt;
@@ -52,9 +52,8 @@ export const selectWebhookSignalCandidate = ({
 } = {}) => {
   const parsedEventTime = parseSignalTimestamp(eventTime) || null;
   const normalizedExpectedType = String(expectedType || '').trim().toUpperCase();
-  const timeframeProvided = Boolean(
-    normalizeSignalTimeframe(timeframe) || String(timeframe || '').trim()
-  );
+  const timeframeAliases = new Set(buildTimeframeAliases(timeframe));
+  const timeframeProvided = timeframeAliases.size > 0;
 
   let candidates = sortCandidates(dedupeSignals(signals));
   if (candidates.length === 0) {
@@ -65,6 +64,17 @@ export const selectWebhookSignalCandidate = ({
     candidates = candidates.filter(
       (candidate) => String(candidate?.type || '').trim().toUpperCase() === normalizedExpectedType
     );
+    if (candidates.length === 0) {
+      return { signal: null, ambiguous: false };
+    }
+  }
+
+  if (timeframeProvided) {
+    candidates = candidates.filter((candidate) => {
+      const candidateTimeframe =
+        normalizeSignalTimeframe(candidate?.timeframe) || String(candidate?.timeframe || '').trim();
+      return timeframeAliases.has(candidateTimeframe);
+    });
     if (candidates.length === 0) {
       return { signal: null, ambiguous: false };
     }
@@ -81,6 +91,20 @@ export const selectWebhookSignalCandidate = ({
     }
 
     if (eligibleCandidates.length > 1) {
+      if (!timeframeProvided) {
+        const distinctEligibleTimeframes = new Set(
+          eligibleCandidates
+            .map(
+              (candidate) =>
+                normalizeSignalTimeframe(candidate?.timeframe) || String(candidate?.timeframe || '').trim()
+            )
+            .filter(Boolean)
+        );
+        if (distinctEligibleTimeframes.size > 1) {
+          return { signal: null, ambiguous: true };
+        }
+      }
+
       const latestStartedAt = Math.max(
         ...eligibleCandidates.map((candidate) => getWebhookSignalStartTimeMs(candidate))
       );
@@ -94,10 +118,6 @@ export const selectWebhookSignalCandidate = ({
 
       return { signal: null, ambiguous: true };
     }
-  }
-
-  if (timeframeProvided) {
-    return { signal: candidates[0], ambiguous: false };
   }
 
   const distinctTimeframes = new Set(

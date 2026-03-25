@@ -6,10 +6,16 @@ import User from '../models/User.js';
 import Setting from '../models/Setting.js';
 import Announcement from '../models/Announcement.js';
 import marketDataService from './marketData.service.js';
+import signalService from './signal.service.js';
 
 const SCHEDULER_TIMEZONE = process.env.SCHEDULER_TIMEZONE || 'Asia/Kolkata';
 const ECONOMIC_ALERT_CRON = process.env.CRON_ECONOMIC_ALERT || '* * * * *';
+const ECONOMIC_DAILY_SUMMARY_CRON = process.env.CRON_ECONOMIC_DAILY_SUMMARY || '0 10 * * *';
 const ANNOUNCEMENT_SCAN_CRON = process.env.CRON_ANNOUNCEMENT_SCAN || '* * * * *';
+const ACTIVE_SIGNAL_RECONCILE_INTERVAL_MS = Math.max(
+    15000,
+    Number.parseInt(process.env.ACTIVE_SIGNAL_RECONCILE_INTERVAL_MS || '30000', 10) || 30000
+);
 
 const yieldToEventLoop = () =>
     new Promise((resolve) => {
@@ -69,6 +75,29 @@ const scheduleCron = (taskName, expression, handler, options = {}) => {
     logger.info(`[CRON] Scheduled ${taskName} -> "${expression}" (${timezone})`);
 };
 
+const scheduleIntervalTask = (taskName, intervalMs, handler, options = {}) => {
+    const guardedHandler = withCronGuard(taskName, handler);
+    const run = () => {
+        guardedHandler().catch((error) => {
+            logger.error(`[INTERVAL] ${taskName} failed`, error);
+        });
+    };
+
+    const timer = setInterval(run, intervalMs);
+    if (typeof timer.unref === 'function') {
+        timer.unref();
+    }
+
+    logger.info(`[INTERVAL] Scheduled ${taskName} every ${intervalMs}ms`);
+
+    if (options.runOnStart !== false) {
+        const startDelayMs = Number.isFinite(options.startDelayMs) ? options.startDelayMs : Math.min(intervalMs, 5000);
+        setTimeout(run, startDelayMs);
+    }
+
+    return timer;
+};
+
 const initScheduler = () => {
     logger.info('Initializing Scheduler Service...');
 
@@ -91,6 +120,12 @@ const initScheduler = () => {
     scheduleCron('economic-alert-check', ECONOMIC_ALERT_CRON, async () => {
         // logger.info('Checking for economic alerts...'); // verbose, keep commented or debug
         await economicService.checkAndTriggerAlerts();
+    });
+
+    // Task 2.5: Send today's high-impact economic summary daily at 10:00 AM IST
+    scheduleCron('economic-daily-summary', ECONOMIC_DAILY_SUMMARY_CRON, async () => {
+        logger.info('Running Daily Economic Summary Broadcast...');
+        await notificationService.sendDailyEconomicSummary();
     });
 
     // Task 3: Check for Plan Expiry Reminders (Daily at 10:00 AM)
@@ -167,6 +202,15 @@ const initScheduler = () => {
         logger.info('Running Daily Kite Instrument Sync...');
         await marketDataService.syncInstruments();
         logger.info('Daily Kite Instrument Sync completed.');
+    });
+
+    scheduleIntervalTask('active-signal-reconcile', ACTIVE_SIGNAL_RECONCILE_INTERVAL_MS, async () => {
+        const result = await signalService.reconcileActiveSignalsWithMarketData({ limit: 500 });
+        if (result.closedCount > 0) {
+            logger.info(
+                `[SIGNAL_RECONCILE] Auto-closed ${result.closedCount} active signals out of ${result.scannedCount} scanned`
+            );
+        }
     });
 
     // Initial fetch on startup (optional, maybe check if empty?)

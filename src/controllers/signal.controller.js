@@ -21,6 +21,13 @@ import { isClosedSignalStatus, resolveDisplayTimestamp } from '../utils/notifica
 import { pickBestMasterSymbol } from '../utils/masterSymbolResolver.js';
 import { resolveSymbolSegmentGroup } from '../utils/marketSegmentResolver.js';
 import { buildTimeframeQuery, normalizeSignalTimeframe } from '../utils/timeframe.js';
+import {
+  addIndiaDays,
+  getEndOfIndiaDay as resolveEndOfIndiaDay,
+  getStartOfIndiaDay as resolveStartOfIndiaDay,
+  getStartOfIndiaMonth,
+  getStartOfIndiaWeek,
+} from '../utils/indiaTime.js';
 
 const toFiniteNumber = (value) => {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
@@ -35,7 +42,6 @@ const toFiniteNumber = (value) => {
 
 const roundSignalValue = (value) => Math.round(value * 100) / 100;
 const CLOSED_SIGNAL_STATUSES = ['Closed', 'Target Hit', 'Partial Profit Book', 'Stoploss Hit'];
-const INDIA_TIMEZONE_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 
 const resolveSignalDisplaySegment = (signal) => {
   const category = String(signal?.category || '').trim().toUpperCase();
@@ -449,26 +455,11 @@ const formatSignalResponse = (signal, resolvedMasterSymbol = null) => {
   };
 };
 
-const getStartOfDay = (date) => {
-  const next = new Date(date);
-  next.setHours(0, 0, 0, 0);
-  return next;
-};
+const getStartOfDay = (date) => resolveStartOfIndiaDay(date);
 
-const getStartOfIndiaDay = (date) => {
-  const parsed = date instanceof Date ? new Date(date) : new Date(date);
-  if (Number.isNaN(parsed.getTime())) return null;
+const getStartOfIndiaDay = (date) => resolveStartOfIndiaDay(date);
 
-  const shifted = new Date(parsed.getTime() + INDIA_TIMEZONE_OFFSET_MS);
-  shifted.setUTCHours(0, 0, 0, 0);
-  return new Date(shifted.getTime() - INDIA_TIMEZONE_OFFSET_MS);
-};
-
-const getEndOfDay = (date) => {
-  const next = new Date(date);
-  next.setHours(23, 59, 59, 999);
-  return next;
-};
+const getEndOfDay = (date) => resolveEndOfIndiaDay(date);
 
 const buildSegmentFilterQuery = (segment = '') => {
   const normalized = String(segment || '').trim().toUpperCase();
@@ -538,28 +529,21 @@ const resolveSignalDateRange = ({ datePreset, dateFilter, fromDate, toDate }) =>
   }
 
   if (preset === 'yesterday') {
-    const day = new Date(now);
-    day.setDate(day.getDate() - 1);
+    const day = addIndiaDays(now, -1);
     return { start: getStartOfDay(day), end: getEndOfDay(day) };
   }
 
   if (preset === 'tomorrow') {
-    const day = new Date(now);
-    day.setDate(day.getDate() + 1);
+    const day = addIndiaDays(now, 1);
     return { start: getStartOfDay(day), end: getEndOfDay(day) };
   }
 
   if (preset === 'week' || preset === 'this week') {
-    const start = getStartOfDay(now);
-    const day = start.getDay();
-    const diff = start.getDate() - day + (day === 0 ? -6 : 1);
-    start.setDate(diff);
-    return { start, end: getEndOfDay(now) };
+    return { start: getStartOfIndiaWeek(now), end: getEndOfDay(now) };
   }
 
   if (preset === 'month' || preset === 'this month') {
-    const start = new Date(now.getFullYear(), now.getMonth(), 1);
-    return { start, end: getEndOfDay(now) };
+    return { start: getStartOfIndiaMonth(now), end: getEndOfDay(now) };
   }
 
   if (preset === 'custom') {

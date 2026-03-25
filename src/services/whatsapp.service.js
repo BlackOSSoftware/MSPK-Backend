@@ -1,21 +1,31 @@
 import axios from 'axios';
 import logger from '../config/log.js';
 
+const normalizePhoneNumber = (value = '') => {
+    let digits = String(value || '').replace(/\D/g, '');
+
+    if (digits.length === 10) {
+        digits = `91${digits}`;
+    }
+
+    return digits;
+};
+
 class WhatsappService {
     constructor() {
         this.token = process.env.WHATSAPP_ACCESS_TOKEN;
         this.phoneId = process.env.WHATSAPP_PHONE_NUMBER_ID;
         this.baseUrl = 'https://graph.facebook.com/v17.0';
-        
+
         if (!this.token || !this.phoneId) {
-             // logger.warn('WHATSAPP: Credentials missing in .env'); 
+             // logger.warn('WHATSAPP: Credentials missing in .env');
         }
     }
 
     initialize(token, phoneId) {
         this.token = token;
         this.phoneId = phoneId;
-        
+
         if (!this.token || !this.phoneId) {
             logger.warn('WHATSAPP: Missing Credentials. Service disabled.');
         } else {
@@ -29,20 +39,16 @@ class WhatsappService {
      * @param {string} message - Text body
      */
     async sendTextMessage(to, message) {
-        if (!this.token) {
-            console.error('WHATSAPP: No Token Found! Check .env');
-            return;
+        if (!this.token || !this.phoneId) {
+            logger.error('WHATSAPP: Meta credentials are missing in .env');
+            return false;
         }
 
-        // Sanitize Phone: Remove all non-numeric characters (e.g. +, spaces, -)
-        let cleanPhone = to.replace(/\D/g, '');
-        
-        // Auto-add text country code for India if missing (Common issue)
-        if (cleanPhone.length === 10) {
-            cleanPhone = '91' + cleanPhone;
+        const cleanPhone = normalizePhoneNumber(to);
+        if (!cleanPhone) {
+            logger.error('WHATSAPP: Recipient phone number is required');
+            return false;
         }
-        
-        console.log(`WHATSAPP: Sending to ${cleanPhone} (Original: ${to})`);
 
         try {
             const url = `${this.baseUrl}/${this.phoneId}/messages`;
@@ -54,19 +60,21 @@ class WhatsappService {
             };
 
             const res = await axios.post(url, payload, {
-                headers: { 
+                headers: {
                     'Authorization': `Bearer ${this.token}`,
                     'Content-Type': 'application/json'
                 }
             });
-            console.log(`WHATSAPP: Success! Message ID: ${res.data.messages?.[0]?.id}`);
+            logger.info(`WHATSAPP: Text message sent to ${cleanPhone} (${res.data.messages?.[0]?.id || 'queued'})`);
+            return true;
         } catch (error) {
-            console.error('WHATSAPP: Send Error');
+            logger.error('WHATSAPP: Send Error');
             if (error.response) {
-                console.error('Data:', JSON.stringify(error.response.data, null, 2));
+                logger.error(JSON.stringify(error.response.data));
             } else {
-                console.error('Message:', error.message);
+                logger.error(error.message);
             }
+            return false;
         }
     }
 
@@ -78,38 +86,54 @@ class WhatsappService {
      * @param {string} language - Language code (default 'en_US')
      */
     async sendTemplate(to, templateName, variables = [], language = 'en_US') {
-        if (!this.token) return;
+        if (!this.token || !this.phoneId) {
+            logger.error('WHATSAPP: Meta credentials are missing in .env');
+            return false;
+        }
+
+        const cleanPhone = normalizePhoneNumber(to);
+        if (!cleanPhone) {
+            logger.error('WHATSAPP: Recipient phone number is required for template send');
+            return false;
+        }
+
+        if (!templateName) {
+            logger.error('WHATSAPP: Template name is required');
+            return false;
+        }
 
         try {
             const components = [];
             if (variables.length > 0) {
                  components.push({
                     type: 'body',
-                    parameters: variables.map(v => ({ type: 'text', text: v }))
+                    parameters: variables.map((value) => ({ type: 'text', text: String(value ?? '') }))
                  });
             }
 
             const url = `${this.baseUrl}/${this.phoneId}/messages`;
             const payload = {
                 messaging_product: 'whatsapp',
-                to: to,
+                to: cleanPhone,
                 type: 'template',
                 template: {
                     name: templateName,
                     language: { code: language },
-                    components: components
+                    components
                 }
             };
 
             await axios.post(url, payload, {
-                headers: { 
+                headers: {
                     'Authorization': `Bearer ${this.token}`,
                     'Content-Type': 'application/json'
                 }
             });
-            logger.info(`WHATSAPP: Sent template ${templateName} to ${to}`);
+            logger.info(`WHATSAPP: Sent template ${templateName} to ${cleanPhone}`);
+            return true;
         } catch (error) {
             logger.error('WHATSAPP: Template Error', error.response?.data || error.message);
+            return false;
         }
     }
 
@@ -117,8 +141,7 @@ class WhatsappService {
      * Welcome New User (Auto-Reply Logic Placeholder)
      */
     async sendWelcomeMessage(to, userName) {
-        // You can switch this to a 'hello_world' template later if needed
-        const msg = `Welcome ${userName} to MSPK Trading! 🚀\nWe are glad to have you.`;
+        const msg = `Welcome ${userName} to MSPK Trading!\nWe are glad to have you.`;
         await this.sendTextMessage(to, msg);
     }
 }

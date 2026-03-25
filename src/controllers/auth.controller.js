@@ -1,10 +1,13 @@
 import httpStatus from 'http-status';
+import config from '../config/config.js';
 import catchAsync from '../utils/catchAsync.js';
 import { authService, tokenService, userService, msg91Service, emailService } from '../services/index.js';
 import { redisClient } from '../services/redis.service.js'; // Direct client access for Email OTP
 import User from '../models/User.js';
+import Setting from '../models/Setting.js';
 import FCMToken from '../models/FCMToken.js';
 import telegramService from '../services/channels/telegram.service.js';
+import whatsappChannelService from '../services/channels/whatsapp.service.js';
 import { isLoopbackClientIp, resolveClientIp } from '../utils/requestIp.js';
 
 const buildTelegramPayload = (userObject) => ({
@@ -35,6 +38,149 @@ const maskPhone = (phone) => {
   return `***${last4}`;
 };
 
+const OTP_TTL_SECONDS = 600;
+const OTP_DAILY_LIMIT = 5;
+const PREFER_WHATSAPP_OTP = String(process.env.AUTH_PREFER_WHATSAPP_OTP || 'true').trim().toLowerCase() !== 'false';
+
+const normalizeEmailIdentifier = (value = '') => String(value || '').trim().toLowerCase();
+
+const buildPhoneLookupCandidates = (value = '') => {
+  const digits = String(value || '').replace(/\D/g, '');
+  if (!digits) return [];
+
+  const candidates = new Set([digits]);
+
+  if (digits.length === 10) {
+    candidates.add(`91${digits}`);
+  }
+
+  if (digits.length === 12 && digits.startsWith('91')) {
+    candidates.add(digits.slice(2));
+  }
+
+  return Array.from(candidates);
+};
+
+const normalizePhoneIdentifier = (value = '') => {
+  const candidates = buildPhoneLookupCandidates(value);
+  if (candidates.length === 0) return '';
+
+  const withCountryCode = candidates.find((candidate) => candidate.length > 10);
+  return withCountryCode || candidates[0];
+};
+
+const isEmailIdentifier = (value = '') => String(value || '').includes('@');
+
+const getDailyOtpCount = async (dailyKey) => {
+  const dailyCount = await redisClient.get(dailyKey);
+  return dailyCount ? Number.parseInt(dailyCount, 10) : 0;
+};
+
+const incrementDailyOtpCount = async (dailyKey) => {
+  const newCount = await redisClient.incr(dailyKey);
+  if (newCount === 1) {
+    await redisClient.expire(dailyKey, 86400);
+  }
+  return newCount;
+};
+
+const createStatusError = (statusCode, message) => {
+  const error = new Error(message);
+  error.statusCode = statusCode;
+  return error;
+};
+
+const updateOtpAudit = async (query, channel, target) => {
+  if (!query) return;
+
+  await User.updateOne(
+    query,
+    {
+      $set: {
+        lastOtpSentAt: new Date(),
+        lastOtpChannel: channel,
+        lastOtpTarget: target,
+      },
+    }
+  );
+};
+
+const resolvePhoneUserQuery = (phone) => {
+  const phoneCandidates = buildPhoneLookupCandidates(phone);
+  if (phoneCandidates.length === 0) return null;
+  return { phone: { $in: phoneCandidates } };
+};
+
+const resolveWhatsappOtpContext = async (identifier) => {
+  const rawIdentifier = String(identifier || '').trim();
+  if (!rawIdentifier) {
+    throw createStatusError(httpStatus.BAD_REQUEST, 'Identifier is required');
+  }
+
+  if (isEmailIdentifier(rawIdentifier)) {
+    const email = normalizeEmailIdentifier(rawIdentifier);
+    const user = await User.findOne({ email }).select('_id email phone').lean();
+
+    if (!user) {
+      throw createStatusError(httpStatus.NOT_FOUND, 'No account found for this email address.');
+    }
+
+    const recipientPhone = normalizePhoneIdentifier(user.phone);
+    if (!recipientPhone) {
+      throw createStatusError(
+        httpStatus.BAD_REQUEST,
+        'This account does not have a WhatsApp number linked. Please contact support.'
+      );
+    }
+
+    return {
+      normalizedIdentifier: email,
+      user,
+      email,
+      recipientPhone,
+      userQuery: { _id: user._id },
+      maskedTarget: maskPhone(recipientPhone),
+    };
+  }
+
+  const recipientPhone = normalizePhoneIdentifier(rawIdentifier);
+  if (!recipientPhone) {
+    throw createStatusError(httpStatus.BAD_REQUEST, 'Valid phone number is required');
+  }
+
+  const phoneQuery = resolvePhoneUserQuery(recipientPhone);
+  const user = phoneQuery ? await User.findOne(phoneQuery).select('_id email phone').lean() : null;
+
+  return {
+    normalizedIdentifier: recipientPhone,
+    user,
+    email: user?.email ? normalizeEmailIdentifier(user.email) : '',
+    recipientPhone,
+    userQuery: user?._id ? { _id: user._id } : phoneQuery,
+    maskedTarget: maskPhone(recipientPhone),
+  };
+};
+
+const sendWhatsappOtpCode = async (phone, otp) => {
+  const message = [
+    `Your MSPK Trade Solutions OTP is ${otp}.`,
+    'It is valid for 10 minutes.',
+    'If you did not request this, please ignore this message.',
+  ].join('\n');
+
+  const whatsappConfig = await Setting.findOne({ key: 'whatsapp_config' }).lean();
+
+  try {
+    await whatsappChannelService.sendText(whatsappConfig?.value || null, {
+      to: phone,
+      text: message,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+};
+
 const serializeUser = (user, planDetails = {}) => {
   const userObject = user?.toObject ? user.toObject() : { ...user };
 
@@ -51,6 +197,7 @@ const serializeUser = (user, planDetails = {}) => {
   return {
     ...userObject,
     telegram,
+    signalEmailAlertsAvailable: config.notifications.signalEmailEnabled,
     ...planDetails,
   };
 };
@@ -69,133 +216,260 @@ const register = catchAsync(async (req, res) => {
   }
   
   const user = await authService.createUser(req.body);
-  const tokens = await tokenService.generateAuthTokens(user);
-  res.status(201).send({ user: serializeUser(user), token: tokens.access.token });
+  res.status(201).send({
+    user: serializeUser(user),
+    message: 'Account created successfully. Verify your WhatsApp OTP to continue.',
+  });
 });
 
 const sendOtp = catchAsync(async (req, res) => {
-    const { type, identifier } = req.body; // type: 'phone' | 'email', identifier: '9198...' | 'abc@example.com'
-    const normalizedIdentifier = type === 'email' ? String(identifier || '').toLowerCase().trim() : identifier;
-
-    if (!normalizedIdentifier) {
-        return res.status(httpStatus.BAD_REQUEST).send({ message: 'Identifier is required' });
-    }
+    const { type, identifier } = req.body;
 
     if (type === 'phone') {
-        // Use MSG91
-        // Template ID should be in env or passed. Assuming a default OTP template.
-        const templateId = process.env.MSG91_OTP_TEMPLATE_ID; 
-        if (!templateId) return res.status(httpStatus.INTERNAL_SERVER_ERROR).send({ message: 'Server config missing OTP Template' });
-        
+        const normalizedIdentifier = normalizePhoneIdentifier(identifier);
+        if (!normalizedIdentifier) {
+            return res.status(httpStatus.BAD_REQUEST).send({ message: 'Identifier is required' });
+        }
+
+        const templateId = process.env.MSG91_OTP_TEMPLATE_ID;
+        if (!templateId || String(templateId).trim().toLowerCase().includes('your_')) {
+            return res.status(httpStatus.INTERNAL_SERVER_ERROR).send({ message: 'Server config missing OTP Template' });
+        }
+
         const success = await msg91Service.sendOtp(normalizedIdentifier, templateId);
         if (success) {
-            await User.updateOne(
-                { phone: normalizedIdentifier },
-                {
-                    $set: {
-                        lastOtpSentAt: new Date(),
-                        lastOtpChannel: 'phone',
-                        lastOtpTarget: maskPhone(normalizedIdentifier)
-                    }
-                }
-            );
-            res.send({ message: 'OTP sent successfully to phone' });
+            await updateOtpAudit(resolvePhoneUserQuery(normalizedIdentifier), 'phone', maskPhone(normalizedIdentifier));
+            res.send({ message: 'OTP sent successfully to phone', target: maskPhone(normalizedIdentifier), channel: 'phone' });
         } else {
             res.status(httpStatus.INTERNAL_SERVER_ERROR).send({ message: 'Failed to send OTP' });
         }
-    } else if (type === 'email') {
+        return;
+    }
+
+    if (type === 'email') {
+        const normalizedIdentifier = normalizeEmailIdentifier(identifier);
+        if (!normalizedIdentifier) {
+            return res.status(httpStatus.BAD_REQUEST).send({ message: 'Identifier is required' });
+        }
+
+        if (PREFER_WHATSAPP_OTP) {
+            try {
+                const context = await resolveWhatsappOtpContext(normalizedIdentifier);
+                const key = `whatsapp_otp:${context.normalizedIdentifier}`;
+                const dailyKey = `whatsapp_daily_count:${context.normalizedIdentifier}`;
+                const dailyCount = await getDailyOtpCount(dailyKey);
+
+                if (dailyCount >= OTP_DAILY_LIMIT) {
+                    return res.status(httpStatus.TOO_MANY_REQUESTS).send({
+                        message: `Daily OTP limit exceeded (${OTP_DAILY_LIMIT}/day). Please try again tomorrow.`,
+                        dailyLimit: true,
+                    });
+                }
+
+                const otp = Math.floor(100000 + Math.random() * 900000).toString();
+                await redisClient.set(key, otp, 'EX', OTP_TTL_SECONDS);
+
+                const sent = await sendWhatsappOtpCode(context.recipientPhone, otp);
+                if (sent) {
+                    const newCount = await incrementDailyOtpCount(dailyKey);
+                    await updateOtpAudit(context.userQuery, 'whatsapp', context.maskedTarget);
+
+                    return res.send({
+                        message: 'OTP sent successfully on WhatsApp',
+                        dailyRemaining: OTP_DAILY_LIMIT - newCount,
+                        target: context.maskedTarget,
+                        channel: 'whatsapp',
+                    });
+                }
+            } catch (error) {
+                // Fall back to email delivery when WhatsApp routing is not possible.
+            }
+        }
+
         const key = `email_otp:${normalizedIdentifier}`;
         const dailyKey = `email_daily_count:${normalizedIdentifier}`;
+        const dailyCount = await getDailyOtpCount(dailyKey);
 
-        // 1. Check Daily Limit (Max 5)
-        let dailyCount = await redisClient.get(dailyKey);
-        dailyCount = dailyCount ? parseInt(dailyCount) : 0;
-
-        if (dailyCount >= 5) {
-             return res.status(httpStatus.TOO_MANY_REQUESTS).send({ 
-                 message: 'Daily OTP limit exceeded (5/day). Please try again tomorrow.',
+        if (dailyCount >= OTP_DAILY_LIMIT) {
+             return res.status(httpStatus.TOO_MANY_REQUESTS).send({
+                 message: `Daily OTP limit exceeded (${OTP_DAILY_LIMIT}/day). Please try again tomorrow.`,
                  dailyLimit: true
              });
         }
 
-        // Generate OTP (always allow resend within daily limit)
         const otp = Math.floor(100000 + Math.random() * 900000).toString();
-        
-        // Store in Redis (10 mins expiry)
-        await redisClient.set(key, otp, 'EX', 600);
-        
-        // Send Email
-        const sent = await emailService.sendEmailOtp(normalizedIdentifier, otp);
-        
-        if (sent) {
-            // Increment Daily Count
-            const newCount = await redisClient.incr(dailyKey);
-            if (newCount === 1) await redisClient.expire(dailyKey, 86400); // 24 Hours
-            await User.updateOne(
-                { email: normalizedIdentifier },
-                {
-                    $set: {
-                        lastOtpSentAt: new Date(),
-                        lastOtpChannel: 'email',
-                        lastOtpTarget: maskEmail(normalizedIdentifier)
-                    }
-                }
-            );
+        await redisClient.set(key, otp, 'EX', OTP_TTL_SECONDS);
 
-            res.send({ 
-                message: 'OTP sent successfully to email', 
-                dailyRemaining: 5 - newCount 
+        const sent = await emailService.sendEmailOtp(normalizedIdentifier, otp);
+
+        if (sent) {
+            const newCount = await incrementDailyOtpCount(dailyKey);
+            await updateOtpAudit({ email: normalizedIdentifier }, 'email', maskEmail(normalizedIdentifier));
+
+            res.send({
+                message: 'OTP sent successfully to email',
+                dailyRemaining: OTP_DAILY_LIMIT - newCount,
+                target: maskEmail(normalizedIdentifier),
+                channel: 'email',
             });
         } else {
             res.status(httpStatus.INTERNAL_SERVER_ERROR).send({ message: 'Failed to send OTP email' });
         }
-    } else {
-        res.status(httpStatus.BAD_REQUEST).send({ message: 'Invalid type. Use "phone" or "email"' });
+        return;
     }
+
+    if (type === 'whatsapp') {
+        let context;
+        try {
+            context = await resolveWhatsappOtpContext(identifier);
+        } catch (error) {
+            return res.status(error.statusCode || httpStatus.BAD_REQUEST).send({ message: error.message });
+        }
+
+        const key = `whatsapp_otp:${context.normalizedIdentifier}`;
+        const dailyKey = `whatsapp_daily_count:${context.normalizedIdentifier}`;
+        const dailyCount = await getDailyOtpCount(dailyKey);
+
+        if (dailyCount >= OTP_DAILY_LIMIT) {
+            return res.status(httpStatus.TOO_MANY_REQUESTS).send({
+                message: `Daily OTP limit exceeded (${OTP_DAILY_LIMIT}/day). Please try again tomorrow.`,
+                dailyLimit: true,
+            });
+        }
+
+        const otp = Math.floor(100000 + Math.random() * 900000).toString();
+        await redisClient.set(key, otp, 'EX', OTP_TTL_SECONDS);
+
+        const sent = await sendWhatsappOtpCode(context.recipientPhone, otp);
+        if (!sent) {
+            return res.status(httpStatus.INTERNAL_SERVER_ERROR).send({
+                message: 'Failed to send WhatsApp OTP. Please try again in a moment.',
+            });
+        }
+
+        const newCount = await incrementDailyOtpCount(dailyKey);
+        await updateOtpAudit(context.userQuery, 'whatsapp', context.maskedTarget);
+
+        return res.send({
+            message: 'OTP sent successfully on WhatsApp',
+            dailyRemaining: OTP_DAILY_LIMIT - newCount,
+            target: context.maskedTarget,
+            channel: 'whatsapp',
+        });
+    }
+
+    res.status(httpStatus.BAD_REQUEST).send({ message: 'Invalid type. Use "phone", "email", or "whatsapp"' });
 });
 
 const verifyOtp = catchAsync(async (req, res) => {
     const { type, identifier, otp } = req.body;
-    const normalizedIdentifier = type === 'email' ? String(identifier || '').toLowerCase().trim() : identifier;
 
-    if (!normalizedIdentifier || !otp) {
+    if (!identifier || !otp) {
         return res.status(httpStatus.BAD_REQUEST).send({ message: 'Identifier and OTP are required' });
     }
 
     if (type === 'phone') {
+        const normalizedIdentifier = normalizePhoneIdentifier(identifier);
         const isValid = await msg91Service.verifyOtp(normalizedIdentifier, otp);
         if (isValid) {
-            await User.updateOne({ phone: normalizedIdentifier }, { $set: { isPhoneVerified: true } });
+            await User.updateOne(resolvePhoneUserQuery(normalizedIdentifier), { $set: { isPhoneVerified: true } });
             res.send({ message: 'Phone verified successfully', verified: true });
         } else {
             res.status(httpStatus.BAD_REQUEST).send({ message: 'Invalid OTP', verified: false });
         }
-    } else if (type === 'email') {
+        return;
+    }
+
+    if (type === 'email') {
+        const normalizedIdentifier = normalizeEmailIdentifier(identifier);
         const storedOtp = await redisClient.get(`email_otp:${normalizedIdentifier}`);
         if (storedOtp === otp) {
-            await redisClient.del(`email_otp:${normalizedIdentifier}`); // Clear OTP
+            await redisClient.del(`email_otp:${normalizedIdentifier}`);
 
-            // If user already exists, mark it verified so login works immediately.
             await User.updateOne(
                 { email: normalizedIdentifier },
                 { $set: { isEmailVerified: true } }
             );
-            
-            // Generate Verification Token for Lead Creation
-            // Uses identifier (email) as subject
-            const verificationToken = tokenService.generateToken(normalizedIdentifier, Math.floor(Date.now() / 1000) + 900, 'EMAIL_VERIFICATION');
-            
-            res.send({ 
-                message: 'Email verified successfully', 
+
+            const verificationToken = tokenService.generateToken(
+                normalizedIdentifier,
+                Math.floor(Date.now() / 1000) + 900,
+                'EMAIL_VERIFICATION'
+            );
+
+            res.send({
+                message: 'Email verified successfully',
                 verified: true,
-                verificationToken: verificationToken 
+                verificationToken,
             });
         } else {
-            res.status(httpStatus.BAD_REQUEST).send({ message: 'Invalid or expired OTP', verified: false });
+            const storedWhatsappOtp = await redisClient.get(`whatsapp_otp:${normalizedIdentifier}`);
+            if (storedWhatsappOtp === otp) {
+                await redisClient.del(`whatsapp_otp:${normalizedIdentifier}`);
+
+                await User.updateOne(
+                    { email: normalizedIdentifier },
+                    { $set: { isEmailVerified: true, isPhoneVerified: true } }
+                );
+
+                const verificationToken = tokenService.generateToken(
+                    normalizedIdentifier,
+                    Math.floor(Date.now() / 1000) + 900,
+                    'EMAIL_VERIFICATION'
+                );
+
+                res.send({
+                    message: 'WhatsApp OTP verified successfully',
+                    verified: true,
+                    verificationToken,
+                    channel: 'whatsapp',
+                });
+            } else {
+                res.status(httpStatus.BAD_REQUEST).send({ message: 'Invalid or expired OTP', verified: false });
+            }
         }
-    } else {
-        res.status(httpStatus.BAD_REQUEST).send({ message: 'Invalid type' });
+        return;
     }
+
+    if (type === 'whatsapp') {
+        let context;
+        try {
+            context = await resolveWhatsappOtpContext(identifier);
+        } catch (error) {
+            return res.status(error.statusCode || httpStatus.BAD_REQUEST).send({ message: error.message, verified: false });
+        }
+
+        const storedOtp = await redisClient.get(`whatsapp_otp:${context.normalizedIdentifier}`);
+        if (storedOtp !== otp) {
+            return res.status(httpStatus.BAD_REQUEST).send({ message: 'Invalid or expired OTP', verified: false });
+        }
+
+        await redisClient.del(`whatsapp_otp:${context.normalizedIdentifier}`);
+
+        if (context.userQuery) {
+            await User.updateOne(
+                context.userQuery,
+                { $set: { isPhoneVerified: true, isEmailVerified: true } }
+            );
+        }
+
+        const verificationSubject = context.email || context.normalizedIdentifier;
+        const verificationToken = tokenService.generateToken(
+            verificationSubject,
+            Math.floor(Date.now() / 1000) + 900,
+            'EMAIL_VERIFICATION'
+        );
+
+        return res.send({
+            message: 'WhatsApp OTP verified successfully',
+            verified: true,
+            verificationToken,
+            target: context.maskedTarget,
+            channel: 'whatsapp',
+        });
+    }
+
+    res.status(httpStatus.BAD_REQUEST).send({ message: 'Invalid type', verified: false });
 });
 
 const login = catchAsync(async (req, res) => {

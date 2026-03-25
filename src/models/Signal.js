@@ -68,6 +68,23 @@ const signalSchema = new mongoose.Schema(
     notes: {
       type: String,
     },
+    highestAchievedTargetLevel: {
+      type: String,
+      enum: ['TP1', 'TP2', 'TP3'],
+      required: false,
+    },
+    highestAchievedTargetPrice: {
+      type: Number,
+      required: false,
+    },
+    lastInfoPrice: {
+      type: Number,
+      required: false,
+    },
+    lastInfoTime: {
+      type: Date,
+      required: false,
+    },
     attachments: [
       {
         type: String, // URL

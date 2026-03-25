@@ -219,7 +219,7 @@ const userSchema = new mongoose.Schema(
     },
     lastOtpChannel: {
       type: String,
-      enum: ['email', 'phone'],
+      enum: ['email', 'phone', 'whatsapp'],
     },
     lastOtpTarget: {
       type: String,

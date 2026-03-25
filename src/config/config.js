@@ -73,6 +73,8 @@ export default {
     jobBackoffMs: Number.parseInt(process.env.NOTIFICATION_JOB_BACKOFF_MS || '1000', 10),
     jobRetentionSeconds: Number.parseInt(process.env.NOTIFICATION_JOB_RETENTION_SECONDS || '3600', 10),
     settingsCacheMs: Number.parseInt(process.env.NOTIFICATION_SETTINGS_CACHE_MS || '15000', 10),
+    signalEmailEnabled:
+      String(process.env.NOTIFICATION_SIGNAL_EMAILS_ENABLED || '').trim().toLowerCase() === 'true',
   },
   whatsapp: {
     provider: process.env.WHATSAPP_PROVIDER || '',

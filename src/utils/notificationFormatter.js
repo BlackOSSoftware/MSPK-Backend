@@ -34,6 +34,9 @@ export const formatPointsLabel = (value) => {
   return parsed > 0 ? `+${absolute}` : `-${absolute}`;
 };
 
+const INLINE_TIMESTAMP_PATTERN =
+  /\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})\b/g;
+
 const humanizeTimeframe = (value) => {
   const raw = String(value || '').trim();
   if (!raw || raw === '-') return '';
@@ -75,6 +78,7 @@ export const resolveDisplayTimestamp = ({
   const primaryDate = parseTimestamp(primary);
   const fallbackDate = parseTimestamp(fallback);
   const floorDate = parseTimestamp(floor);
+  const timeframeMs = getTimeframeDurationMs(timeframe);
 
   const resolveFallback = () => {
     if (fallbackDate && floorDate && fallbackDate.getTime() < floorDate.getTime()) {
@@ -92,21 +96,38 @@ export const resolveDisplayTimestamp = ({
     return primaryDate;
   }
 
-  const timeframeMs = getTimeframeDurationMs(timeframe);
   const maxAllowedSkewMs = Math.min(
     Math.max(timeframeMs * 3, 30 * 60 * 1000),
     6 * 60 * 60 * 1000
   );
+  const candleCloseGraceMs = Math.min(
+    Math.max(Math.round(timeframeMs * 0.1), 90 * 1000),
+    3 * 60 * 1000
+  );
+  const primaryToFallbackLagMs = fallbackDate.getTime() - primaryDate.getTime();
 
   if (floorDate && primaryDate.getTime() < floorDate.getTime()) {
     return resolveFallback() || primaryDate;
   }
 
-  if (primaryDate.getTime() - fallbackDate.getTime() > maxAllowedSkewMs) {
-    return resolveFallback() || primaryDate;
+  // Some providers emit candle-start timestamps (for example 7:00 pm on a 5m
+  // signal) while the actual alert is generated near candle close (7:05 pm).
+  // When the persisted record time lands almost exactly one timeframe after the
+  // webhook time, show the actual alert time users saw in Telegram/WhatsApp.
+  if (
+    timeframeMs > 0 &&
+    primaryToFallbackLagMs > 0 &&
+    Math.abs(primaryToFallbackLagMs - timeframeMs) <= candleCloseGraceMs
+  ) {
+    return fallbackDate;
   }
 
-  if (fallbackDate.getTime() - primaryDate.getTime() > maxAllowedSkewMs) {
+  // Prefer the original webhook event time when it is plausible. Delayed webhook
+  // delivery is common in production, and falling back to createdAt/updatedAt
+  // makes users think the signal happened much later than it actually did.
+  // We only discard the primary timestamp when it appears unrealistically ahead
+  // of the persisted record time (clock skew / malformed future webhook time).
+  if (primaryDate.getTime() - fallbackDate.getTime() > maxAllowedSkewMs) {
     return resolveFallback() || primaryDate;
   }
 
@@ -124,10 +145,46 @@ const formatSignalTimestamp = (value) => {
   });
 };
 
+const formatInlineTimestamps = (value) =>
+  String(value || '').replace(INLINE_TIMESTAMP_PATTERN, (match) => formatSignalTimestamp(match) || match);
+
+const stripRedundantUpdateTime = (value, templateKey) => {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  if (!['SIGNAL_INFO', 'SIGNAL_PARTIAL_PROFIT', 'SIGNAL_UPDATE'].includes(templateKey)) {
+    return raw;
+  }
+
+  return raw.replace(
+    /\s+on\s+.+?(\.\s*Trade remains active\.)$/i,
+    '$1'
+  );
+};
+
 export const getSignalTemplateKey = (signal) =>
   String(signal?.subType || 'SIGNAL_NEW').trim().toUpperCase();
 
+const resolveNotificationEntryTimestamp = ({ templateKey, signalTime, createdAt, timeframe }) => {
+  const createdDate = parseTimestamp(createdAt);
+  const signalDate = parseTimestamp(signalTime);
+
+  if (
+    templateKey === 'SIGNAL_NEW' &&
+    createdDate &&
+    (!signalDate || createdDate.getTime() >= signalDate.getTime())
+  ) {
+    return createdDate;
+  }
+
+  return resolveDisplayTimestamp({
+    primary: signalTime,
+    fallback: createdAt,
+    timeframe,
+  });
+};
+
 export const buildSignalTemplateData = (signal = {}) => {
+  const templateKey = getSignalTemplateKey(signal);
   const normalizedTimeframe =
     normalizeSignalTimeframe(signal.timeframe) || String(signal.timeframe || '').trim();
   const timeframeLabel = normalizedTimeframe ? humanizeTimeframe(normalizedTimeframe) : '';
@@ -135,9 +192,10 @@ export const buildSignalTemplateData = (signal = {}) => {
     .trim()
     .toUpperCase();
   const isClosedSignal = isClosedSignalStatus(signal.status);
-  const resolvedSignalTime = resolveDisplayTimestamp({
-    primary: signal.signalTime,
-    fallback: signal.createdAt,
+  const resolvedSignalTime = resolveNotificationEntryTimestamp({
+    templateKey,
+    signalTime: signal.signalTime,
+    createdAt: signal.createdAt,
     timeframe: normalizedTimeframe,
   });
   const resolvedExitTime = isClosedSignal
@@ -150,9 +208,11 @@ export const buildSignalTemplateData = (signal = {}) => {
     : null;
   const signalTime = formatSignalTimestamp(resolvedSignalTime);
   const exitTime = formatSignalTimestamp(resolvedExitTime);
-  const eventTime = formatSignalTimestamp(
-    resolvedExitTime || resolvedSignalTime || signal.updatedAt || signal.createdAt
-  );
+  const eventTimestampSource =
+    templateKey === 'SIGNAL_INFO' || templateKey === 'SIGNAL_UPDATE' || templateKey === 'SIGNAL_PARTIAL_PROFIT'
+      ? signal.updatedAt || signal.lastInfoTime || signal.infoTime || signal.createdAt || resolvedSignalTime
+      : resolvedExitTime || resolvedSignalTime || signal.updatedAt || signal.createdAt;
+  const eventTime = formatSignalTimestamp(eventTimestampSource);
   const timeframeDisplay = normalizedTimeframe
     ? timeframeLabel && timeframeLabel !== normalizedTimeframe
       ? `${normalizedTimeframe} (${timeframeLabel})`
@@ -187,6 +247,7 @@ export const buildSignalTemplateData = (signal = {}) => {
 
   return {
     symbol: signal.symbol || '-',
+    segment: signal.segment || '-',
     timeframe: normalizedTimeframe || '-',
     timeframeLabel: timeframeDisplay,
     signalTime: signalTime || '-',
@@ -200,7 +261,10 @@ export const buildSignalTemplateData = (signal = {}) => {
     target2: formatNotificationNumber(target2),
     target3: formatNotificationNumber(target3),
     notes: signal.notes || '',
-    updateMessage: signal.updateMessage || signal.notes || signal.message || '',
+    updateMessage: stripRedundantUpdateTime(
+      formatInlineTimestamps(signal.updateMessage || signal.notes || signal.message || ''),
+      templateKey
+    ),
     targetLevel: normalizedTargetLevel || 'TP1',
     targetPrice: formatNotificationNumber(targetPrice),
     messageCode: signal.messageCode || '',
@@ -210,6 +274,148 @@ export const buildSignalTemplateData = (signal = {}) => {
     pointsLabel: formatPointsLabel(totalPoints),
     outcomeLabel: signal.status || signal.exitReason || '',
   };
+};
+
+const MESSAGE_DIVIDER = '━━━━━━━━━━━━━━━━━━';
+
+const compactMessage = (lines = []) =>
+  lines
+    .filter((line) => line !== null && line !== undefined)
+    .map((line) => String(line).replace(/[ \t]+$/g, ''))
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+
+const hasDisplayValue = (value) => {
+  const normalized = String(value ?? '').trim();
+  return normalized && normalized !== '-';
+};
+
+const buildSignalHeader = (badge, data) => [
+  `${badge} MSPK TRADE SOLUTIONS`,
+  '',
+  `📊 SYMBOL     : ${data.symbol}`,
+  `⏱ TIME FRAME : ${data.timeframeLabel}`,
+  MESSAGE_DIVIDER,
+];
+
+const buildTargetLines = (data) => [
+  '🎯 Targets',
+  `TP1            : ${data.target1}`,
+  `TP2            : ${data.target2}`,
+  `TP3            : ${data.target3}`,
+];
+
+export const buildSignalChannelMessage = (signal = {}) => {
+  const data = buildSignalTemplateData(signal);
+  const templateKey = getSignalTemplateKey(signal);
+  const signalType = String(data.type || 'BUY').trim().toUpperCase();
+  const targetLevel = String(data.targetLevel || 'TP1').trim().toUpperCase();
+  const statusLabel = String(data.outcomeLabel || signal.status || '').trim();
+  const updateMessage = String(data.updateMessage || '').trim();
+  const isSell = signalType === 'SELL';
+  const directionBadge = isSell ? '🔴' : '🟢';
+
+  if (templateKey === 'SIGNAL_NEW') {
+    return compactMessage([
+      ...buildSignalHeader(directionBadge, data),
+      isSell ? '📉 SELL SIGNAL' : '📈 BUY SIGNAL',
+      MESSAGE_DIVIDER,
+      `💹 Entry Price : ${data.entryPrice}`,
+      `🛑 Stop Loss   : ${data.stopLoss}`,
+      '',
+      ...buildTargetLines(data),
+      '',
+      `🕒 Entry Time  : ${data.entryTime}`,
+      `📌 Status      : ${statusLabel || 'Active'}`,
+      MESSAGE_DIVIDER,
+    ]);
+  }
+
+  if (templateKey === 'SIGNAL_TARGET') {
+    const heading = targetLevel === 'TP3' ? '✅ FINAL TARGET HIT' : `✅ ${targetLevel} HIT`;
+    return compactMessage([
+      ...buildSignalHeader(targetLevel === 'TP3' ? '🏆' : '🎯', data),
+      heading,
+      MESSAGE_DIVIDER,
+      `💹 Entry Price : ${data.entryPrice}`,
+      `🚪 Exit Price  : ${data.exitPrice}`,
+      `📊 Net Points  : ${data.pointsLabel}`,
+      '',
+      `🕒 Exit Time   : ${data.exitTime}`,
+      `📌 Status      : ${statusLabel || 'Closed'}`,
+      MESSAGE_DIVIDER,
+    ]);
+  }
+
+  if (templateKey === 'SIGNAL_PARTIAL_PROFIT') {
+    return compactMessage([
+      ...buildSignalHeader('🎯', data),
+      `✅ ${targetLevel} HIT`,
+      MESSAGE_DIVIDER,
+      `💹 Entry Price : ${data.entryPrice}`,
+      `🎯 Target Price: ${hasDisplayValue(data.targetPrice) ? data.targetPrice : data.exitPrice}`,
+      `📈 Current     : ${data.currentPrice}`,
+      `📊 Net Points  : ${data.pointsLabel}`,
+      hasDisplayValue(updateMessage) ? '' : null,
+      hasDisplayValue(updateMessage) ? `📍 Update      : ${updateMessage}` : null,
+      '',
+      `🕒 Update Time : ${data.eventTime}`,
+      `📌 Status      : ${statusLabel || 'Running'}`,
+      MESSAGE_DIVIDER,
+    ]);
+  }
+
+  if (templateKey === 'SIGNAL_STOPLOSS') {
+    return compactMessage([
+      ...buildSignalHeader('⚠️', data),
+      '❌ STOP LOSS HIT',
+      MESSAGE_DIVIDER,
+      `💹 Entry Price : ${data.entryPrice}`,
+      `🛑 Stop Loss   : ${data.stopLoss}`,
+      `🚪 Exit Price  : ${data.exitPrice}`,
+      `📊 Net Points  : ${data.pointsLabel}`,
+      '',
+      `🕒 Exit Time   : ${data.exitTime}`,
+      `📌 Status      : ${statusLabel || 'Closed'}`,
+      MESSAGE_DIVIDER,
+    ]);
+  }
+
+  if (templateKey === 'SIGNAL_INFO') {
+    return compactMessage([
+      ...buildSignalHeader('🔄', data),
+      targetLevel.startsWith('TP') ? `🔔 ${targetLevel} UPDATE` : '🔔 SIGNAL UPDATE',
+      MESSAGE_DIVIDER,
+      `💹 Entry Price : ${data.entryPrice}`,
+      `📈 Current     : ${data.currentPrice}`,
+      hasDisplayValue(data.targetPrice) ? `🎯 Target Price: ${data.targetPrice}` : null,
+      hasDisplayValue(data.pointsLabel) ? `📊 Net Points  : ${data.pointsLabel}` : null,
+      '',
+      ...buildTargetLines(data),
+      hasDisplayValue(updateMessage) ? '' : null,
+      hasDisplayValue(updateMessage) ? `📍 Update      : ${updateMessage}` : null,
+      '',
+      `🕒 Update Time : ${data.eventTime}`,
+      `📌 Status      : ${statusLabel || 'Active'}`,
+      MESSAGE_DIVIDER,
+    ]);
+  }
+
+  const isClosedUpdate = isClosedSignalStatus(statusLabel) || statusLabel.toLowerCase() === 'closed';
+  return compactMessage([
+    ...buildSignalHeader(isClosedUpdate ? '📘' : '🔄', data),
+    isClosedUpdate ? '✅ TRADE CLOSED' : '🔔 SIGNAL UPDATE',
+    MESSAGE_DIVIDER,
+    `💹 Entry Price : ${data.entryPrice}`,
+    hasDisplayValue(data.currentPrice) ? `📈 Current     : ${data.currentPrice}` : null,
+    hasDisplayValue(data.exitPrice) ? `🚪 Exit Price  : ${data.exitPrice}` : null,
+    hasDisplayValue(updateMessage) ? `📍 Update      : ${updateMessage}` : null,
+    '',
+    `🕒 Update Time : ${data.eventTime}`,
+    `📌 Status      : ${statusLabel || (isClosedUpdate ? 'Closed' : 'Active')}`,
+    MESSAGE_DIVIDER,
+  ]);
 };
 
 const ensureSignalSummaryPlaceholders = (templateKey, template) => {

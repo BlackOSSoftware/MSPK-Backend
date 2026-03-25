@@ -3,17 +3,30 @@ import MasterSymbol from '../models/MasterSymbol.js';
 import announcementService from './announcement.service.js';
 import logger from '../config/log.js';
 import { broadcastToRoles } from './websocket.service.js';
+import marketDataService from './marketData.service.js';
 import { getSignalAudienceGroups } from '../utils/signalRouting.js';
 import { resolveSymbolSegmentGroup } from '../utils/marketSegmentResolver.js';
 import { normalizeSignalTimeframe } from '../utils/timeframe.js';
 import { resolveBestMasterSymbol } from '../utils/masterSymbolResolver.js';
 import { normalizeSignalTimestampInput } from '../utils/signalTimestamp.js';
+import {
+  addIndiaDays,
+  getEndOfIndiaDay,
+  getStartOfIndiaDay,
+  getStartOfIndiaMonth,
+  getStartOfIndiaWeek,
+} from '../utils/indiaTime.js';
 
 const CLOSED_SIGNAL_STATUSES = ['Closed', 'Target Hit', 'Partial Profit Book', 'Stoploss Hit'];
 const OPEN_SIGNAL_STATUSES = ['Active', 'Open', 'Paused'];
 const SIGNAL_DERIVED_DATES = {
   timezone: 'Asia/Kolkata',
 };
+const TARGET_LEVEL_SEQUENCE = ['TP1', 'TP2', 'TP3'];
+const TARGET_LEVEL_RANK = TARGET_LEVEL_SEQUENCE.reduce((accumulator, level, index) => {
+  accumulator[level] = index + 1;
+  return accumulator;
+}, {});
 
 const runDetached = (label, task) => {
   setImmediate(async () => {
@@ -55,6 +68,131 @@ const toFiniteNumber = (value) => {
 };
 
 const roundSignalValue = (value) => Math.round(value * 100) / 100;
+const getSignalDirection = (signal) => String(signal?.type || 'BUY').trim().toUpperCase();
+const isSellSignal = (signal) => getSignalDirection(signal) === 'SELL';
+const normalizeSignalTargetLevel = (value) => {
+  const normalized = String(value || '').trim().toUpperCase();
+  return TARGET_LEVEL_RANK[normalized] ? normalized : null;
+};
+
+const getHigherSignalTargetLevel = (left, right) => {
+  const normalizedLeft = normalizeSignalTargetLevel(left);
+  const normalizedRight = normalizeSignalTargetLevel(right);
+
+  if (!normalizedLeft) return normalizedRight;
+  if (!normalizedRight) return normalizedLeft;
+
+  return TARGET_LEVEL_RANK[normalizedRight] > TARGET_LEVEL_RANK[normalizedLeft]
+    ? normalizedRight
+    : normalizedLeft;
+};
+
+const getSignalTargets = (signal) => {
+  const target1 = toFiniteNumber(signal?.targets?.target1);
+  const target2 = toFiniteNumber(signal?.targets?.target2);
+  const target3 = toFiniteNumber(signal?.targets?.target3);
+
+  return [
+    typeof target1 === 'number' ? { level: 'TP1', price: target1 } : null,
+    typeof target2 === 'number' ? { level: 'TP2', price: target2 } : null,
+    typeof target3 === 'number' ? { level: 'TP3', price: target3 } : null,
+  ].filter(Boolean);
+};
+
+const getFinalSignalTarget = (signal) => {
+  const targets = getSignalTargets(signal);
+  return targets.length > 0 ? targets[targets.length - 1] : null;
+};
+
+const isSignalPriceReached = ({ signal, thresholdPrice, marketPrice }) => {
+  const threshold = toFiniteNumber(thresholdPrice);
+  const price = toFiniteNumber(marketPrice);
+  if (typeof threshold !== 'number' || typeof price !== 'number') return false;
+
+  const roundedThreshold = roundSignalValue(threshold);
+  const roundedPrice = roundSignalValue(price);
+  return isSellSignal(signal) ? roundedPrice <= roundedThreshold : roundedPrice >= roundedThreshold;
+};
+
+const getSignalHighestAchievedTargetLevel = (signal, marketPrice) => {
+  const targets = getSignalTargets(signal);
+  if (targets.length === 0) return null;
+
+  let highestLevel = null;
+  targets.forEach((target) => {
+    if (isSignalPriceReached({ signal, thresholdPrice: target.price, marketPrice })) {
+      highestLevel = target.level;
+    }
+  });
+
+  return highestLevel;
+};
+
+const hasSignalReachedStopLoss = (signal, marketPrice) => {
+  const stopLoss = toFiniteNumber(signal?.stopLoss);
+  return isSignalPriceReached({
+    signal: { ...signal, type: isSellSignal(signal) ? 'BUY' : 'SELL' },
+    thresholdPrice: stopLoss,
+    marketPrice,
+  });
+};
+
+const resolveOutcomeTargetLevel = (signal, priceCandidate) =>
+  getSignalHighestAchievedTargetLevel(signal, priceCandidate) || getFinalSignalTarget(signal)?.level || 'TP1';
+
+const buildAutoSignalSettlement = (signal, marketPrice, options = {}) => {
+  const currentStatus = String(signal?.status || '').trim();
+  if (!OPEN_SIGNAL_STATUSES.includes(currentStatus)) return null;
+
+  const resolvedPrice = toFiniteNumber(marketPrice);
+  if (typeof resolvedPrice !== 'number' || resolvedPrice <= 0) return null;
+
+  const occurredAt = normalizeSignalTimestampInput(options.occurredAt) || new Date();
+  const finalTarget = getFinalSignalTarget(signal);
+  const highestTargetLevel = getSignalHighestAchievedTargetLevel(signal, resolvedPrice);
+
+  if (hasSignalReachedStopLoss(signal, resolvedPrice)) {
+    const stopLoss = toFiniteNumber(signal?.stopLoss);
+    if (typeof stopLoss !== 'number') return null;
+
+    return {
+      status: 'Stoploss Hit',
+      exitPrice: stopLoss,
+      exitReason: options.exitReason || 'AUTO_STOPLOSS_REACHED',
+      exitTime: occurredAt,
+      ...(options.notes !== undefined ? { notes: options.notes } : {}),
+      notificationMeta: {
+        subType: 'SIGNAL_STOPLOSS',
+        data: {
+          currentPrice: resolvedPrice,
+          updateMessage:
+            options.updateMessage || `Auto-closed after live price reached stop loss on ${signal.symbol}.`,
+        },
+      },
+    };
+  }
+
+  if (finalTarget && highestTargetLevel === finalTarget.level) {
+    return {
+      status: 'Target Hit',
+      exitPrice: finalTarget.price,
+      exitReason: options.exitReason || `AUTO_TARGET_REACHED_${finalTarget.level}`,
+      exitTime: occurredAt,
+      ...(options.notes !== undefined ? { notes: options.notes } : {}),
+      notificationMeta: {
+        subType: 'SIGNAL_TARGET',
+        data: {
+          targetLevel: finalTarget.level,
+          currentPrice: resolvedPrice,
+          updateMessage:
+            options.updateMessage || `Auto-closed after live price reached ${finalTarget.level} on ${signal.symbol}.`,
+        },
+      },
+    };
+  }
+
+  return null;
+};
 
 const getResolvedSignalExitPrice = (signal) => {
   const exitPrice = toFiniteNumber(signal?.exitPrice);
@@ -112,9 +250,9 @@ const resolveExitPriceFromStatus = (signal, nextStatus) => {
 
   if (status.includes('stop') && typeof stopLoss === 'number') return stopLoss;
   if (status.includes('target')) {
-    if (typeof t1 === 'number') return t1;
-    if (typeof t2 === 'number') return t2;
     if (typeof t3 === 'number') return t3;
+    if (typeof t2 === 'number') return t2;
+    if (typeof t1 === 'number') return t1;
   }
   if (status.includes('partial')) {
     if (typeof t2 === 'number') return t2;
@@ -146,22 +284,24 @@ const inferSignalStatusFromExitPrice = (signal, exitPrice) => {
   const resolvedExitPrice = toFiniteNumber(exitPrice);
   const entryPrice = toFiniteNumber(signal?.entryPrice);
   const stopLoss = toFiniteNumber(signal?.stopLoss);
-  const target1 = toFiniteNumber(signal?.targets?.target1);
+  const highestTargetLevel = getSignalHighestAchievedTargetLevel(signal, resolvedExitPrice);
+  const finalTargetLevel = getFinalSignalTarget(signal)?.level || null;
 
   if (typeof resolvedExitPrice !== 'number' || typeof entryPrice !== 'number') {
     return 'Closed';
   }
 
-  const isSell = String(signal?.type || '').trim().toUpperCase() === 'SELL';
-
-  if (typeof target1 === 'number') {
-    const targetReached = isSell ? resolvedExitPrice <= target1 : resolvedExitPrice >= target1;
-    if (targetReached) return 'Target Hit';
+  if (highestTargetLevel && finalTargetLevel && highestTargetLevel === finalTargetLevel) {
+    return 'Target Hit';
   }
 
   if (typeof stopLoss === 'number') {
-    const stopReached = isSell ? resolvedExitPrice >= stopLoss : resolvedExitPrice <= stopLoss;
+    const stopReached = hasSignalReachedStopLoss(signal, resolvedExitPrice);
     if (stopReached) return 'Stoploss Hit';
+  }
+
+  if (highestTargetLevel) {
+    return 'Partial Profit Book';
   }
 
   const resolvedPoints = resolveTotalPoints(signal, resolvedExitPrice);
@@ -231,21 +371,31 @@ const scheduleUpdateSideEffects = (signal, updateBody, signalId, notificationMet
       const { redisClient } = await import('./redis.service.js');
       let subType = null;
       const notificationData = { ...signal.toJSON() };
+      const resolvedOutcomeTargetLevel = resolveOutcomeTargetLevel(
+        signal,
+        notificationMeta?.data?.currentPrice ?? notificationData.exitPrice ?? signal.exitPrice
+      );
 
       if (notificationMeta?.subType) {
         subType = notificationMeta.subType;
         Object.assign(notificationData, notificationMeta.data || {});
+        if (subType === 'SIGNAL_TARGET' && !notificationData.targetLevel) {
+          notificationData.targetLevel = resolvedOutcomeTargetLevel;
+        }
         if (!notificationData.updateMessage && updateBody.notes) {
           notificationData.updateMessage = updateBody.notes;
         }
       } else if (updateBody.status === 'Target Hit') {
         subType = 'SIGNAL_TARGET';
-        notificationData.targetLevel = 'TP1';
+        notificationData.targetLevel = resolvedOutcomeTargetLevel;
+        notificationData.currentPrice = signal.exitPrice ?? signal.entryPrice;
       } else if (updateBody.status === 'Partial Profit Book') {
         subType = 'SIGNAL_PARTIAL_PROFIT';
+        notificationData.targetLevel = resolvedOutcomeTargetLevel;
         notificationData.currentPrice = signal.exitPrice ?? signal.entryPrice;
       } else if (updateBody.status === 'Stoploss Hit') {
         subType = 'SIGNAL_STOPLOSS';
+        notificationData.currentPrice = signal.exitPrice ?? signal.stopLoss ?? signal.entryPrice;
       } else if (updateBody.notes || updateBody.status) {
         subType = 'SIGNAL_UPDATE';
         notificationData.updateMessage = updateBody.notes || `Status changed to ${updateBody.status}`;
@@ -303,7 +453,7 @@ const hydrateSignalSegment = async (signalBody = {}) => {
   return signalBody;
 };
 
-setInterval(() => {
+const signalCreationGuardCleanupTimer = setInterval(() => {
   const now = Date.now();
   const fiveMinutesAgo = now - 5 * 60 * 1000;
   for (const [key, timestamp] of signalCreationGuard.entries()) {
@@ -312,6 +462,10 @@ setInterval(() => {
     }
   }
 }, 5 * 60 * 1000);
+
+if (typeof signalCreationGuardCleanupTimer.unref === 'function') {
+  signalCreationGuardCleanupTimer.unref();
+}
 
 const createSignal = async (signalBody, user) => {
   if (signalBody.timeframe !== undefined) {
@@ -556,19 +710,11 @@ const getSignalStats = async (filter = {}) => {
 
 const getSignalPeriodStats = async (filter = {}) => {
   const now = new Date();
-  const startOfToday = new Date(now);
-  startOfToday.setHours(0, 0, 0, 0);
-
-  const startOfWeek = new Date(startOfToday);
-  const day = startOfWeek.getDay();
-  const diff = startOfWeek.getDate() - day + (day === 0 ? -6 : 1);
-  startOfWeek.setDate(diff);
-
-  const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-  const startOfTomorrow = new Date(startOfToday);
-  startOfTomorrow.setDate(startOfTomorrow.getDate() + 1);
-  const endOfTomorrow = new Date(startOfTomorrow);
-  endOfTomorrow.setHours(23, 59, 59, 999);
+  const startOfToday = getStartOfIndiaDay(now);
+  const startOfWeek = getStartOfIndiaWeek(now);
+  const startOfMonth = getStartOfIndiaMonth(now);
+  const startOfTomorrow = addIndiaDays(startOfToday, 1);
+  const endOfTomorrow = getEndOfIndiaDay(startOfTomorrow);
 
   const pipeline = [
     ...buildSignalDedupStages(filter),
@@ -883,6 +1029,89 @@ const settleOppositeActiveSignalsForEntry = async ({
   return settledSignals;
 };
 
+const reconcileSignalWithMarketPrice = async (signalOrId, marketPrice, options = {}) => {
+  const signal =
+    signalOrId && typeof signalOrId === 'object' && signalOrId._id
+      ? signalOrId
+      : await Signal.findById(signalOrId);
+
+  if (!signal) return null;
+
+  const settlementUpdate = buildAutoSignalSettlement(signal, marketPrice, options);
+  if (!settlementUpdate) return null;
+
+  return updateSignalById(signal.id, {
+    ...settlementUpdate,
+    skipSideEffects: options.skipSideEffects ?? false,
+  });
+};
+
+const reconcileActiveSignalsWithMarketData = async (options = {}) => {
+  const {
+    signalIds = null,
+    limit = 0,
+    skipSideEffects = false,
+    fetchLatestQuotes = true,
+  } = options;
+
+  const filter = {
+    status: { $in: OPEN_SIGNAL_STATUSES },
+  };
+
+  if (Array.isArray(signalIds) && signalIds.length > 0) {
+    filter._id = { $in: signalIds };
+  }
+
+  let query = Signal.find(filter).sort({ signalTime: -1, createdAt: -1, _id: -1 });
+  if (Number.isFinite(limit) && limit > 0) {
+    query = query.limit(limit);
+  }
+
+  const signals = await query;
+  if (signals.length === 0) {
+    return { scannedCount: 0, closedCount: 0, updatedSignals: [] };
+  }
+
+  const uniqueSymbols = Array.from(
+    new Set(
+      signals
+        .map((signal) => String(signal?.symbol || '').trim())
+        .filter(Boolean)
+    )
+  );
+
+  if (fetchLatestQuotes && uniqueSymbols.length > 0) {
+    try {
+      await marketDataService.fetchQuoteBySymbols(uniqueSymbols);
+    } catch (error) {
+      logger.warn(`Failed fetching live quotes for active signal reconciliation: ${error.message}`);
+    }
+  }
+
+  const updatedSignals = [];
+
+  for (const signal of signals) {
+    const livePrice = toFiniteNumber(marketDataService.getBestLivePrice(signal.symbol, null, 0));
+    if (typeof livePrice !== 'number' || livePrice <= 0) continue;
+
+    const updated = await reconcileSignalWithMarketPrice(signal, livePrice, {
+      occurredAt: new Date(),
+      skipSideEffects,
+      updateMessage: `Auto-reconciled from live market price ${roundSignalValue(livePrice)}.`,
+    });
+
+    if (updated) {
+      updatedSignals.push(updated);
+    }
+  }
+
+  return {
+    scannedCount: signals.length,
+    closedCount: updatedSignals.length,
+    updatedSignals,
+  };
+};
+
 const deleteSignalById = async (signalId) => {
   const signal = await Signal.findById(signalId);
   if (!signal) {
@@ -901,5 +1130,20 @@ export default {
   getSignalReport,
   updateSignalById,
   settleOppositeActiveSignalsForEntry,
+  buildAutoSignalSettlement,
+  getFinalSignalTarget,
+  getSignalHighestAchievedTargetLevel,
+  hasSignalReachedStopLoss,
+  reconcileSignalWithMarketPrice,
+  reconcileActiveSignalsWithMarketData,
   deleteSignalById,
+};
+
+export {
+  buildAutoSignalSettlement,
+  getFinalSignalTarget,
+  getSignalHighestAchievedTargetLevel,
+  hasSignalReachedStopLoss,
+  reconcileActiveSignalsWithMarketData,
+  reconcileSignalWithMarketPrice,
 };

@@ -21,12 +21,14 @@ import {
   getSignalTemplateKey,
   renderNotificationTemplate,
 } from '../utils/notificationFormatter.js';
+import { getLegacyPlanAudienceGroups } from '../utils/legacyPlanAccess.js';
 import {
   buildSelectedSymbolDocsMap,
   getUserSignalSelectedSymbols,
   hasSelectedSignalSymbol,
 } from '../utils/userSignalSelection.js';
 import { derivePlanPermissions } from '../utils/planPermissions.js';
+import { getPlanStatusFromPlanData, hasSignalAccessByPlan } from '../utils/signalAccess.js';
 import { sendToUser } from './websocket.service.js';
 import { isFirebaseAvailable } from '../config/firebase.js';
 
@@ -140,28 +142,6 @@ const addJobsInBatches = async (jobs, batchSize = 200) => {
   }
 
   return { added, skipped, failed, failureSamples };
-};
-
-const mapLegacyPlanToAudienceGroups = (planName = '') => {
-  const normalized = String(planName || '').trim().toUpperCase();
-  if (!normalized || normalized === 'FREE') return [];
-
-  const groups = new Set();
-  if (normalized.includes('ALL') || normalized.includes('PREMIUM') || normalized.includes('PRO')) {
-    groups.add('ALL');
-  }
-  if (normalized.includes('EQUITY') || normalized.includes('NSE')) groups.add('EQUITY');
-  if (normalized.includes('OPTION') || normalized.includes('FNO')) groups.add('FNO');
-  if (normalized.includes('COMMODITY') || normalized.includes('MCX')) groups.add('COMMODITY');
-  if (normalized.includes('FOREX') || normalized.includes('CURRENCY')) groups.add('CURRENCY');
-  if (normalized.includes('CRYPTO')) groups.add('CRYPTO');
-
-  if (groups.size === 0) {
-    // Legacy plan names often imply full access (ex: "Premium"). Be permissive here.
-    groups.add('ALL');
-  }
-
-  return Array.from(groups);
 };
 
 const derivePlanSegments = (plan, authService) => {
@@ -316,12 +296,14 @@ class NotificationService {
               end_date: { $gt: now }
           }).select('user_id segments');
           const signalAudienceGroups = getSignalAudienceGroups(signal);
+          const activeManagedUserIds = new Set();
 
           // Filter for segment match
           const candidateUserIds = new Set();
           
           activeSubs.forEach(sub => {
               if (sub.plan && sub.user) {
+                  activeManagedUserIds.add(sub.user.toString());
                   const planSegmentGroups = derivePlanSegments(sub.plan, authService);
 
                   if (
@@ -335,6 +317,7 @@ class NotificationService {
 
           activeSegmentSubs.forEach((sub) => {
               if (!sub.user_id) return;
+              activeManagedUserIds.add(sub.user_id.toString());
               const subscriptionGroups = mapUserSubscriptionSegmentsToAudienceGroups(sub.segments);
               if (
                   signalAudienceGroups.length === 0 ||
@@ -357,13 +340,15 @@ class NotificationService {
 
           legacyUsers.forEach((legacyUser) => {
               if (!legacyUser?._id) return;
-              const legacyGroups = mapLegacyPlanToAudienceGroups(legacyUser.subscription?.plan);
+              const legacyUserId = legacyUser._id.toString();
+              if (activeManagedUserIds.has(legacyUserId)) return;
+              const legacyGroups = getLegacyPlanAudienceGroups(legacyUser.subscription?.plan);
               if (legacyGroups.length === 0) return;
               if (
                   signalAudienceGroups.length === 0 ||
                   hasAudienceOverlap(legacyGroups, signalAudienceGroups)
               ) {
-                  candidateUserIds.add(legacyUser._id.toString());
+                  candidateUserIds.add(legacyUserId);
               }
           });
 
@@ -392,15 +377,47 @@ class NotificationService {
               : [];
           const selectedSymbolDocsMap = buildSelectedSymbolDocsMap(selectedSymbolDocs);
 
+          const planStateEntries = await Promise.all(
+              users.map(async (user) => {
+                  const userId = user?._id?.toString() || '';
+
+                  if (!userId || user?.role !== 'user') {
+                      return [
+                          userId,
+                          {
+                              planStatus: 'active',
+                              hasPlanAccess: true,
+                          },
+                      ];
+                  }
+
+                  const planData = await authService.getUserActivePlan(user);
+                  return [
+                      userId,
+                      {
+                          planStatus: getPlanStatusFromPlanData(planData),
+                          hasPlanAccess: hasSignalAccessByPlan(signal, planData),
+                      },
+                  ];
+              })
+          );
+          const planStateByUser = new Map(planStateEntries);
+
           const selectionStateByUser = new Map();
           users.forEach((user) => {
               const userId = user?._id?.toString() || '';
               const selectedSymbols = getUserSignalSelectedSymbols(user, selectedSymbolDocsMap);
               const hasSymbol = hasSelectedSignalSymbol(selectedSymbols, signal.symbol);
+              const planState = planStateByUser.get(userId) || {
+                  planStatus: 'expired',
+                  hasPlanAccess: Boolean(signal?.isFree),
+              };
               selectionStateByUser.set(userId, {
                   userId,
                   selectedCount: selectedSymbols.length,
                   hasSymbol,
+                  hasPlanAccess: planState.hasPlanAccess,
+                  planStatus: planState.planStatus,
                   isWhatsAppEnabled: user?.isWhatsAppEnabled !== false,
                   hasPhone: Boolean(user?.phoneNumber || user?.phone),
                   isNotificationsEnabled: user?.isNotificationEnabled !== false,
@@ -421,6 +438,9 @@ class NotificationService {
                   if (!state?.hasSymbol) {
                       return false;
                   }
+                  if (!state?.hasPlanAccess) {
+                      return false;
+                  }
               }
 
               // Manage Scripts selection is explicit; don't block by preferred segments.
@@ -431,11 +451,13 @@ class NotificationService {
 
           if (eligibleUsers.length === 0 && !debugBroadcastAll) {
               const selectionFailures = Array.from(selectionStateByUser.values())
-                  .filter((entry) => !entry.hasSymbol)
+                  .filter((entry) => !entry.hasSymbol || !entry.hasPlanAccess)
                   .slice(0, 6)
                   .map((entry) => ({
                       userId: entry.userId,
                       selectedCount: entry.selectedCount,
+                      planStatus: entry.planStatus,
+                      hasPlanAccess: entry.hasPlanAccess,
                       hasPhone: entry.hasPhone,
                       isWhatsAppEnabled: entry.isWhatsAppEnabled,
                   }));
@@ -524,7 +546,7 @@ class NotificationService {
                   });
               }
 
-              if (user.email) {
+              if (config.notifications.signalEmailEnabled && user.isEmailAlertEnabled !== false && user.email) {
                   jobs.push({
                       name: 'send-email-signal',
                       data: { type: 'email', userId, email: user.email, signal },
@@ -1002,6 +1024,240 @@ class NotificationService {
 
       } catch (error) {
           logger.error(`Failed to send expiry notification for user ${user._id}`, error);
+      }
+  }
+
+  buildIndiaDateKey(date = new Date()) {
+      const parts = new Intl.DateTimeFormat('en-CA', {
+          timeZone: 'Asia/Kolkata',
+          year: 'numeric',
+          month: '2-digit',
+          day: '2-digit',
+      }).formatToParts(date);
+
+      const values = Object.fromEntries(
+          parts
+              .filter((part) => part.type !== 'literal')
+              .map((part) => [part.type, part.value])
+      );
+
+      return `${values.year}-${values.month}-${values.day}`;
+  }
+
+  formatIndiaDateLabel(dateKey) {
+      const parsed = new Date(`${dateKey}T00:00:00+05:30`);
+      return new Intl.DateTimeFormat('en-IN', {
+          dateStyle: 'medium',
+          timeZone: 'Asia/Kolkata',
+      }).format(parsed);
+  }
+
+  formatIndiaTimeLabel(value) {
+      const parsed = value instanceof Date ? value : new Date(value);
+      if (Number.isNaN(parsed.getTime())) return '--:--';
+
+      return new Intl.DateTimeFormat('en-IN', {
+          hour: '2-digit',
+          minute: '2-digit',
+          hour12: false,
+          timeZone: 'Asia/Kolkata',
+      }).format(parsed);
+  }
+
+  async getEconomicAudienceUsers(targetUserIds = []) {
+      if (Array.isArray(targetUserIds) && targetUserIds.length > 0) {
+          return User.find({
+              _id: { $in: targetUserIds },
+              status: 'Active',
+          }).select('_id name email').lean();
+      }
+
+      const { default: Subscription } = await import('../models/Subscription.js');
+      const now = new Date();
+      const activeSubs = await Subscription.find({
+          status: 'active',
+          endDate: { $gt: now },
+      }).select('user').lean();
+
+      if (activeSubs.length === 0) {
+          return [];
+      }
+
+      const userIds = [...new Set(activeSubs.map((subscription) => String(subscription.user)))];
+
+      return User.find({
+          _id: { $in: userIds },
+          status: 'Active',
+      }).select('_id name email').lean();
+  }
+
+  buildDailyEconomicSummaryPayload(events = [], { dateKey, isTest = false } = {}) {
+      const dateLabel = this.formatIndiaDateLabel(dateKey || this.buildIndiaDateKey(new Date()));
+      const normalizedEvents = Array.isArray(events)
+          ? events
+              .filter(Boolean)
+              .sort((left, right) => new Date(left.date).getTime() - new Date(right.date).getTime())
+          : [];
+
+      const title = `${isTest ? 'Test | ' : ''}Today's High Impact Economic Calendar`;
+
+      if (normalizedEvents.length === 0) {
+          return {
+              title,
+              message: `Date: ${dateLabel}\nNo high-impact economic events are scheduled for today.`,
+              notificationData: {
+                  summaryType: isTest ? 'ECONOMIC_SUMMARY_TEST' : 'ECONOMIC_SUMMARY',
+                  dateKey,
+                  eventsCount: 0,
+                  impact: 'High',
+                  events: [],
+              },
+          };
+      }
+
+      const MAX_LINES = 8;
+      const visibleEvents = normalizedEvents.slice(0, MAX_LINES);
+      const extraCount = Math.max(normalizedEvents.length - visibleEvents.length, 0);
+      const lines = visibleEvents.map((event, index) => {
+          const timeLabel = this.formatIndiaTimeLabel(event.date);
+          const currency = String(event.currency || event.country || 'NA').trim();
+          const eventName = String(event.event || 'Event').trim();
+          const forecast = String(event.forecast || 'N/A').trim();
+          const previous = String(event.previous || 'N/A').trim();
+          return `${index + 1}. ${timeLabel} IST | ${currency} | ${eventName} | F:${forecast} | P:${previous}`;
+      });
+
+      if (extraCount > 0) {
+          lines.push(`+${extraCount} more high-impact events today.`);
+      }
+
+      lines.push('Plan your risk around these timings.');
+
+      return {
+          title,
+          message: `Date: ${dateLabel}\n${lines.join('\n')}`,
+          notificationData: {
+              summaryType: isTest ? 'ECONOMIC_SUMMARY_TEST' : 'ECONOMIC_SUMMARY',
+              dateKey,
+              eventsCount: normalizedEvents.length,
+              impact: 'High',
+              events: visibleEvents.map((event) => ({
+                  event: event.event,
+                  currency: event.currency,
+                  country: event.country,
+                  impact: event.impact,
+                  date: event.date,
+                  forecast: event.forecast || 'N/A',
+                  previous: event.previous || 'N/A',
+                  actual: event.actual || 'N/A',
+              })),
+              extraCount,
+          },
+      };
+  }
+
+  async sendDailyEconomicSummary({ date = new Date(), userIds = [], isTest = false } = {}) {
+      try {
+          const { economicService } = await import('./economic.service.js');
+          const { default: announcementService } = await import('./announcement.service.js');
+
+          const dateKey = this.buildIndiaDateKey(date);
+          await economicService.fetchAndStoreEvents(dateKey, dateKey);
+
+          const response = await economicService.getEvents(
+              { from: dateKey, to: dateKey, impact: 'High' },
+              { page: 1, limit: 20 }
+          );
+          const events = Array.isArray(response?.results) ? response.results : [];
+          const recipients = await this.getEconomicAudienceUsers(userIds);
+
+          if (recipients.length === 0) {
+              logger.warn(`No recipients found for daily economic summary (${dateKey})`);
+              return {
+                  sentCount: 0,
+                  eventsCount: events.length,
+                  title: '',
+                  message: '',
+              };
+          }
+
+          const { title, message, notificationData } = this.buildDailyEconomicSummaryPayload(events, {
+              dateKey,
+              isTest,
+          });
+
+          if (!isTest) {
+              await announcementService.createAnnouncement({
+                  title,
+                  message,
+                  type: 'ECONOMIC',
+                  priority: events.length > 0 ? 'HIGH' : 'NORMAL',
+                  targetAudience: { role: 'all' },
+                  isActive: true,
+                  startDate: new Date(),
+                  isNotificationSent: true,
+              });
+          }
+
+          const PUSH_BATCH_SIZE = 200;
+          for (let index = 0; index < recipients.length; index += PUSH_BATCH_SIZE) {
+              const batch = recipients.slice(index, index + PUSH_BATCH_SIZE);
+              const jobs = batch.map((user) =>
+                  notificationQueue.add(
+                      'send-push',
+                      {
+                          type: 'push',
+                          userId: user._id,
+                          notification: {
+                              title,
+                              message,
+                              type: 'ECONOMIC_ALERT',
+                              data: notificationData,
+                              link: '/announcements/calendar',
+                          },
+                      },
+                      {
+                          removeOnComplete: true,
+                          jobId: `eco_summary_${hashKey(`${dateKey}|${isTest ? 'test' : 'daily'}|${user._id}`)}`,
+                      }
+                  )
+              );
+
+              await Promise.allSettled(jobs);
+              await yieldToEventLoop();
+          }
+
+          const notificationDocs = recipients.map((user) => ({
+              user: user._id,
+              title,
+              message,
+              type: 'ECONOMIC_ALERT',
+              data: notificationData,
+              link: '/announcements/calendar',
+          }));
+
+          const createdNotifications =
+              notificationDocs.length > 0
+                  ? await Notification.insertMany(notificationDocs, { ordered: false })
+                  : [];
+
+          if (createdNotifications.length > 0) {
+              emitRealtimeNotifications(createdNotifications);
+          }
+
+          logger.info(
+              `Daily economic summary sent to ${recipients.length} users for ${dateKey} (${isTest ? 'test' : 'daily'})`
+          );
+
+          return {
+              sentCount: recipients.length,
+              eventsCount: events.length,
+              title,
+              message,
+          };
+      } catch (error) {
+          logger.error('Failed to send daily economic summary:', error);
+          throw error;
       }
   }
 

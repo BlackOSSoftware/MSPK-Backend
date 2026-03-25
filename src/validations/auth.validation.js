@@ -70,14 +70,14 @@ const updateProfile = {
 
 const sendOtp = {
     body: Joi.object().keys({
-        type: Joi.string().required().valid('phone', 'email'),
+        type: Joi.string().required().valid('phone', 'email', 'whatsapp'),
         identifier: Joi.string().required(),
     }),
 };
 
 const verifyOtp = {
     body: Joi.object().keys({
-        type: Joi.string().required().valid('phone', 'email'),
+        type: Joi.string().required().valid('phone', 'email', 'whatsapp'),
         identifier: Joi.string().required(),
         otp: Joi.string().required().min(4).max(6),
     }),

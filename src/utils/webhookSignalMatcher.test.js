@@ -62,3 +62,60 @@ test('selectWebhookSignalCandidate returns no match when only the wrong side exi
   assert.equal(result.ambiguous, false);
   assert.equal(result.signal, null);
 });
+
+test('selectWebhookSignalCandidate does not auto-pick across multiple timeframes when timeframe is missing', () => {
+  const result = selectWebhookSignalCandidate({
+    signals: [
+      {
+        _id: 'five-minute-buy',
+        type: 'BUY',
+        timeframe: '5m',
+        signalTime: '2026-03-20T08:25:00.000Z',
+        createdAt: '2026-03-20T08:30:04.000Z',
+        updatedAt: '2026-03-20T08:50:04.000Z',
+      },
+      {
+        _id: 'fifteen-minute-buy',
+        type: 'BUY',
+        timeframe: '15m',
+        signalTime: '2026-03-20T08:45:00.000Z',
+        createdAt: '2026-03-20T09:00:11.000Z',
+        updatedAt: '2026-03-20T10:10:04.000Z',
+      },
+    ],
+    eventTime: '2026-03-20T10:05:00.000Z',
+    expectedType: 'BUY',
+  });
+
+  assert.equal(result.signal, null);
+  assert.equal(result.ambiguous, true);
+});
+
+test('selectWebhookSignalCandidate respects textual timeframe aliases from webhook payloads', () => {
+  const result = selectWebhookSignalCandidate({
+    signals: [
+      {
+        _id: 'five-minute-buy',
+        type: 'BUY',
+        timeframe: '5m',
+        signalTime: '2026-03-20T08:25:00.000Z',
+        createdAt: '2026-03-20T08:30:04.000Z',
+        updatedAt: '2026-03-20T08:50:04.000Z',
+      },
+      {
+        _id: 'fifteen-minute-buy',
+        type: 'BUY',
+        timeframe: '15m',
+        signalTime: '2026-03-20T08:45:00.000Z',
+        createdAt: '2026-03-20T09:00:11.000Z',
+        updatedAt: '2026-03-20T10:10:04.000Z',
+      },
+    ],
+    eventTime: '2026-03-20T10:05:00.000Z',
+    timeframe: '5 Min',
+    expectedType: 'BUY',
+  });
+
+  assert.equal(result.ambiguous, false);
+  assert.equal(result.signal?._id, 'five-minute-buy');
+});

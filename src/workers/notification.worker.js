@@ -11,6 +11,7 @@ import { emailService } from '../services/index.js'; // Use central service expo
 import pushService from '../services/channels/push.service.js';
 import templates from '../config/notificationTemplates.js';
 import {
+  buildSignalChannelMessage,
   buildSignalTemplateData,
   getSignalTemplateKey,
   renderNotificationTemplate,
@@ -243,6 +244,7 @@ const notificationWorker = new Worker('notifications', async (job) => {
       let templateId = '';
       let templateVars = null;
       let whatsappTemplateVars = null;
+      let channelMessage = '';
       
       if (signal) {
           const signalData = buildSignalTemplateData(signal);
@@ -250,6 +252,7 @@ const notificationWorker = new Worker('notifications', async (job) => {
           const rendered = renderNotificationTemplate(activeTemplates, templateKey, signalData);
           title = rendered.title;
           message = rendered.body;
+          channelMessage = buildSignalChannelMessage(signal);
           html = buildEmailHtml(title, message);
           templateId = getMsg91TemplateId(templateKey);
           templateVars = buildTemplateVariables(templateKey, signalData, activeTemplates);
@@ -308,9 +311,10 @@ const notificationWorker = new Worker('notifications', async (job) => {
           const teleConfig = getSetting('telegram_config') || {};
           const telegramEnabled = teleConfig.enabled !== false;
           const targetChatId = isSystemJob ? teleConfig.channelId : user?.telegramChatId;
+          const telegramMessage = signal ? channelMessage || message : message;
 
           if (telegramEnabled && targetChatId) {
-             await telegramService.sendTelegramMessage(teleConfig, message, { chatId: targetChatId });
+             await telegramService.sendTelegramMessage(teleConfig, telegramMessage, { chatId: targetChatId });
           } else {
              logger.debug(`Skipping Telegram for job ${job.id} - disabled or chat not connected`);
           }
@@ -328,9 +332,10 @@ const notificationWorker = new Worker('notifications', async (job) => {
              whatsappRecipient &&
              (isWhatsAppTestJob || (user && user.isWhatsAppEnabled !== false))
            ) {
+               const whatsappText = signal ? channelMessage || message : notification?.text;
                await whatsappChannelService.sendNotification(waConfig, {
                    to: whatsappRecipient,
-                   text: notification?.text,
+                   text: whatsappText,
                    title,
                    message,
                    signal,
@@ -394,6 +399,11 @@ const notificationWorker = new Worker('notifications', async (job) => {
           }
       }
       else if (type === 'email') {
+          if (signal && !config.notifications.signalEmailEnabled) {
+              logger.info(`[EmailWorker] Skipping signal email job ${job.id} because signal email delivery is disabled.`);
+              return;
+          }
+
           const recipientEmail = email || user?.email;
 
           if (recipientEmail) {

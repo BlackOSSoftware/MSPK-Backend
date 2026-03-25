@@ -3,6 +3,7 @@ import User from '../models/User.js';
 import ApiError from '../utils/ApiError.js';
 import subscriptionService from './subscription.service.js';
 import { derivePlanPermissions, mapSegmentsToPermissions } from '../utils/planPermissions.js';
+import { getLegacyPlanPermissions } from '../utils/legacyPlanAccess.js';
 
 const createUser = async (userBody) => {
   if (await User.findOne({ email: userBody.email })) {
@@ -108,7 +109,17 @@ const loginUserWithEmailAndPassword = async (email, password) => {
 
   // Strict Login Check: Email Verification
   if (!user.isEmailVerified) {
-    throw new ApiError(httpStatus.FORBIDDEN, 'Email is not verified. Please verify your email to continue.');
+    if (String(user.phone || '').trim()) {
+      throw new ApiError(
+        httpStatus.FORBIDDEN,
+        'Account is not verified. Please verify the OTP sent to your WhatsApp number to continue.'
+      );
+    }
+
+    throw new ApiError(
+      httpStatus.FORBIDDEN,
+      'Account is not verified and no WhatsApp number is linked. Please contact support.'
+    );
   }
 
   // Strict Login Check: Account Status
@@ -182,14 +193,7 @@ const getUserActivePlan = async (user) => {
       const expiry = user.subscription.expiresAt ? new Date(user.subscription.expiresAt) : null;
       
       if (!expiry || expiry > now) {
-          const legacyPlan = user.subscription.plan.toUpperCase();
-          const permissions = [];
-          
-          if (legacyPlan.includes('CRYPTO')) permissions.push('CRYPTO');
-          if (legacyPlan.includes('FOREX') || legacyPlan.includes('CURRENCY')) permissions.push('CURRENCY');
-          if (legacyPlan.includes('COMMODITY')) permissions.push('COMMODITY', 'MCX_FUT');
-          if (legacyPlan.includes('EQUITY')) permissions.push('EQUITY_INTRA', 'EQUITY_DELIVERY');
-          if (legacyPlan.includes('OPTIONS') || legacyPlan.includes('FNO')) permissions.push('NIFTY_OPT', 'BANKNIFTY_OPT');
+          const permissions = getLegacyPlanPermissions(user.subscription.plan);
 
           return {
               planId: 'legacy',

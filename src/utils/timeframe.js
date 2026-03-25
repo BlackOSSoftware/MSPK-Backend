@@ -1,3 +1,13 @@
+const normalizeMinuteAmount = (amount, raw) => {
+  if (!Number.isFinite(amount) || amount <= 0) return raw;
+  if (amount < 60) return `${amount}m`;
+  if (amount < 1440 && amount % 60 === 0) return `${amount / 60}h`;
+  if (amount === 1440) return '1D';
+  if (amount === 10080) return '1W';
+  if (amount === 43200) return '1M';
+  return `${amount}m`;
+};
+
 const normalizeSignalTimeframe = (value) => {
   if (value === null || value === undefined) return '';
 
@@ -5,29 +15,55 @@ const normalizeSignalTimeframe = (value) => {
   if (!raw) return '';
 
   const normalized = raw.toUpperCase();
+  const compact = normalized.replace(/[\s._-]+/g, '');
 
-  if (normalized === 'S' || normalized === 'SCALP') return 'Scalp';
-  if (/^\d+S$/.test(normalized)) return `${Number.parseInt(normalized, 10)}s`;
-  if (/^\d+M$/.test(normalized)) return `${Number.parseInt(normalized, 10)}m`;
-  if (/^\d+H$/.test(normalized)) return `${Number.parseInt(normalized, 10)}h`;
-  if (['D', '1D', 'DAY'].includes(normalized)) return '1D';
-  if (['W', '1W', 'WEEK'].includes(normalized)) return '1W';
-  if (['M', '1M', 'MO', 'MON', 'MN', 'MONTH', '1MO', '1MON', '1MONTH'].includes(normalized)) {
+  if (normalized === 'S' || compact === 'SCALP') return 'Scalp';
+  if (/^\d+S$/.test(compact)) return `${Number.parseInt(compact, 10)}s`;
+  if (/^\d+M$/.test(compact)) return `${Number.parseInt(compact, 10)}m`;
+  if (/^\d+H$/.test(compact)) return `${Number.parseInt(compact, 10)}h`;
+
+  const minuteLabelMatch = compact.match(/^(\d+)(MIN|MINS|MINUTE|MINUTES)$/);
+  if (minuteLabelMatch) {
+    return normalizeMinuteAmount(Number(minuteLabelMatch[1]), raw);
+  }
+
+  const hourLabelMatch = compact.match(/^(\d+)(HR|HRS|HOUR|HOURS)$/);
+  if (hourLabelMatch) {
+    return `${Number.parseInt(hourLabelMatch[1], 10)}h`;
+  }
+
+  if (['D', '1D', 'DAY', '1DAY'].includes(compact)) return '1D';
+  if (['W', '1W', 'WEEK', '1WEEK'].includes(compact)) return '1W';
+  if (['M', '1M', 'MO', 'MON', 'MN', 'MONTH', '1MO', '1MON', '1MONTH'].includes(compact)) {
     return '1M';
   }
 
-  if (/^\d+$/.test(normalized)) {
-    const amount = Number(normalized);
-    if (!Number.isFinite(amount) || amount <= 0) return raw;
-    if (amount < 60) return `${amount}m`;
-    if (amount < 1440 && amount % 60 === 0) return `${amount / 60}h`;
-    if (amount === 1440) return '1D';
-    if (amount === 10080) return '1W';
-    if (amount === 43200) return '1M';
-    return `${amount}m`;
+  if (/^\d+$/.test(compact)) {
+    return normalizeMinuteAmount(Number(compact), raw);
   }
 
   return raw;
+};
+
+const WEBHOOK_TIMEFRAME_KEYS = [
+  'timeframe',
+  'timeFrame',
+  'time_frame',
+  'interval',
+  'resolution',
+  'chart_interval',
+  'chartInterval',
+];
+
+const getWebhookTimeframeValue = (payload = {}) => {
+  for (const key of WEBHOOK_TIMEFRAME_KEYS) {
+    const value = payload?.[key];
+    if (value === null || value === undefined) continue;
+    if (typeof value === 'string' && !value.trim()) continue;
+    return value;
+  }
+
+  return '';
 };
 
 const getTimeframeDurationMs = (value) => {
@@ -99,6 +135,10 @@ const buildTimeframeAliases = (value) => {
     addAlias(aliases, String(minutes));
     addAlias(aliases, `${minutes}M`);
     addAlias(aliases, `${minutes}m`);
+    addAlias(aliases, `${minutes}MIN`);
+    addAlias(aliases, `${minutes}MINS`);
+    addAlias(aliases, `${minutes}MINUTE`);
+    addAlias(aliases, `${minutes}MINUTES`);
 
     if (minutes < 10) {
       const padded = String(minutes).padStart(2, '0');
@@ -118,11 +158,17 @@ const buildTimeframeAliases = (value) => {
     addAlias(aliases, `${hours}h`);
     addAlias(aliases, `${hours}HR`);
     addAlias(aliases, `${hours}hr`);
+    addAlias(aliases, `${hours}HRS`);
+    addAlias(aliases, `${hours}hrs`);
     addAlias(aliases, `${hours}HOUR`);
     addAlias(aliases, `${hours}hour`);
+    addAlias(aliases, `${hours}HOURS`);
+    addAlias(aliases, `${hours}hours`);
     addAlias(aliases, String(minutes));
     addAlias(aliases, `${minutes}M`);
     addAlias(aliases, `${minutes}m`);
+    addAlias(aliases, `${minutes}MIN`);
+    addAlias(aliases, `${minutes}MINUTES`);
     return Array.from(aliases);
   }
 
@@ -163,6 +209,7 @@ const buildTimeframeQuery = (fieldName, value) => {
 export {
   buildTimeframeAliases,
   buildTimeframeQuery,
+  getWebhookTimeframeValue,
   getTimeframeDurationMs,
   normalizeSignalTimeframe,
 };

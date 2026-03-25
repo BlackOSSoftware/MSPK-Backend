@@ -1,5 +1,9 @@
 import Joi from 'joi';
 
+const timeframeFieldSchema = Joi.alternatives().try(Joi.string().trim().min(1), Joi.number());
+const timeframeFieldNames = ['timeframe', 'timeFrame', 'time_frame', 'interval', 'resolution', 'chart_interval', 'chartInterval'];
+const webhookTimestampFieldSchema = Joi.date().iso().raw();
+
 const entrySignalSchema = Joi.object()
   .keys({
     event: Joi.string().valid('ENTRY').required(),
@@ -14,7 +18,13 @@ const entrySignalSchema = Joi.object()
     master_symbol_id: Joi.string().trim().min(1),
     segment: Joi.string().trim().min(1),
     trade_type: Joi.string().valid('BUY', 'SELL').required(),
-    timeframe: Joi.string().trim().min(1).required(),
+    timeframe: timeframeFieldSchema,
+    timeFrame: timeframeFieldSchema,
+    time_frame: timeframeFieldSchema,
+    interval: timeframeFieldSchema,
+    resolution: timeframeFieldSchema,
+    chart_interval: timeframeFieldSchema,
+    chartInterval: timeframeFieldSchema,
     entry_price: Joi.number().required(),
     targets: Joi.object()
       .keys({
@@ -24,9 +34,10 @@ const entrySignalSchema = Joi.object()
       })
       .required(),
     stop_loss: Joi.number().required(),
-    signal_time: Joi.date().iso().required(),
+    signal_time: webhookTimestampFieldSchema.required(),
   })
   .or('symbol', 'symbolId', 'symbol_id', 'masterSymbolId', 'master_symbol_id')
+  .or(...timeframeFieldNames)
   .xor('unique_id', 'uniqueId', 'uniqe_id', 'uniq_id')
   .unknown(true);
 
@@ -43,11 +54,18 @@ const exitSignalSchema = Joi.object()
     masterSymbolId: Joi.string().trim().min(1),
     master_symbol_id: Joi.string().trim().min(1),
     segment: Joi.string().trim().min(1),
+    timeframe: timeframeFieldSchema,
+    timeFrame: timeframeFieldSchema,
+    time_frame: timeframeFieldSchema,
+    interval: timeframeFieldSchema,
+    resolution: timeframeFieldSchema,
+    chart_interval: timeframeFieldSchema,
+    chartInterval: timeframeFieldSchema,
     trade_type: Joi.string().valid('BUY', 'SELL', 'EXIT_BUY', 'EXIT_SELL'),
     exit_price: Joi.number().required(),
     total_points: Joi.number().required(),
     exit_reason: Joi.string().trim().min(1).required(),
-    exit_time: Joi.date().iso().required(),
+    exit_time: webhookTimestampFieldSchema.required(),
   })
   .or('symbol', 'symbolId', 'symbol_id', 'masterSymbolId', 'master_symbol_id')
   .xor('unique_id', 'uniqueId', 'uniqe_id', 'uniq_id')
@@ -66,10 +84,17 @@ const infoSignalSchema = Joi.object()
     masterSymbolId: Joi.string().trim().min(1),
     master_symbol_id: Joi.string().trim().min(1),
     segment: Joi.string().trim().min(1),
+    timeframe: timeframeFieldSchema,
+    timeFrame: timeframeFieldSchema,
+    time_frame: timeframeFieldSchema,
+    interval: timeframeFieldSchema,
+    resolution: timeframeFieldSchema,
+    chart_interval: timeframeFieldSchema,
+    chartInterval: timeframeFieldSchema,
     message: Joi.string().trim().min(1).required(),
     trade_type: Joi.string().valid('BUY', 'SELL').required(),
     price: Joi.number().required(),
-    time: Joi.date().iso().required(),
+    time: webhookTimestampFieldSchema.required(),
   })
   .or('symbol', 'symbolId', 'symbol_id', 'masterSymbolId', 'master_symbol_id')
   .xor('unique_id', 'uniqueId', 'uniqe_id', 'uniq_id')

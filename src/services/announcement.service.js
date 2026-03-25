@@ -1,5 +1,9 @@
 import Announcement from '../models/Announcement.js';
-import notificationService from './notification.service.js';
+
+const getNotificationService = async () => {
+  const { default: notificationService } = await import('./notification.service.js');
+  return notificationService;
+};
 
 /**
  * Create a announcement
@@ -16,6 +20,7 @@ const createAnnouncement = async (announcementBody) => {
       (!announcement.startDate || new Date(announcement.startDate) <= now);
 
   if (isImmediatelyActive && !announcement.isNotificationSent) {
+      const notificationService = await getNotificationService();
       notificationService.scheduleAnnouncementNotifications(announcement).catch(err => {
           console.error('Initial announcement notification trigger failed', err);
       });
@@ -83,6 +88,7 @@ const updateAnnouncementById = async (announcementId, updateBody) => {
       (!announcement.startDate || new Date(announcement.startDate) <= now);
 
   if (isImmediatelyActive && !announcement.isNotificationSent) {
+      const notificationService = await getNotificationService();
       notificationService.scheduleAnnouncementNotifications(announcement).catch(err => {
           console.error('Update announcement notification trigger failed', err);
       });

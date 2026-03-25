@@ -11,7 +11,12 @@ import {
   normalizeSignalSymbol,
 } from '../utils/signalRouting.js';
 import { resolveBestMasterSymbol } from '../utils/masterSymbolResolver.js';
-import { buildTimeframeQuery, getTimeframeDurationMs, normalizeSignalTimeframe } from '../utils/timeframe.js';
+import {
+  buildTimeframeQuery,
+  getTimeframeDurationMs,
+  getWebhookTimeframeValue,
+  normalizeSignalTimeframe,
+} from '../utils/timeframe.js';
 import { parseSignalTimestamp } from '../utils/signalTimestamp.js';
 import { resolveExitedSignalType, selectWebhookSignalCandidate } from '../utils/webhookSignalMatcher.js';
 
@@ -46,6 +51,7 @@ const MIN_STALE_ENTRY_SIGNAL_AGE_MS = 90 * 60 * 1000;
 const MAX_STALE_ENTRY_SIGNAL_AGE_MS = 48 * 60 * 60 * 1000;
 const ABSOLUTE_MAX_ENTRY_SIGNAL_AGE_MS = 14 * 24 * 60 * 60 * 1000;
 const PROCESSED_ENTRY_SIGNAL_TTL_SECONDS = 30 * 24 * 60 * 60;
+const DELAYED_FEED_MIN_STALE_ENTRY_SIGNAL_AGE_MS = 12 * 60 * 60 * 1000;
 
 const getSignalClosedStatuses = () => ['Closed', 'Target Hit', 'Partial Profit Book', 'Stoploss Hit'];
 
@@ -66,11 +72,46 @@ const buildInfoUpdateMessage = ({ message, targetLevel, price, time }) => {
   if (typeof price === 'number') {
     parts.push(`at ${roundSignalValue(price)}`);
   }
-  if (time) {
-    parts.push(`on ${new Date(time).toISOString()}`);
-  }
 
   return `${parts.join(' ')}. Trade remains active.`;
+};
+
+const getSignalTargetValue = (signal, targetLevel) => {
+  const targets = signal?.targets;
+  if (!targets || !targetLevel) return undefined;
+
+  if (targetLevel === 'TP1') {
+    return toFiniteNumber(targets?.target1 ?? targets?.t1);
+  }
+  if (targetLevel === 'TP2') {
+    return toFiniteNumber(targets?.target2 ?? targets?.t2);
+  }
+  if (targetLevel === 'TP3') {
+    return toFiniteNumber(targets?.target3 ?? targets?.t3);
+  }
+
+  return undefined;
+};
+
+const isValidInfoTargetProgress = ({ signal, targetLevel, price }) => {
+  if (!signal || !targetLevel || typeof price !== 'number') return true;
+
+  const targetValue = getSignalTargetValue(signal, targetLevel);
+  if (typeof targetValue !== 'number') return true;
+
+  const signalType = String(signal?.type || '').trim().toUpperCase();
+  const roundedPrice = roundSignalValue(price);
+  const roundedTarget = roundSignalValue(targetValue);
+
+  if (signalType === 'SELL') {
+    return roundedPrice <= roundedTarget;
+  }
+
+  if (signalType === 'BUY') {
+    return roundedPrice >= roundedTarget;
+  }
+
+  return true;
 };
 
 const deriveExitPoints = ({ signal, exitPrice, totalPoints }) => {
@@ -96,12 +137,19 @@ const deriveExitPoints = ({ signal, exitPrice, totalPoints }) => {
 const deriveExitStatus = ({ signal, exitReason, exitPrice, totalPoints }) => {
   const reason = String(exitReason || '').trim().toUpperCase();
   const points = deriveExitPoints({ signal, exitPrice, totalPoints });
+  const highestTargetLevel = signalService.getSignalHighestAchievedTargetLevel(signal, exitPrice);
+  const finalTargetLevel = signalService.getFinalSignalTarget(signal)?.level || null;
+  const reachedFinalTarget =
+    Boolean(highestTargetLevel) && Boolean(finalTargetLevel) && highestTargetLevel === finalTargetLevel;
 
   if (reason.includes('PARTIAL') || reason.includes('PROFIT')) {
     return 'Partial Profit Book';
   }
 
   if (reason.includes('TARGET')) {
+    if (highestTargetLevel && !reachedFinalTarget) {
+      return 'Partial Profit Book';
+    }
     return 'Target Hit';
   }
 
@@ -111,6 +159,14 @@ const deriveExitStatus = ({ signal, exitReason, exitPrice, totalPoints }) => {
     }
 
     return 'Stoploss Hit';
+  }
+
+  if (reachedFinalTarget) {
+    return 'Target Hit';
+  }
+
+  if (highestTargetLevel) {
+    return 'Partial Profit Book';
   }
 
   if (typeof points === 'number' && points > 0) {
@@ -132,15 +188,46 @@ const getWebhookSymbolInput = (body = {}) =>
 
 const looksLikeMasterSymbolId = (value) => /-[a-f0-9]{24}$/i.test(String(value || '').trim());
 
-const parseWebhookDate = (value) => {
-  return parseSignalTimestamp(value);
+const parseWebhookDate = (value, options = {}) => {
+  return parseSignalTimestamp(value, options);
 };
 
-const getAllowedSignalAgeMs = (timeframe) => {
-  const timeframeMs = getTimeframeDurationMs(timeframe);
-  if (!timeframeMs) return MIN_STALE_ENTRY_SIGNAL_AGE_MS;
+const isDelayedFeedSignal = ({ symbol = '', segment = '' } = {}) => {
+  const normalizedSegment = String(segment || '').trim().toUpperCase();
+  if (['COMEX', 'NYMEX', 'CRYPTO', 'CURRENCY', 'FOREX'].includes(normalizedSegment)) return true;
 
-  return Math.min(Math.max(timeframeMs * 4, MIN_STALE_ENTRY_SIGNAL_AGE_MS), MAX_STALE_ENTRY_SIGNAL_AGE_MS);
+  const normalizedSymbol = String(symbol || '').trim().toUpperCase();
+  if (
+    /(?:^|:)(XAUUSD|XAGUSD|WTI|USOIL|UKOIL|BRENTUSD|CL1!|BRN1!|NG1!|GC1!|XPTUSD|COPPERUSD|NATGASUSD)$/.test(
+      normalizedSymbol
+    )
+  ) {
+    return true;
+  }
+
+  if (
+    /^(EURUSD|GBPUSD|USDJPY|AUDUSD|NZDUSD|USDCAD|USDCHF|EURJPY|GBPJPY|EURGBP|AUDJPY|AUDNZD|NZDJPY|EURAUD|EURAUD|GBPAUD|EURCAD|EURCHF|CADJPY|CHFJPY|EURINR|USDINR|GBPINR|JPYINR)$/i.test(
+      normalizedSymbol
+    )
+  ) {
+    return true;
+  }
+
+  return false;
+};
+
+const getAllowedSignalAgeMs = (timeframe, context = {}) => {
+  const timeframeMs = getTimeframeDurationMs(timeframe);
+  const baseAgeMs = timeframeMs
+    ? Math.min(Math.max(timeframeMs * 4, MIN_STALE_ENTRY_SIGNAL_AGE_MS), MAX_STALE_ENTRY_SIGNAL_AGE_MS)
+    : MIN_STALE_ENTRY_SIGNAL_AGE_MS;
+
+  if (!isDelayedFeedSignal(context)) {
+    return baseAgeMs;
+  }
+
+  // Some webhook providers deliver COMEX, crypto, and forex entries with multi-hour delay.
+  return Math.max(baseAgeMs, DELAYED_FEED_MIN_STALE_ENTRY_SIGNAL_AGE_MS);
 };
 
 const buildProcessedEntrySignalKey = (uniqueId = '') => {
@@ -200,13 +287,19 @@ const receiveSignal = catchAsync(async (req, res) => {
     : normalizeSignalSegment(req.body.segment, symbol);
   const isFreeFromPayload = parseBoolean(req.body.is_free ?? req.body.isFree ?? req.body.free);
   const isFree = isFreeFromPayload ?? false;
-  const normalizedTimeframe = normalizeSignalTimeframe(req.body.timeframe);
+  const rawTimeframe = getWebhookTimeframeValue(req.body);
+  const normalizedTimeframe = normalizeSignalTimeframe(rawTimeframe);
+  const webhookTimestampContext = {
+    symbol,
+    segment,
+    referenceTime: startedAt,
+  };
   const isEntryEvent = !['INFO', 'EXIT'].includes(event);
-  const parsedSignalTime = parseWebhookDate(req.body.signal_time);
+  const parsedSignalTime = parseWebhookDate(req.body.signal_time, webhookTimestampContext);
   const signalAgeMs =
     isEntryEvent && parsedSignalTime ? Date.now() - parsedSignalTime.getTime() : null;
   const allowedSignalAgeMs =
-    isEntryEvent && parsedSignalTime ? getAllowedSignalAgeMs(normalizedTimeframe) : null;
+    isEntryEvent && parsedSignalTime ? getAllowedSignalAgeMs(normalizedTimeframe, webhookTimestampContext) : null;
   const isUnexpectedlyOldEntry =
     typeof signalAgeMs === 'number' &&
     typeof allowedSignalAgeMs === 'number' &&
@@ -304,7 +397,10 @@ const receiveSignal = catchAsync(async (req, res) => {
 
     // 3) If already closed (idempotent EXIT), match on exit_time too.
     if (req.body.exit_time) {
-      const exitTime = parseWebhookDate(req.body.exit_time);
+      const exitTime =
+        eventTime instanceof Date && !Number.isNaN(eventTime.getTime())
+          ? eventTime
+          : parseWebhookDate(req.body.exit_time, webhookTimestampContext);
       if (!exitTime) {
         return { signal: null, ambiguous: false };
       }
@@ -319,8 +415,9 @@ const receiveSignal = catchAsync(async (req, res) => {
   };
 
   if (event === 'INFO') {
+    const parsedInfoTime = parseWebhookDate(req.body.time, webhookTimestampContext);
     const { signal: existing, ambiguous } = await findSignalByWebhookId(webhookId, {
-      eventTime: req.body.time,
+      eventTime: parsedInfoTime || req.body.time,
     });
     if (ambiguous) {
       return sendWebhookResponse(httpStatus.OK, {
@@ -340,14 +437,50 @@ const receiveSignal = catchAsync(async (req, res) => {
     }
 
     const currentPrice = toFiniteNumber(req.body.price);
-    const infoTime = parseWebhookDate(req.body.time) || req.body.time;
+    const infoTime = parsedInfoTime || req.body.time;
     const targetLevel = resolveInfoTargetLevel(req.body.message);
+    const isValidTargetProgress = isValidInfoTargetProgress({
+      signal: existing,
+      targetLevel,
+      price: currentPrice,
+    });
+
+    if (!isValidTargetProgress) {
+      logger.warn(
+        `[WEBHOOK] Ignoring invalid ${targetLevel || 'INFO'} progress for ${existing.symbol} ` +
+          `timeframe=${existing.timeframe || 'unknown'} webhookId=${webhookId} price=${currentPrice}`
+      );
+      return sendWebhookResponse(httpStatus.OK, {
+        status: 'ignored_invalid_target_progress',
+        signal: existing,
+        info: { targetLevel, message: req.body.message },
+      });
+    }
+
     const noteText = buildInfoUpdateMessage({
       message: req.body.message,
       targetLevel,
       price: currentPrice,
       time: infoTime,
     });
+
+    const autoClosedSignal =
+      typeof currentPrice === 'number'
+        ? await signalService.reconcileSignalWithMarketPrice(existing, currentPrice, {
+            occurredAt: infoTime,
+            notes: noteText,
+            exitReason: targetLevel ? `AUTO_INFO_${targetLevel}_REACHED` : 'AUTO_INFO_MARKET_SETTLED',
+            updateMessage: noteText,
+          })
+        : null;
+
+    if (autoClosedSignal) {
+      return sendWebhookResponse(httpStatus.OK, {
+        status: 'ok',
+        signal: autoClosedSignal,
+        info: { targetLevel, message: req.body.message, autoClosed: true },
+      });
+    }
 
     if (existing.notes === noteText) {
       return sendWebhookResponse(httpStatus.OK, {
@@ -359,6 +492,8 @@ const receiveSignal = catchAsync(async (req, res) => {
 
     const updated = await signalService.updateSignalById(existing.id, {
       notes: noteText,
+      lastInfoPrice: currentPrice,
+      lastInfoTime: infoTime,
       notificationMeta: {
         subType: 'SIGNAL_INFO',
         data: {
@@ -379,9 +514,10 @@ const receiveSignal = catchAsync(async (req, res) => {
   }
 
   if (event === 'EXIT') {
+    const parsedExitTime = parseWebhookDate(req.body.exit_time, webhookTimestampContext);
     const expectedType = resolveExitedSignalType(req.body.trade_type || req.body.tradeType);
     const { signal: existing, ambiguous } = await findSignalByWebhookId(webhookId, {
-      eventTime: req.body.exit_time,
+      eventTime: parsedExitTime || req.body.exit_time,
       expectedType,
     });
     if (ambiguous) {
@@ -407,7 +543,7 @@ const receiveSignal = catchAsync(async (req, res) => {
       exitPrice: req.body.exit_price,
       totalPoints: req.body.total_points,
     });
-    const incomingExitTime = parseWebhookDate(req.body.exit_time);
+    const incomingExitTime = parsedExitTime;
     const incomingExitPrice = toFiniteNumber(req.body.exit_price);
     const resolvedTotalPoints = deriveExitPoints({
       signal: existing,
@@ -456,7 +592,7 @@ const receiveSignal = catchAsync(async (req, res) => {
       tradeType: normalizedType,
       timeframe: normalizedTimeframe,
       entryPrice: req.body.entry_price,
-      signalTime: req.body.signal_time,
+      signalTime: parsedSignalTime || req.body.signal_time,
     }),
     webhookId: webhookId || undefined,
     symbol,
@@ -531,8 +667,17 @@ const receiveSignal = catchAsync(async (req, res) => {
 
   if (isUnexpectedlyOldEntry) {
     logger.warn(
-      `[WEBHOOK] Accepting delayed first-time ENTRY signal for ${symbol}. signalTime=${parsedSignalTime.toISOString()} ageMs=${signalAgeMs} allowedAgeMs=${allowedSignalAgeMs} timeframe=${normalizedTimeframe || 'NA'} webhookId=${webhookId || 'NA'} uniqueId=${signalBody.uniqueId}`
+      `[WEBHOOK] Ignoring stale ENTRY signal for ${symbol}. signalTime=${parsedSignalTime.toISOString()} ageMs=${signalAgeMs} allowedAgeMs=${allowedSignalAgeMs} timeframe=${normalizedTimeframe || 'NA'} webhookId=${webhookId || 'NA'} uniqueId=${signalBody.uniqueId}`
     );
+    return sendWebhookResponse(httpStatus.OK, {
+      status: 'stale_ignored',
+      symbol,
+      timeframe: normalizedTimeframe || null,
+      signalTime: parsedSignalTime.toISOString(),
+      ageMs: signalAgeMs,
+      allowedAgeMs: allowedSignalAgeMs,
+      uniqueId: signalBody.uniqueId,
+    });
   }
 
   const created = await signalService.createSignal(signalBody, null);
@@ -564,3 +709,5 @@ const receiveSignal = catchAsync(async (req, res) => {
 export default {
   receiveSignal,
 };
+
+export { deriveExitStatus, getAllowedSignalAgeMs, isValidInfoTargetProgress };
