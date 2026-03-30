@@ -97,16 +97,6 @@ export const resolveDisplayTimestamp = ({
     return primaryDate;
   }
 
-  if (preferPrimaryWhenAvailable) {
-    if (floorDate && primaryDate.getTime() < floorDate.getTime()) {
-      return resolveFallback() || primaryDate;
-    }
-    if (primaryDate.getTime() - fallbackDate.getTime() > maxAllowedSkewMs) {
-      return resolveFallback() || primaryDate;
-    }
-    return primaryDate;
-  }
-
   const maxAllowedSkewMs = Math.min(
     Math.max(timeframeMs * 3, 30 * 60 * 1000),
     6 * 60 * 60 * 1000
@@ -116,6 +106,16 @@ export const resolveDisplayTimestamp = ({
     3 * 60 * 1000
   );
   const primaryToFallbackLagMs = fallbackDate.getTime() - primaryDate.getTime();
+
+  if (preferPrimaryWhenAvailable) {
+    if (floorDate && primaryDate.getTime() < floorDate.getTime()) {
+      return resolveFallback() || primaryDate;
+    }
+    if (primaryDate.getTime() - fallbackDate.getTime() > maxAllowedSkewMs) {
+      return resolveFallback() || primaryDate;
+    }
+    return primaryDate;
+  }
 
   if (floorDate && primaryDate.getTime() < floorDate.getTime()) {
     return resolveFallback() || primaryDate;
