@@ -104,7 +104,6 @@ const getResolvedSignalPoints = (signal) => {
 };
 
 const toCsvCell = (value) => `"${String(value ?? '').replace(/"/g, '""')}"`;
-const buildTradingViewOnlyFilter = () => signalService.buildTradingViewSignalFilter();
 
 const normalizeSignalLookupKey = (value) => String(value || '').trim().toUpperCase();
 const getDateValue = (value) => {
@@ -248,7 +247,6 @@ const buildSelectedScriptsResponse = async (symbols = [], options = {}) => {
       : Signal.aggregate([
           {
             $match: {
-              ...buildTradingViewOnlyFilter(),
               symbol: { $in: allAliases },
               status: { $nin: CLOSED_SIGNAL_STATUSES },
               ...visibilityMatch,
@@ -280,7 +278,6 @@ const buildSelectedScriptsResponse = async (symbols = [], options = {}) => {
       : Signal.aggregate([
           {
             $match: {
-              ...buildTradingViewOnlyFilter(),
               symbol: { $in: allAliases },
               ...visibilityMatch,
             },
@@ -808,10 +805,8 @@ const assertSignalAccess = (access, signal) => {
 };
 
 const createSignal = catchAsync(async (req, res) => {
-  throw new ApiError(
-    httpStatus.FORBIDDEN,
-    'Manual signal creation is disabled. Only TradingView webhook signals are allowed.'
-  );
+  const signal = await signalService.createSignal(req.body, req.user);
+  res.status(httpStatus.CREATED).send(signal);
 });
 
 const getSelectedScripts = catchAsync(async (req, res) => {
@@ -906,10 +901,7 @@ const removeSelectedScript = catchAsync(async (req, res) => {
 });
 
 const getSignal = catchAsync(async (req, res) => {
-  const signal = await Signal.findOne({
-    _id: req.params.signalId,
-    ...buildTradingViewOnlyFilter(),
-  });
+  const signal = await signalService.getSignalById(req.params.signalId);
   if (!signal) {
     throw new ApiError(httpStatus.NOT_FOUND, 'Signal not found');
   }
@@ -922,10 +914,17 @@ const getSignal = catchAsync(async (req, res) => {
 });
 
 const createManualSignal = catchAsync(async (req, res) => {
-    throw new ApiError(
-      httpStatus.FORBIDDEN,
-      'Manual signal creation is disabled. Only TradingView webhook signals are allowed.'
-    );
+    // 1. Force Type to 'Manual'
+    const payload = { ...req.body, isManual: true, status: 'Active' };
+    
+    // 2. Create via Service
+    const signal = await signalService.createSignal(payload, req.user);
+
+    // 3. Emit Socket Event (Critical for Live Chart)
+    // signalService.createSignal usually emits, but let's ensure it.
+    // Assuming service handles emission.
+    
+    res.status(httpStatus.CREATED).send(signal);
 });
 
 const getSignals = catchAsync(async (req, res) => {
@@ -943,8 +942,8 @@ const getSignals = catchAsync(async (req, res) => {
 
   // 2. Build Query Filters Array
   const { search, symbol, status, segment, type, dateFilter, datePreset, fromDate, toDate, signalId } = req.query;
-  const conditions = [baseFilter, buildTradingViewOnlyFilter()];
-  const periodConditions = [baseFilter, buildTradingViewOnlyFilter()];
+  const conditions = [baseFilter];
+  const periodConditions = [baseFilter];
 
   if (search) {
       const searchFilter = {
@@ -1069,7 +1068,7 @@ const exportSignalReport = catchAsync(async (req, res) => {
 
   const baseFilter = buildBaseFilterForAccess(access);
   const { search, symbol, status, segment, type, dateFilter, datePreset, fromDate, toDate, signalId } = req.query;
-  const conditions = [baseFilter, buildTradingViewOnlyFilter()];
+  const conditions = [baseFilter];
 
   if (search) {
     conditions.push({
