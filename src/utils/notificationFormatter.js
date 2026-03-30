@@ -74,6 +74,7 @@ export const resolveDisplayTimestamp = ({
   fallback,
   timeframe,
   floor,
+  preferPrimaryWhenAvailable = false,
 }) => {
   const primaryDate = parseTimestamp(primary);
   const fallbackDate = parseTimestamp(fallback);
@@ -92,6 +93,16 @@ export const resolveDisplayTimestamp = ({
   if (!fallbackDate) {
     if (floorDate && primaryDate.getTime() < floorDate.getTime()) {
       return floorDate;
+    }
+    return primaryDate;
+  }
+
+  if (preferPrimaryWhenAvailable) {
+    if (floorDate && primaryDate.getTime() < floorDate.getTime()) {
+      return resolveFallback() || primaryDate;
+    }
+    if (primaryDate.getTime() - fallbackDate.getTime() > maxAllowedSkewMs) {
+      return resolveFallback() || primaryDate;
     }
     return primaryDate;
   }
@@ -167,6 +178,11 @@ export const getSignalTemplateKey = (signal) =>
 const resolveNotificationEntryTimestamp = ({ templateKey, signalTime, createdAt, timeframe }) => {
   const createdDate = parseTimestamp(createdAt);
   const signalDate = parseTimestamp(signalTime);
+  const isClosedTemplate = ['SIGNAL_TARGET', 'SIGNAL_STOPLOSS', 'SIGNAL_PARTIAL_PROFIT'].includes(templateKey);
+
+  if (isClosedTemplate && signalDate) {
+    return signalDate;
+  }
 
   if (
     templateKey === 'SIGNAL_NEW' &&

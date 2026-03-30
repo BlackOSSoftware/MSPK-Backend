@@ -397,12 +397,13 @@ const formatSignalResponse = (signal, resolvedMasterSymbol = null) => {
   const symbolName = String(resolvedMasterSymbol?.name || signal.symbol || '').trim();
   const originalSymbol = String(signal?.symbol || '').trim().toUpperCase();
   const normalizedTimeframe = normalizeSignalTimeframe(signal.timeframe) || signal.timeframe;
+  const isClosedSignal = isClosedSignalStatus(signal.status);
   const displaySignalTime = resolveDisplayTimestamp({
     primary: signal.signalTime,
     fallback: signal.createdAt,
     timeframe: normalizedTimeframe,
+    preferPrimaryWhenAvailable: isClosedSignal,
   });
-  const isClosedSignal = isClosedSignalStatus(signal.status);
   const resolvedExitTime = isClosedSignal ? signal.exitTime || null : null;
   const displayExitTime = isClosedSignal
     ? resolveDisplayTimestamp({
