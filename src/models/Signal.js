@@ -11,6 +11,12 @@ const signalSchema = new mongoose.Schema(
       trim: true,
       index: true,
     },
+    source: {
+      type: String,
+      enum: ['TRADINGVIEW', 'MANUAL', 'SYSTEM'],
+      default: 'MANUAL',
+      index: true,
+    },
     symbol: {
       type: String,
       required: true,

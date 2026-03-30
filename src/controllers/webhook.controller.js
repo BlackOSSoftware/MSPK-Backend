@@ -20,6 +20,19 @@ import {
 import { parseSignalTimestamp } from '../utils/signalTimestamp.js';
 import { resolveExitedSignalType, selectWebhookSignalCandidate } from '../utils/webhookSignalMatcher.js';
 
+const TRADINGVIEW_SIGNAL_SOURCE_FILTER = {
+  $or: [
+    { source: 'TRADINGVIEW' },
+    {
+      source: { $exists: false },
+      $or: [
+        { webhookId: { $exists: true, $ne: '' } },
+        { uniqueId: { $regex: /^ENTRY\|/i } },
+      ],
+    },
+  ],
+};
+
 const parseBoolean = (value) => {
   if (value === undefined || value === null) return undefined;
   if (typeof value === 'boolean') return value;
@@ -362,6 +375,7 @@ const receiveSignal = catchAsync(async (req, res) => {
       const typeFilter = expectedType ? { type: expectedType } : {};
       const queries = scopedFilters.map((scopedFilter) =>
         Signal.find({
+          ...TRADINGVIEW_SIGNAL_SOURCE_FILTER,
           ...scopedFilter,
           ...statusFilter,
           ...typeFilter,
@@ -378,6 +392,7 @@ const receiveSignal = catchAsync(async (req, res) => {
       const statusFilter = includeClosed ? {} : { status: { $nin: getSignalClosedStatuses() } };
       const queries = scopedFilters.map((scopedFilter) =>
         Signal.find({
+          ...TRADINGVIEW_SIGNAL_SOURCE_FILTER,
           ...scopedFilter,
           ...statusFilter,
           $or: [{ uniqueId: id }, { webhookId: id }],
@@ -390,6 +405,7 @@ const receiveSignal = catchAsync(async (req, res) => {
         buildScopedFilters({ symbol }).forEach((scopedFilter) => {
           queries.push(
             Signal.find({
+              ...TRADINGVIEW_SIGNAL_SOURCE_FILTER,
               ...scopedFilter,
               ...statusFilter,
               $or: [{ uniqueId: id }, { webhookId: id }],
@@ -410,7 +426,10 @@ const receiveSignal = catchAsync(async (req, res) => {
 
     // 1) If webhook sends our MongoDB _id
     if (mongoose.Types.ObjectId.isValid(id)) {
-      const byId = await Signal.findById(id);
+      const byId = await Signal.findOne({
+        _id: id,
+        ...TRADINGVIEW_SIGNAL_SOURCE_FILTER,
+      });
       if (byId) return { signal: byId, ambiguous: false };
     }
 
@@ -660,6 +679,7 @@ const receiveSignal = catchAsync(async (req, res) => {
   const normalizedType = String(req.body.trade_type || '').trim().toUpperCase();
 
   const signalBody = {
+    source: 'TRADINGVIEW',
     uniqueId: buildWebhookSignalId({
       webhookId,
       symbol,
@@ -689,9 +709,13 @@ const receiveSignal = catchAsync(async (req, res) => {
 
   // Upsert behavior for ENTRY webhooks: if the same `uniqueId` arrives again with updated fields,
   // update the existing signal instead of returning stale data.
-  const existingByUniqueId = await Signal.findOne({ uniqueId: signalBody.uniqueId }).sort({ createdAt: -1 });
+  const existingByUniqueId = await Signal.findOne({
+    uniqueId: signalBody.uniqueId,
+    ...TRADINGVIEW_SIGNAL_SOURCE_FILTER,
+  }).sort({ createdAt: -1 });
   if (existingByUniqueId) {
     const updateBody = {
+      source: 'TRADINGVIEW',
       webhookId: signalBody.webhookId,
       symbol: signalBody.symbol,
       segment: signalBody.segment,
@@ -764,6 +788,40 @@ const receiveSignal = catchAsync(async (req, res) => {
       await rememberProcessedEntrySignal(signalBody.uniqueId);
     }
     return sendWebhookResponse(httpStatus.OK, { status: 'duplicate_blocked', signal: afterGuard || null });
+  }
+
+  if (webhookId) {
+    const webhookIdentityFilter = {
+      ...TRADINGVIEW_SIGNAL_SOURCE_FILTER,
+      webhookId,
+      symbol: signalBody.symbol,
+      type: signalBody.type,
+    };
+    if (signalBody.segment) webhookIdentityFilter.segment = signalBody.segment;
+    if (signalBody.timeframe) {
+      const timeframeFilter = buildTimeframeQuery('timeframe', signalBody.timeframe);
+      if (timeframeFilter) Object.assign(webhookIdentityFilter, timeframeFilter);
+    }
+
+    const existingByWebhookIdentity = await Signal.findOne(webhookIdentityFilter).sort({ createdAt: -1 });
+    if (existingByWebhookIdentity) {
+      const updateBody = {
+        source: 'TRADINGVIEW',
+        webhookId: signalBody.webhookId,
+        symbol: signalBody.symbol,
+        segment: signalBody.segment,
+        type: signalBody.type,
+        timeframe: signalBody.timeframe,
+        entryPrice: signalBody.entryPrice,
+        stopLoss: signalBody.stopLoss,
+        targets: signalBody.targets,
+        signalTime: signalBody.signalTime,
+        isFree: signalBody.isFree,
+      };
+      const updated = await signalService.updateSignalById(existingByWebhookIdentity.id, updateBody);
+      await rememberProcessedEntrySignal(signalBody.uniqueId);
+      return sendWebhookResponse(httpStatus.OK, { status: 'ok', signal: updated, updatedExisting: true });
+    }
   }
 
   logger.info(

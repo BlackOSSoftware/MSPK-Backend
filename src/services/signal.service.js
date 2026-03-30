@@ -455,6 +455,19 @@ const scheduleUpdateSideEffects = (signal, updateBody, signalId, notificationMet
 
 const signalCreationGuard = new Map();
 
+const buildTradingViewSignalFilter = () => ({
+  $or: [
+    { source: 'TRADINGVIEW' },
+    {
+      source: { $exists: false },
+      $or: [
+        { webhookId: { $exists: true, $ne: '' } },
+        { uniqueId: { $regex: /^ENTRY\|/i } },
+      ],
+    },
+  ],
+});
+
 const normalizePersistedSignalDates = (payload = {}) => {
   if (payload.signalTime !== undefined) {
     payload.signalTime = normalizeSignalTimestampInput(payload.signalTime);
@@ -512,6 +525,7 @@ const createSignal = async (signalBody, user) => {
     signalBody.signalTime = new Date();
   }
   normalizePersistedSignalDates(signalBody);
+  signalBody.source = String(signalBody?.source || (user ? 'MANUAL' : 'SYSTEM')).trim().toUpperCase();
 
   await hydrateSignalSegment(signalBody);
   if (signalBody.uniqueId) {
@@ -1181,6 +1195,7 @@ const deleteSignalById = async (signalId) => {
 };
 
 export default {
+  buildTradingViewSignalFilter,
   createSignal,
   querySignals,
   getSignalById,
@@ -1199,6 +1214,7 @@ export default {
 };
 
 export {
+  buildTradingViewSignalFilter,
   buildAutoSignalSettlement,
   getFinalSignalTarget,
   getSignalHighestAchievedTargetLevel,
