@@ -21,6 +21,18 @@ const INDEX_SYMBOL_ALIAS_MAP = new Map(
   INDEX_SYMBOL_ALIAS_GROUPS.flatMap((group) => group.map((symbol) => [symbol, group]))
 );
 
+const COMMODITY_SYMBOL_ALIAS_GROUPS = [
+  ['XAUUSD', 'XAUUSD.PR', 'XAUUSD.X', 'GC1!', 'COMEX:GC1!', 'GOLD1!', 'COMEX:GOLD', 'GOLD'],
+  ['XAGUSD', 'XAGUSD.PR', 'XAGUSD.X', 'SI1!', 'COMEX:SI1!', 'SILVER1!', 'COMEX:SILVER', 'SILVER', 'MCX:SILVER'],
+  ['WTI', 'USOIL', 'USOILROLL', 'CL1!', 'NYMEX:CL1!', 'CRUDEOIL', 'CRUDE OIL'],
+  ['BRENTUSD', 'UKOIL', 'UKOILROLL', 'BRN1!', 'NYMEX:BRN1!', 'BRENT', 'BRENT OIL'],
+  ['NATGASUSD', 'NG1!', 'NYMEX:NG1!', 'NATGAS', 'NATURAL GAS'],
+];
+
+const COMMODITY_SYMBOL_ALIAS_MAP = new Map(
+  COMMODITY_SYMBOL_ALIAS_GROUPS.flatMap((group) => group.map((symbol) => [symbol, group]))
+);
+
 const getCommodityContinuousAliases = (symbol = '') => {
   const normalized = String(symbol || '').trim().toUpperCase();
   if (!normalized) return [];
@@ -50,8 +62,12 @@ const getSelectedSymbolAliases = (symbol = '') => {
 
   const aliases = new Set([normalized]);
   const indexAliasGroup = INDEX_SYMBOL_ALIAS_MAP.get(normalized);
+  const commodityAliasGroup = COMMODITY_SYMBOL_ALIAS_MAP.get(normalized);
   if (indexAliasGroup) {
     indexAliasGroup.forEach((alias) => aliases.add(alias));
+  } else if (commodityAliasGroup) {
+    commodityAliasGroup.forEach((alias) => aliases.add(alias));
+    getCommodityContinuousAliases(normalized).forEach((alias) => aliases.add(alias));
   } else {
     getCommodityContinuousAliases(normalized).forEach((alias) => aliases.add(alias));
   }

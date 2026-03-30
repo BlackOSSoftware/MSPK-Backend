@@ -315,6 +315,11 @@ const receiveSignal = catchAsync(async (req, res) => {
     return res.status(status).send(payload);
   };
 
+  logger.info(
+    `[WEBHOOK] received event=${event || 'ENTRY'} webhookId=${webhookId || 'NA'} symbolInput=${symbolInput || 'NA'} ` +
+    `resolvedSymbol=${symbol || 'NA'} segment=${segment || 'NA'} timeframe=${normalizedTimeframe || 'NA'}`
+  );
+
   if (symbolIdRequested && symbolInput && !resolvedMasterSymbol) {
     return sendWebhookResponse(httpStatus.BAD_REQUEST, {
       message: 'Provided symbol ID does not match any master symbol.',
@@ -330,8 +335,7 @@ const receiveSignal = catchAsync(async (req, res) => {
   }
 
   const findSignalByWebhookId = async (webhookId, { eventTime = null, expectedType = null } = {}) => {
-    if (!webhookId) return { signal: null, ambiguous: false };
-    const id = String(webhookId).trim();
+    const id = String(webhookId || '').trim();
     const baseFilter = symbol ? { symbol, segment } : { segment };
     const timeframeFilter = buildTimeframeQuery('timeframe', normalizedTimeframe);
     const buildScopedFilters = (filter) =>
@@ -351,6 +355,23 @@ const receiveSignal = catchAsync(async (req, res) => {
       }
 
       return result;
+    };
+    const collectFallbackCandidates = async ({ includeClosed = false } = {}) => {
+      const scopedFilters = buildScopedFilters(baseFilter);
+      const statusFilter = includeClosed ? {} : { status: { $nin: getSignalClosedStatuses() } };
+      const typeFilter = expectedType ? { type: expectedType } : {};
+      const queries = scopedFilters.map((scopedFilter) =>
+        Signal.find({
+          ...scopedFilter,
+          ...statusFilter,
+          ...typeFilter,
+        })
+          .sort({ updatedAt: -1, createdAt: -1, _id: -1 })
+          .limit(10)
+      );
+
+      const queryResults = await Promise.all(queries);
+      return queryResults.flat();
     };
     const collectCandidates = async ({ includeClosed = false } = {}) => {
       const scopedFilters = buildScopedFilters(baseFilter);
@@ -383,6 +404,10 @@ const receiveSignal = catchAsync(async (req, res) => {
       return queryResults.flat();
     };
 
+    if (!id) {
+      return resolveCandidateResult(await collectFallbackCandidates());
+    }
+
     // 1) If webhook sends our MongoDB _id
     if (mongoose.Types.ObjectId.isValid(id)) {
       const byId = await Signal.findById(id);
@@ -391,11 +416,17 @@ const receiveSignal = catchAsync(async (req, res) => {
 
     // 2) Match by the caller-provided ID first.
     const activeMatchResult = resolveCandidateResult(await collectCandidates());
-    if (activeMatchResult.signal || activeMatchResult.ambiguous || !req.body.exit_time) {
+    if (activeMatchResult.signal || activeMatchResult.ambiguous) {
       return activeMatchResult;
     }
 
-    // 3) If already closed (idempotent EXIT), match on exit_time too.
+    // 3) Fallback match by symbol/segment/timeframe/type if webhook id cannot be trusted.
+    const fallbackActiveMatch = resolveCandidateResult(await collectFallbackCandidates());
+    if (fallbackActiveMatch.signal || fallbackActiveMatch.ambiguous || !req.body.exit_time) {
+      return fallbackActiveMatch;
+    }
+
+    // 4) If already closed (idempotent EXIT), match on exit_time too.
     if (req.body.exit_time) {
       const exitTime =
         eventTime instanceof Date && !Number.isNaN(eventTime.getTime())
@@ -408,7 +439,16 @@ const receiveSignal = catchAsync(async (req, res) => {
         const candidateExitTime = candidate?.exitTime ? new Date(candidate.exitTime).getTime() : NaN;
         return Number.isFinite(candidateExitTime) && candidateExitTime === exitTime.getTime();
       });
-      return resolveCandidateResult(closedCandidates);
+      const idempotentMatch = resolveCandidateResult(closedCandidates);
+      if (idempotentMatch.signal || idempotentMatch.ambiguous) {
+        return idempotentMatch;
+      }
+
+      const fallbackClosedCandidates = (await collectFallbackCandidates({ includeClosed: true })).filter((candidate) => {
+        const candidateExitTime = candidate?.exitTime ? new Date(candidate.exitTime).getTime() : NaN;
+        return Number.isFinite(candidateExitTime) && candidateExitTime === exitTime.getTime();
+      });
+      return resolveCandidateResult(fallbackClosedCandidates);
     }
 
     return { signal: null, ambiguous: false };
@@ -420,6 +460,9 @@ const receiveSignal = catchAsync(async (req, res) => {
       eventTime: parsedInfoTime || req.body.time,
     });
     if (ambiguous) {
+      logger.warn(
+        `[WEBHOOK] INFO ambiguous match symbol=${symbol} webhookId=${webhookId || 'NA'} timeframe=${normalizedTimeframe || 'NA'}`
+      );
       return sendWebhookResponse(httpStatus.OK, {
         status: 'ambiguous_timeframe',
         uniq_id: webhookId,
@@ -428,6 +471,9 @@ const receiveSignal = catchAsync(async (req, res) => {
       });
     }
     if (!existing) {
+      logger.warn(
+        `[WEBHOOK] INFO target signal not found symbol=${symbol} webhookId=${webhookId || 'NA'} timeframe=${normalizedTimeframe || 'NA'}`
+      );
       return sendWebhookResponse(httpStatus.OK, {
         status: 'not_found',
         uniq_id: webhookId,
@@ -475,6 +521,9 @@ const receiveSignal = catchAsync(async (req, res) => {
         : null;
 
     if (autoClosedSignal) {
+      logger.info(
+        `[WEBHOOK] INFO auto-closed signal=${autoClosedSignal.id} symbol=${autoClosedSignal.symbol} status=${autoClosedSignal.status}`
+      );
       return sendWebhookResponse(httpStatus.OK, {
         status: 'ok',
         signal: autoClosedSignal,
@@ -505,6 +554,9 @@ const receiveSignal = catchAsync(async (req, res) => {
         },
       },
     });
+    logger.info(
+      `[WEBHOOK] INFO updated signal=${updated.id} symbol=${updated.symbol} status=${updated.status} targetLevel=${targetLevel || 'INFO'}`
+    );
 
     return sendWebhookResponse(httpStatus.OK, {
       status: 'ok',
@@ -521,6 +573,9 @@ const receiveSignal = catchAsync(async (req, res) => {
       expectedType,
     });
     if (ambiguous) {
+      logger.warn(
+        `[WEBHOOK] EXIT ambiguous match symbol=${symbol} webhookId=${webhookId || 'NA'} timeframe=${normalizedTimeframe || 'NA'}`
+      );
       return sendWebhookResponse(httpStatus.OK, {
         status: 'ambiguous_timeframe',
         uniq_id: webhookId,
@@ -529,6 +584,9 @@ const receiveSignal = catchAsync(async (req, res) => {
       });
     }
     if (!existing) {
+      logger.warn(
+        `[WEBHOOK] EXIT target signal not found symbol=${symbol} webhookId=${webhookId || 'NA'} timeframe=${normalizedTimeframe || 'NA'}`
+      );
       return sendWebhookResponse(httpStatus.OK, {
         status: 'not_found',
         uniq_id: webhookId,
@@ -570,6 +628,19 @@ const receiveSignal = catchAsync(async (req, res) => {
       return sendWebhookResponse(httpStatus.OK, { status: 'ok', signal: existing });
     }
 
+    const existingAlreadyClosed = getSignalClosedStatuses().includes(String(existing.status || '').trim());
+    if (
+      existingAlreadyClosed &&
+      existing.exitTime &&
+      (!incomingExitTime || new Date(existing.exitTime).getTime() >= incomingExitTime.getTime())
+    ) {
+      logger.info(
+        `[WEBHOOK] EXIT ignored for already settled signal=${existing.id} symbol=${existing.symbol} ` +
+        `existingExit=${new Date(existing.exitTime).toISOString()} incomingExit=${incomingExitTime ? incomingExitTime.toISOString() : 'NA'}`
+      );
+      return sendWebhookResponse(httpStatus.OK, { status: 'already_closed', signal: existing });
+    }
+
     const updateBody = {
       exitPrice: incomingExitPrice,
       totalPoints: resolvedTotalPoints,
@@ -579,6 +650,10 @@ const receiveSignal = catchAsync(async (req, res) => {
     };
 
     const updated = await signalService.updateSignalById(existing.id, updateBody);
+    logger.info(
+      `[WEBHOOK] EXIT settled signal=${updated.id} symbol=${updated.symbol} status=${updated.status} ` +
+      `exitPrice=${updated.exitPrice ?? 'NA'} points=${updated.totalPoints ?? 'NA'} reason=${updated.exitReason || 'NA'}`
+    );
     return sendWebhookResponse(httpStatus.OK, { status: 'ok', signal: updated });
   }
 
@@ -690,6 +765,11 @@ const receiveSignal = catchAsync(async (req, res) => {
     }
     return sendWebhookResponse(httpStatus.OK, { status: 'duplicate_blocked', signal: afterGuard || null });
   }
+
+  logger.info(
+    `[WEBHOOK] ENTRY created signal=${created.id} symbol=${created.symbol} timeframe=${created.timeframe || 'NA'} ` +
+    `signalTime=${created.signalTime ? new Date(created.signalTime).toISOString() : 'NA'}`
+  );
 
   await signalService.settleOppositeActiveSignalsForEntry({
     symbol: created.symbol,

@@ -280,6 +280,42 @@ const getSignalStartDate = (signal) => {
   return parsed;
 };
 
+const getLifecycleSignalStartDate = (signal = {}) => {
+  const parsedSignalTime = normalizeSignalTimestampInput(signal?.signalTime);
+  if (parsedSignalTime instanceof Date && !Number.isNaN(parsedSignalTime.getTime())) {
+    return parsedSignalTime;
+  }
+
+  const parsedCreatedAt = normalizeSignalTimestampInput(signal?.createdAt);
+  if (parsedCreatedAt instanceof Date && !Number.isNaN(parsedCreatedAt.getTime())) {
+    return parsedCreatedAt;
+  }
+
+  return null;
+};
+
+const resolveChronologicalExitTime = (signal = {}, candidateExitTime = null) => {
+  const startAt = getLifecycleSignalStartDate(signal);
+  const parsedExitTime = normalizeSignalTimestampInput(candidateExitTime);
+  if (!(parsedExitTime instanceof Date) || Number.isNaN(parsedExitTime.getTime())) {
+    if (startAt instanceof Date) {
+      return new Date(Math.max(Date.now(), startAt.getTime() + 1000));
+    }
+
+    return new Date();
+  }
+
+  if (!(startAt instanceof Date)) {
+    return parsedExitTime;
+  }
+
+  if (parsedExitTime.getTime() >= startAt.getTime()) {
+    return parsedExitTime;
+  }
+
+  return new Date(startAt.getTime() + 1000);
+};
+
 const inferSignalStatusFromExitPrice = (signal, exitPrice) => {
   const resolvedExitPrice = toFiniteNumber(exitPrice);
   const entryPrice = toFiniteNumber(signal?.entryPrice);
@@ -570,6 +606,18 @@ const buildSignalDedupStages = (filter = {}, { sortByLatestEvent = false } = {})
                     { $ifNull: ['$segment', ''] },
                     '|',
                     { $ifNull: ['$timeframe', ''] },
+                    '|',
+                    { $ifNull: ['$type', ''] },
+                    '|',
+                    { $toString: { $ifNull: ['$entryPrice', ''] } },
+                    '|',
+                    {
+                      $dateToString: {
+                        date: { $ifNull: ['$signalTime', '$createdAt'] },
+                        format: '%Y-%m-%dT%H:%M',
+                        timezone: SIGNAL_DERIVED_DATES.timezone,
+                      },
+                    },
                   ],
                 },
               },
@@ -723,7 +771,7 @@ const getSignalPeriodStats = async (filter = {}) => {
         _id: null,
         todaySignals: {
           $sum: {
-            $cond: [{ $gte: ['$createdAt', startOfToday] }, 1, 0],
+            $cond: [{ $gte: ['$__eventTime', startOfToday] }, 1, 0],
           },
         },
         tomorrowSignals: {
@@ -731,8 +779,8 @@ const getSignalPeriodStats = async (filter = {}) => {
             $cond: [
               {
                 $and: [
-                  { $gte: ['$createdAt', startOfTomorrow] },
-                  { $lte: ['$createdAt', endOfTomorrow] },
+                  { $gte: ['$__eventTime', startOfTomorrow] },
+                  { $lte: ['$__eventTime', endOfTomorrow] },
                 ],
               },
               1,
@@ -742,12 +790,12 @@ const getSignalPeriodStats = async (filter = {}) => {
         },
         weeklySignals: {
           $sum: {
-            $cond: [{ $gte: ['$createdAt', startOfWeek] }, 1, 0],
+            $cond: [{ $gte: ['$__eventTime', startOfWeek] }, 1, 0],
           },
         },
         monthlySignals: {
           $sum: {
-            $cond: [{ $gte: ['$createdAt', startOfMonth] }, 1, 0],
+            $cond: [{ $gte: ['$__eventTime', startOfMonth] }, 1, 0],
           },
         },
         planSignals: { $sum: 1 },
@@ -944,9 +992,7 @@ const updateSignalById = async (signalId, updateBody) => {
       }
     }
 
-    if (!signal.exitTime) {
-      signal.exitTime = new Date();
-    }
+    signal.exitTime = resolveChronologicalExitTime(signal, signal.exitTime);
   }
 
   if (isReopeningToActive) {
@@ -957,6 +1003,19 @@ const updateSignalById = async (signalId, updateBody) => {
   }
 
   await signal.save();
+  if (persistedUpdateBody?.status && CLOSED_SIGNAL_STATUSES.includes(persistedUpdateBody.status)) {
+    logger.info(
+      `[SIGNAL_FLOW] settled signal=${signal.id} symbol=${signal.symbol} status=${signal.status} ` +
+      `entry=${signal.entryPrice ?? 'NA'} exit=${signal.exitPrice ?? 'NA'} points=${signal.totalPoints ?? 'NA'} ` +
+      `signalTime=${signal.signalTime ? new Date(signal.signalTime).toISOString() : 'NA'} ` +
+      `exitTime=${signal.exitTime ? new Date(signal.exitTime).toISOString() : 'NA'} reason=${signal.exitReason || 'NA'}`
+    );
+  } else if (persistedUpdateBody?.status || persistedUpdateBody?.notes) {
+    logger.info(
+      `[SIGNAL_FLOW] updated signal=${signal.id} symbol=${signal.symbol} status=${signal.status} ` +
+      `notesChanged=${persistedUpdateBody?.notes !== undefined ? 'yes' : 'no'}`
+    );
+  }
   if (!skipSideEffects) {
     scheduleUpdateSideEffects(signal, persistedUpdateBody, signalId, notificationMeta);
   }

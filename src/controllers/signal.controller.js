@@ -461,6 +461,37 @@ const getStartOfIndiaDay = (date) => resolveStartOfIndiaDay(date);
 
 const getEndOfDay = (date) => resolveEndOfIndiaDay(date);
 
+const buildSignalEventFromFilter = (start) => {
+  if (!(start instanceof Date) || Number.isNaN(start.getTime())) return null;
+
+  return {
+    $or: [
+      { signalTime: { $gte: start } },
+      { signalTime: { $exists: false }, createdAt: { $gte: start } },
+      { signalTime: null, createdAt: { $gte: start } },
+    ],
+  };
+};
+
+const buildSignalEventRangeFilter = (start, end) => {
+  if (
+    !(start instanceof Date) ||
+    Number.isNaN(start.getTime()) ||
+    !(end instanceof Date) ||
+    Number.isNaN(end.getTime())
+  ) {
+    return null;
+  }
+
+  return {
+    $or: [
+      { signalTime: { $gte: start, $lte: end } },
+      { signalTime: { $exists: false }, createdAt: { $gte: start, $lte: end } },
+      { signalTime: null, createdAt: { $gte: start, $lte: end } },
+    ],
+  };
+};
+
 const buildSegmentFilterQuery = (segment = '') => {
   const normalized = String(segment || '').trim().toUpperCase();
   if (!normalized || normalized === 'ALL') return null;
@@ -716,10 +747,11 @@ const buildBaseFilterForAccess = (access) => {
   }
 
   if (access.mode === 'user' && access.signalVisibleFrom instanceof Date && !Number.isNaN(access.signalVisibleFrom.getTime())) {
+    const visibilityFilter = buildSignalEventFromFilter(access.signalVisibleFrom);
     accessFilter = {
       $and: [
         accessFilter,
-        { createdAt: { $gte: access.signalVisibleFrom } }
+        visibilityFilter || { createdAt: { $gte: access.signalVisibleFrom } },
       ]
     };
   }
@@ -744,8 +776,10 @@ const assertSignalAccess = (access, signal) => {
     access.mode === 'user' &&
     access.signalVisibleFrom instanceof Date &&
     !Number.isNaN(access.signalVisibleFrom.getTime()) &&
-    signal?.createdAt &&
-    new Date(signal.createdAt).getTime() < access.signalVisibleFrom.getTime()
+    (() => {
+      const eventDate = getDateValue(signal?.signalTime) || getDateValue(signal?.createdAt);
+      return eventDate instanceof Date && eventDate.getTime() < access.signalVisibleFrom.getTime();
+    })()
   ) {
     throw new ApiError(httpStatus.FORBIDDEN, 'This signal was generated before your account became active.');
   }
@@ -931,7 +965,7 @@ const getSignals = catchAsync(async (req, res) => {
 
   const dateRange = resolveSignalDateRange({ datePreset, dateFilter, fromDate, toDate });
   if (dateRange?.start && dateRange?.end) {
-      conditions.push({ createdAt: { $gte: dateRange.start, $lte: dateRange.end } });
+      conditions.push(buildSignalEventRangeFilter(dateRange.start, dateRange.end));
   }
 
   if (status && status !== 'All') {
@@ -1052,7 +1086,7 @@ const exportSignalReport = catchAsync(async (req, res) => {
 
   const dateRange = resolveSignalDateRange({ datePreset, dateFilter, fromDate, toDate });
   if (dateRange?.start && dateRange?.end) {
-    conditions.push({ createdAt: { $gte: dateRange.start, $lte: dateRange.end } });
+    conditions.push(buildSignalEventRangeFilter(dateRange.start, dateRange.end));
   }
 
   if (status && status !== 'All') {
