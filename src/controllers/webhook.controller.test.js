@@ -1,7 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { deriveExitStatus, getAllowedSignalAgeMs, isValidInfoTargetProgress } from './webhook.controller.js';
+import {
+  deriveExitStatus,
+  getAllowedSignalAgeMs,
+  isStopLossExitPriceConsistent,
+  isValidInfoTargetProgress,
+  normalizeExitWebhookPayload,
+} from './webhook.controller.js';
 
 test('isValidInfoTargetProgress rejects impossible BUY target claims', () => {
   const signal = {
@@ -125,4 +131,81 @@ test('getAllowedSignalAgeMs keeps delayed feed entries eligible without relaxing
     }),
     90 * 60 * 1000
   );
+});
+
+test('isStopLossExitPriceConsistent rejects contaminated stoploss prices that are still inside the trade range', () => {
+  const signal = {
+    type: 'SELL',
+    entryPrice: 67649.5,
+    stopLoss: 68268.1594637916,
+  };
+
+  assert.equal(
+    isStopLossExitPriceConsistent({
+      signal,
+      exitPrice: 67726.75,
+    }),
+    false
+  );
+
+  assert.equal(
+    isStopLossExitPriceConsistent({
+      signal,
+      exitPrice: 68268.16,
+    }),
+    true
+  );
+});
+
+test('normalizeExitWebhookPayload replaces suspicious stoploss payload fields with safe persisted values', () => {
+  const signal = {
+    symbol: 'BTCUSD',
+    timeframe: '5m',
+    type: 'SELL',
+    entryPrice: 67649.5,
+    stopLoss: 68268.1594637916,
+    signalTime: '2026-03-31T12:10:00.000Z',
+  };
+
+  const normalized = normalizeExitWebhookPayload({
+    signal,
+    exitReason: 'STOP_LOSS',
+    exitPrice: 67726.75,
+    totalPoints: 0,
+    exitTime: '2026-03-31T12:10:01.000Z',
+    receivedAt: '2026-03-31T18:00:13.933Z',
+  });
+
+  assert.equal(normalized.sanitized, true);
+  assert.equal(normalized.exitPrice, 68268.16);
+  assert.equal(normalized.totalPoints, -618.66);
+  assert.equal(normalized.exitTime.toISOString(), '2026-03-31T18:00:13.933Z');
+  assert.deepEqual(normalized.sanitizedFields, ['exitPrice', 'totalPoints', 'exitTime']);
+});
+
+test('normalizeExitWebhookPayload uses receipt time when exit payload omits timeframe and arrives far after the raw exit timestamp', () => {
+  const signal = {
+    symbol: 'BTCUSD',
+    timeframe: '5m',
+    type: 'SELL',
+    entryPrice: 67649.5,
+    stopLoss: 68268.1594637916,
+    signalTime: '2026-03-31T12:10:00.000Z',
+  };
+
+  const normalized = normalizeExitWebhookPayload({
+    signal,
+    exitReason: 'TARGET_HIT',
+    exitPrice: 67000,
+    totalPoints: 649.5,
+    exitTime: '2026-03-31T12:45:00.000Z',
+    receivedAt: '2026-03-31T18:30:00.000Z',
+    timeframeFromPayload: '',
+  });
+
+  assert.equal(normalized.sanitized, true);
+  assert.equal(normalized.exitPrice, 67000);
+  assert.equal(normalized.totalPoints, 649.5);
+  assert.equal(normalized.exitTime.toISOString(), '2026-03-31T18:30:00.000Z');
+  assert.deepEqual(normalized.sanitizedFields, ['exitTime']);
 });

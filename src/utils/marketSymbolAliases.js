@@ -2,6 +2,13 @@ import { normalizeUpper } from './marketSegmentResolver.js';
 
 const MARKET_SYMBOL_ALIAS_DEFINITIONS = [
   {
+    alias: 'GCI',
+    canonical: 'GC1!',
+    wireSymbols: ['GC1!'],
+    name: 'Gold Futures Continuous',
+    searchTerms: ['GC1!', 'GOLD FUTURE', 'GOLD FUTURES', 'COMEX GOLD', 'FOREX GOLD'],
+  },
+  {
     alias: 'BRENTUSD',
     canonical: 'UKOILROLL',
     wireSymbols: ['UKOILROLL', 'UKOILK6', 'UKOILM6'],
@@ -88,6 +95,22 @@ const getMarketSymbolAliasDefinition = (symbol = '') => {
   return MARKET_SYMBOL_ALIAS_MAP.get(normalized) || null;
 };
 
+const getMarketSymbolAliasDefinitionBySymbol = (symbol = '') => {
+  const normalized = normalizeMarketAliasInput(symbol);
+  if (!normalized) return null;
+
+  const direct = getMarketSymbolAliasDefinition(normalized);
+  if (direct) return direct;
+
+  for (const definition of MARKET_SYMBOL_ALIAS_MAP.values()) {
+    if (definition?.canonical === normalized) {
+      return definition;
+    }
+  }
+
+  return null;
+};
+
 const getMarketAliasLookupSymbols = (symbol = '') => {
   const normalized = normalizeMarketAliasInput(symbol);
   const definition = getMarketSymbolAliasDefinition(normalized);
@@ -150,6 +173,7 @@ export {
   MARKET_SYMBOL_ALIAS_DEFINITIONS,
   buildAliasBackedMarketSymbol,
   getMarketAliasLookupSymbols,
+  getMarketSymbolAliasDefinitionBySymbol,
   getMatchingMarketSymbolAliases,
   getMarketSymbolAliasDefinition,
   isUnsupportedWatchlistSymbol,

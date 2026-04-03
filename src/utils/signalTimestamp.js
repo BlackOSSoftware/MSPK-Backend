@@ -6,7 +6,7 @@ const DATE_TIME_WITHOUT_TZ_PATTERN =
   /^(\d{4})-(\d{2})-(\d{2})[T\s](\d{2}):(\d{2})(?::(\d{2})(\.\d{1,3})?)?$/;
 const GLOBAL_COMMODITY_SEGMENTS = new Set(['COMEX', 'NYMEX']);
 const GLOBAL_COMMODITY_SYMBOL_PATTERN =
-  /(?:^|:)(XAUUSD|XAGUSD|WTI|USOIL|UKOIL|BRENTUSD|CL1!|BRN1!|NG1!|GC1!|XPTUSD|COPPERUSD|NATGASUSD)$/i;
+  /(?:^|:)(XAUUSD|XAGUSD|WTI|USOIL|UKOIL|BRENTUSD|CL1!|BRN1!|NG1!|GC1!|GCI|XPTUSD|COPPERUSD|NATGASUSD)$/i;
 const timezoneOffsetFormatterCache = new Map();
 
 const getConfiguredDefaultSignalTimezone = () =>

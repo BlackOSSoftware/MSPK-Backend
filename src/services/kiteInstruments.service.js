@@ -3,6 +3,7 @@ import logger from '../config/log.js';
 import MasterSymbol from '../models/MasterSymbol.js';
 import { buildMasterSymbolId } from '../utils/masterSymbolId.js';
 import { KITE_SYNC_SYMBOLS } from '../config/seedSymbols.js';
+import { isCurrentMonthExpiry } from '../utils/currentMonthContracts.js';
 
 const toUpper = (value) => String(value ?? '').trim().toUpperCase();
 
@@ -50,14 +51,61 @@ const buildAllowMap = () => {
     return map;
 };
 
-const isCurrentMonthExpiry = (expiry, referenceDate = new Date()) => {
-    if (!expiry) return false;
-    const expiryDate = expiry instanceof Date ? expiry : new Date(expiry);
-    if (Number.isNaN(expiryDate.getTime())) return false;
-    return (
-        expiryDate.getUTCFullYear() === referenceDate.getUTCFullYear() &&
-        expiryDate.getUTCMonth() === referenceDate.getUTCMonth()
-    );
+const FUTURE_CONTRACT_ROOT_REGEX = /^([A-Z0-9]+?)(\d{2})(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)FUT$/i;
+
+const escapeRegex = (value = '') => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+const getFutureContractIdentity = (symbol = '') => {
+    const normalized = toUpper(symbol);
+    if (!normalized) return null;
+
+    const parts = normalized.split(':');
+    const exchange = parts.length > 1 ? toUpper(parts.shift()) : '';
+    const tradingSymbol = parts.length > 0 ? toUpper(parts.join(':')) : normalized;
+    const match = tradingSymbol.match(FUTURE_CONTRACT_ROOT_REGEX);
+    if (!match) return null;
+
+    return {
+        exchange,
+        root: match[1],
+    };
+};
+
+const findExistingFrontMonthFutureDoc = async (payload = {}, referenceDate = new Date()) => {
+    const stableSymbolId = buildMasterSymbolId(payload, { referenceDate });
+    const identity = getFutureContractIdentity(payload.symbol);
+    const filters = [{ symbol: payload.symbol }];
+
+    if (stableSymbolId) {
+        filters.unshift({ symbolId: stableSymbolId });
+    }
+
+    if (identity?.exchange && identity?.root) {
+        filters.push({
+            exchange: identity.exchange,
+            segment: payload.segment || 'FNO',
+            symbol: new RegExp(
+                `^${escapeRegex(identity.exchange)}:${escapeRegex(identity.root)}\\d{2}(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)FUT$`,
+                'i'
+            ),
+        });
+    }
+
+    const candidates = await MasterSymbol.find({ $or: filters })
+        .sort({ updatedAt: -1, createdAt: -1, _id: -1 })
+        .lean();
+
+    if (candidates.length === 0) return null;
+
+    const exactSymbol = candidates.find((candidate) => toUpper(candidate?.symbol) === toUpper(payload.symbol));
+    if (exactSymbol) return exactSymbol;
+
+    if (stableSymbolId) {
+        const exactStableId = candidates.find((candidate) => toUpper(candidate?.symbolId) === toUpper(stableSymbolId));
+        if (exactStableId) return exactStableId;
+    }
+
+    return candidates[0];
 };
 
 class KiteInstrumentsService {
@@ -116,8 +164,9 @@ class KiteInstrumentsService {
                     { upsert: true, new: true, setDefaultsOnInsert: true }
                 );
 
-                if (!doc.symbolId) {
-                    doc.symbolId = buildMasterSymbolId(doc);
+                const nextSymbolId = buildMasterSymbolId(doc, { referenceDate });
+                if (doc.symbolId !== nextSymbolId) {
+                    doc.symbolId = nextSymbolId;
                     await doc.save();
                 }
 
@@ -130,7 +179,7 @@ class KiteInstrumentsService {
 
                 const instrumentType = toUpper(inst.instrument_type || inst.instrumentType);
                 if (!instrumentType.includes('FUT')) continue;
-                if (!isCurrentMonthExpiry(inst.expiry, referenceDate)) continue;
+                if (!isCurrentMonthExpiry(inst.expiry, referenceDate, { exchange, segment: 'FNO' })) continue;
 
                 const tradingsymbol = toUpper(inst.tradingsymbol);
                 if (!tradingsymbol) continue;
@@ -149,15 +198,17 @@ class KiteInstrumentsService {
                     isActive: true,
                     isWatchlist: false,
                 };
+                const existingDoc = await findExistingFrontMonthFutureDoc(payload, referenceDate);
 
                 const doc = await MasterSymbol.findOneAndUpdate(
-                    { symbol: payload.symbol },
+                    existingDoc?._id ? { _id: existingDoc._id } : { symbol: payload.symbol },
                     { $set: payload },
                     { upsert: true, new: true, setDefaultsOnInsert: true }
                 );
 
-                if (!doc.symbolId) {
-                    doc.symbolId = buildMasterSymbolId(doc);
+                const nextSymbolId = buildMasterSymbolId(doc, { referenceDate });
+                if (doc.symbolId !== nextSymbolId) {
+                    doc.symbolId = nextSymbolId;
                     await doc.save();
                 }
 
@@ -170,7 +221,7 @@ class KiteInstrumentsService {
 
             await this.loadIntoMemory();
             logger.info(`KITE_SYNC: Successfully synced ${synced} instruments into MongoDB`);
-            logger.info(`KITE_SYNC: Synced ${nfoFuturesSynced} current-month NFO futures`);
+            logger.info(`KITE_SYNC: Synced ${nfoFuturesSynced} front-month NFO futures`);
 
             return { count: synced, missing: Array.from(missing), nfoFutures: nfoFuturesSynced };
         } catch (error) {

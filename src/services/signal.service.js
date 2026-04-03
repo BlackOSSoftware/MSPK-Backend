@@ -6,7 +6,7 @@ import { broadcastToRoles } from './websocket.service.js';
 import marketDataService from './marketData.service.js';
 import { getSignalAudienceGroups } from '../utils/signalRouting.js';
 import { resolveSymbolSegmentGroup } from '../utils/marketSegmentResolver.js';
-import { normalizeSignalTimeframe } from '../utils/timeframe.js';
+import { floorTimestampToTimeframe, normalizeSignalTimeframe } from '../utils/timeframe.js';
 import { resolveBestMasterSymbol } from '../utils/masterSymbolResolver.js';
 import { normalizeSignalTimestampInput } from '../utils/signalTimestamp.js';
 import {
@@ -70,6 +70,13 @@ const toFiniteNumber = (value) => {
 const roundSignalValue = (value) => Math.round(value * 100) / 100;
 const getSignalDirection = (signal) => String(signal?.type || 'BUY').trim().toUpperCase();
 const isSellSignal = (signal) => getSignalDirection(signal) === 'SELL';
+const resolveAutoSettlementTime = (signal, occurredAt, options = {}) => {
+  if (options.alignToTimeframe === false) return occurredAt;
+  return floorTimestampToTimeframe(occurredAt, signal?.timeframe, {
+    symbol: signal?.symbol,
+    segment: signal?.segment,
+  }) || occurredAt;
+};
 const normalizeSignalTargetLevel = (value) => {
   const normalized = String(value || '').trim().toUpperCase();
   return TARGET_LEVEL_RANK[normalized] ? normalized : null;
@@ -148,6 +155,7 @@ const buildAutoSignalSettlement = (signal, marketPrice, options = {}) => {
   if (typeof resolvedPrice !== 'number' || resolvedPrice <= 0) return null;
 
   const occurredAt = normalizeSignalTimestampInput(options.occurredAt) || new Date();
+  const resolvedOccurredAt = resolveAutoSettlementTime(signal, occurredAt, options);
   const finalTarget = getFinalSignalTarget(signal);
   const highestTargetLevel = getSignalHighestAchievedTargetLevel(signal, resolvedPrice);
 
@@ -159,7 +167,7 @@ const buildAutoSignalSettlement = (signal, marketPrice, options = {}) => {
       status: 'Stoploss Hit',
       exitPrice: stopLoss,
       exitReason: options.exitReason || 'AUTO_STOPLOSS_REACHED',
-      exitTime: occurredAt,
+      exitTime: resolvedOccurredAt,
       ...(options.notes !== undefined ? { notes: options.notes } : {}),
       notificationMeta: {
         subType: 'SIGNAL_STOPLOSS',
@@ -177,7 +185,7 @@ const buildAutoSignalSettlement = (signal, marketPrice, options = {}) => {
       status: 'Target Hit',
       exitPrice: finalTarget.price,
       exitReason: options.exitReason || `AUTO_TARGET_REACHED_${finalTarget.level}`,
-      exitTime: occurredAt,
+      exitTime: resolvedOccurredAt,
       ...(options.notes !== undefined ? { notes: options.notes } : {}),
       notificationMeta: {
         subType: 'SIGNAL_TARGET',
@@ -468,13 +476,22 @@ const buildTradingViewSignalFilter = () => ({
   ],
 });
 
-const normalizePersistedSignalDates = (payload = {}) => {
+const normalizePersistedSignalDates = (payload = {}, options = {}) => {
+  const timestampContext = {
+    symbol: options.symbol ?? payload.symbol,
+    segment: options.segment ?? payload.segment,
+    ...(options.referenceTime ? { referenceTime: options.referenceTime } : {}),
+  };
   if (payload.signalTime !== undefined) {
-    payload.signalTime = normalizeSignalTimestampInput(payload.signalTime);
+    payload.signalTime = normalizeSignalTimestampInput(payload.signalTime, timestampContext);
   }
 
   if (payload.exitTime !== undefined) {
-    payload.exitTime = normalizeSignalTimestampInput(payload.exitTime);
+    payload.exitTime = normalizeSignalTimestampInput(payload.exitTime, timestampContext);
+  }
+
+  if (payload.lastInfoTime !== undefined) {
+    payload.lastInfoTime = normalizeSignalTimestampInput(payload.lastInfoTime, timestampContext);
   }
 };
 
@@ -524,10 +541,13 @@ const createSignal = async (signalBody, user) => {
   if (!signalBody.signalTime) {
     signalBody.signalTime = new Date();
   }
-  normalizePersistedSignalDates(signalBody);
   signalBody.source = String(signalBody?.source || (user ? 'MANUAL' : 'SYSTEM')).trim().toUpperCase();
-
   await hydrateSignalSegment(signalBody);
+  normalizePersistedSignalDates(signalBody, {
+    symbol: signalBody.symbol,
+    segment: signalBody.segment,
+    referenceTime: signalBody.signalTime || new Date(),
+  });
   if (signalBody.uniqueId) {
     signalBody.uniqueId = String(signalBody.uniqueId).trim();
     const existing = await Signal.findOne({ uniqueId: signalBody.uniqueId });
@@ -973,10 +993,14 @@ const updateSignalById = async (signalId, updateBody) => {
     const normalizedTimeframe = normalizeSignalTimeframe(persistedUpdateBody.timeframe);
     persistedUpdateBody.timeframe = normalizedTimeframe || persistedUpdateBody.timeframe;
   }
-  normalizePersistedSignalDates(persistedUpdateBody);
   if (persistedUpdateBody.symbol || persistedUpdateBody.segment) {
     await hydrateSignalSegment(persistedUpdateBody);
   }
+  normalizePersistedSignalDates(persistedUpdateBody, {
+    symbol: persistedUpdateBody.symbol || signal.symbol,
+    segment: persistedUpdateBody.segment || signal.segment,
+    referenceTime: signal.updatedAt || signal.createdAt || new Date(),
+  });
   const previousStatus = String(signal.status || '').trim();
   const nextStatus = String(persistedUpdateBody?.status || '').trim();
   const isReopeningToActive =

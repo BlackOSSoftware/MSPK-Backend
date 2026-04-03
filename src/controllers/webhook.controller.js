@@ -10,6 +10,7 @@ import {
   normalizeSignalSegment,
   normalizeSignalSymbol,
 } from '../utils/signalRouting.js';
+import { looksLikeMasterSymbolId } from '../utils/masterSymbolId.js';
 import { resolveBestMasterSymbol } from '../utils/masterSymbolResolver.js';
 import {
   buildTimeframeQuery,
@@ -189,6 +190,133 @@ const deriveExitStatus = ({ signal, exitReason, exitPrice, totalPoints }) => {
   return 'Closed';
 };
 
+const getSignalReferenceTime = (signal) => {
+  return (
+    parseSignalTimestamp(signal?.signalTime) ||
+    parseSignalTimestamp(signal?.createdAt) ||
+    parseSignalTimestamp(signal?.updatedAt) ||
+    null
+  );
+};
+
+const getStopLossConsistencyTolerance = (signal) => {
+  const entryPrice = toFiniteNumber(signal?.entryPrice);
+  const stopLoss = toFiniteNumber(signal?.stopLoss);
+  const stopGap =
+    typeof entryPrice === 'number' && typeof stopLoss === 'number' ? Math.abs(stopLoss - entryPrice) : 0;
+  const proportionalTolerance = stopGap > 0 ? stopGap * 0.1 : 0;
+  const priceTolerance = typeof stopLoss === 'number' ? Math.abs(stopLoss) * 0.0001 : 0;
+  return Math.max(roundSignalValue(proportionalTolerance), roundSignalValue(priceTolerance), 0.05);
+};
+
+const isStopLossExitPriceConsistent = ({ signal, exitPrice }) => {
+  const resolvedExitPrice = toFiniteNumber(exitPrice);
+  const stopLoss = toFiniteNumber(signal?.stopLoss);
+  if (typeof resolvedExitPrice !== 'number' || typeof stopLoss !== 'number') {
+    return true;
+  }
+
+  const tolerance = getStopLossConsistencyTolerance(signal);
+  const signalType = String(signal?.type || 'BUY').trim().toUpperCase();
+
+  if (signalType === 'SELL') {
+    return resolvedExitPrice >= stopLoss - tolerance;
+  }
+
+  if (signalType === 'BUY') {
+    return resolvedExitPrice <= stopLoss + tolerance;
+  }
+
+  return true;
+};
+
+const getSuspiciousExitLagThresholdMs = (timeframe) => {
+  const timeframeMs = getTimeframeDurationMs(timeframe);
+  if (!timeframeMs) {
+    return 90 * 60 * 1000;
+  }
+
+  return Math.min(Math.max(timeframeMs * 4, 90 * 60 * 1000), 6 * 60 * 60 * 1000);
+};
+
+const normalizeExitWebhookPayload = ({
+  signal,
+  exitReason,
+  exitPrice,
+  totalPoints,
+  exitTime,
+  receivedAt = new Date(),
+  timeframeFromPayload = '',
+} = {}) => {
+  const normalizedReason = String(exitReason || '').trim().toUpperCase();
+  const receivedDate = parseSignalTimestamp(receivedAt) || new Date();
+  const signalTimeframe =
+    normalizeSignalTimeframe(timeframeFromPayload) ||
+    normalizeSignalTimeframe(signal?.timeframe) ||
+    String(timeframeFromPayload || signal?.timeframe || '').trim();
+  const signalReferenceTime = getSignalReferenceTime(signal);
+  const timeframeProvided = Boolean(String(timeframeFromPayload || '').trim());
+  const normalized = {
+    exitPrice: toFiniteNumber(exitPrice),
+    totalPoints: deriveExitPoints({ signal, exitPrice, totalPoints }),
+    exitTime: parseSignalTimestamp(exitTime) || null,
+    sanitized: false,
+    sanitizedFields: [],
+  };
+
+  const addSanitizedField = (field) => {
+    normalized.sanitized = true;
+    if (!normalized.sanitizedFields.includes(field)) {
+      normalized.sanitizedFields.push(field);
+    }
+  };
+
+  if ((normalizedReason.includes('STOP') || normalizedReason.includes('SL')) && !isStopLossExitPriceConsistent({
+    signal,
+    exitPrice: normalized.exitPrice,
+  })) {
+    const stopLoss = toFiniteNumber(signal?.stopLoss);
+    if (typeof stopLoss === 'number') {
+      normalized.exitPrice = roundSignalValue(stopLoss);
+      normalized.totalPoints = deriveExitPoints({
+        signal,
+        exitPrice: normalized.exitPrice,
+        totalPoints: undefined,
+      });
+      addSanitizedField('exitPrice');
+      addSanitizedField('totalPoints');
+    }
+
+    normalized.exitTime = receivedDate;
+    addSanitizedField('exitTime');
+  }
+
+  if (!normalized.exitTime) {
+    normalized.exitTime = receivedDate;
+    addSanitizedField('exitTime');
+  }
+
+  if (
+    signalReferenceTime &&
+    normalized.exitTime &&
+    normalized.exitTime.getTime() < signalReferenceTime.getTime()
+  ) {
+    normalized.exitTime = receivedDate;
+    addSanitizedField('exitTime');
+  }
+
+  if (
+    !timeframeProvided &&
+    normalized.exitTime &&
+    receivedDate.getTime() - normalized.exitTime.getTime() > getSuspiciousExitLagThresholdMs(signalTimeframe)
+  ) {
+    normalized.exitTime = receivedDate;
+    addSanitizedField('exitTime');
+  }
+
+  return normalized;
+};
+
 const getWebhookSymbolInput = (body = {}) =>
   String(
     body.symbol_id ||
@@ -198,8 +326,6 @@ const getWebhookSymbolInput = (body = {}) =>
       body.symbol ||
       ''
   ).trim();
-
-const looksLikeMasterSymbolId = (value) => /-[a-f0-9]{24}$/i.test(String(value || '').trim());
 
 const parseWebhookDate = (value, options = {}) => {
   return parseSignalTimestamp(value, options);
@@ -211,7 +337,7 @@ const isDelayedFeedSignal = ({ symbol = '', segment = '' } = {}) => {
 
   const normalizedSymbol = String(symbol || '').trim().toUpperCase();
   if (
-    /(?:^|:)(XAUUSD|XAGUSD|WTI|USOIL|UKOIL|BRENTUSD|CL1!|BRN1!|NG1!|GC1!|XPTUSD|COPPERUSD|NATGASUSD)$/.test(
+    /(?:^|:)(XAUUSD|XAGUSD|WTI|USOIL|UKOIL|BRENTUSD|CL1!|BRN1!|NG1!|GC1!|GCI|XPTUSD|COPPERUSD|NATGASUSD)$/.test(
       normalizedSymbol
     )
   ) {
@@ -249,6 +375,25 @@ const buildProcessedEntrySignalKey = (uniqueId = '') => {
   return `processed_signal_entry:${normalized}`;
 };
 
+const formatWebhookAuditValue = (value) => {
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? 'NA' : value.toISOString();
+  }
+
+  const normalized = String(value ?? '').trim();
+  return normalized || 'NA';
+};
+
+const getWebhookTimingLagMs = (parsedTime, receivedAt) => {
+  if (!(parsedTime instanceof Date) || Number.isNaN(parsedTime.getTime())) {
+    return 'NA';
+  }
+
+  const receivedTime =
+    receivedAt instanceof Date && !Number.isNaN(receivedAt.getTime()) ? receivedAt : new Date();
+  return String(receivedTime.getTime() - parsedTime.getTime());
+};
+
 const hasProcessedEntrySignal = async (uniqueId = '') => {
   const cacheKey = buildProcessedEntrySignalKey(uniqueId);
   if (!cacheKey) return false;
@@ -283,6 +428,7 @@ const resolveMasterSymbol = async (input, { symbolIdRequested = false } = {}) =>
 
 const receiveSignal = catchAsync(async (req, res) => {
   const startedAt = Date.now();
+  const receivedAt = new Date(startedAt);
   const event = String(req.body.event || '').trim().toUpperCase();
   const webhookId = String(
     req.body.uniq_id || req.body.unique_id || req.body.uniqueId || req.body.uniqe_id || ''
@@ -332,6 +478,30 @@ const receiveSignal = catchAsync(async (req, res) => {
     `[WEBHOOK] received event=${event || 'ENTRY'} webhookId=${webhookId || 'NA'} symbolInput=${symbolInput || 'NA'} ` +
     `resolvedSymbol=${symbol || 'NA'} segment=${segment || 'NA'} timeframe=${normalizedTimeframe || 'NA'}`
   );
+  if (event === 'INFO') {
+    const parsedInfoTime = parseWebhookDate(req.body.time, webhookTimestampContext);
+    logger.info(
+      `[WEBHOOK_TIMING] event=INFO webhookId=${webhookId || 'NA'} symbol=${symbol || 'NA'} ` +
+        `timeframe=${normalizedTimeframe || 'NA'} rawTime=${formatWebhookAuditValue(req.body.time)} ` +
+        `parsedTime=${formatWebhookAuditValue(parsedInfoTime)} receivedAt=${receivedAt.toISOString()} ` +
+        `lagMs=${getWebhookTimingLagMs(parsedInfoTime, receivedAt)}`
+    );
+  } else if (event === 'EXIT') {
+    const parsedExitTimeForAudit = parseWebhookDate(req.body.exit_time, webhookTimestampContext);
+    logger.info(
+      `[WEBHOOK_TIMING] event=EXIT webhookId=${webhookId || 'NA'} symbol=${symbol || 'NA'} ` +
+        `timeframe=${normalizedTimeframe || 'NA'} rawExitTime=${formatWebhookAuditValue(req.body.exit_time)} ` +
+        `parsedExitTime=${formatWebhookAuditValue(parsedExitTimeForAudit)} receivedAt=${receivedAt.toISOString()} ` +
+        `lagMs=${getWebhookTimingLagMs(parsedExitTimeForAudit, receivedAt)}`
+    );
+  } else {
+    logger.info(
+      `[WEBHOOK_TIMING] event=ENTRY webhookId=${webhookId || 'NA'} symbol=${symbol || 'NA'} ` +
+        `timeframe=${normalizedTimeframe || 'NA'} rawSignalTime=${formatWebhookAuditValue(req.body.signal_time)} ` +
+        `parsedSignalTime=${formatWebhookAuditValue(parsedSignalTime)} receivedAt=${receivedAt.toISOString()} ` +
+        `lagMs=${getWebhookTimingLagMs(parsedSignalTime, receivedAt)}`
+    );
+  }
 
   if (symbolIdRequested && symbolInput && !resolvedMasterSymbol) {
     return sendWebhookResponse(httpStatus.BAD_REQUEST, {
@@ -369,25 +539,7 @@ const receiveSignal = catchAsync(async (req, res) => {
 
       return result;
     };
-    const collectFallbackCandidates = async ({ includeClosed = false } = {}) => {
-      const scopedFilters = buildScopedFilters(baseFilter);
-      const statusFilter = includeClosed ? {} : { status: { $nin: getSignalClosedStatuses() } };
-      const typeFilter = expectedType ? { type: expectedType } : {};
-      const queries = scopedFilters.map((scopedFilter) =>
-        Signal.find({
-          ...TRADINGVIEW_SIGNAL_SOURCE_FILTER,
-          ...scopedFilter,
-          ...statusFilter,
-          ...typeFilter,
-        })
-          .sort({ updatedAt: -1, createdAt: -1, _id: -1 })
-          .limit(10)
-      );
-
-      const queryResults = await Promise.all(queries);
-      return queryResults.flat();
-    };
-    const collectCandidates = async ({ includeClosed = false } = {}) => {
+    const collectCandidates = async ({ includeClosed = false, requireWebhookId = true } = {}) => {
       const scopedFilters = buildScopedFilters(baseFilter);
       const statusFilter = includeClosed ? {} : { status: { $nin: getSignalClosedStatuses() } };
       const queries = scopedFilters.map((scopedFilter) =>
@@ -395,10 +547,11 @@ const receiveSignal = catchAsync(async (req, res) => {
           ...TRADINGVIEW_SIGNAL_SOURCE_FILTER,
           ...scopedFilter,
           ...statusFilter,
-          $or: [{ uniqueId: id }, { webhookId: id }],
+          ...(expectedType ? { type: expectedType } : {}),
+          ...(requireWebhookId && id ? { $or: [{ uniqueId: id }, { webhookId: id }] } : {}),
         })
           .sort({ updatedAt: -1, createdAt: -1, _id: -1 })
-          .limit(5)
+          .limit(requireWebhookId && id ? 5 : 20)
       );
 
       if (symbol) {
@@ -408,10 +561,11 @@ const receiveSignal = catchAsync(async (req, res) => {
               ...TRADINGVIEW_SIGNAL_SOURCE_FILTER,
               ...scopedFilter,
               ...statusFilter,
-              $or: [{ uniqueId: id }, { webhookId: id }],
+              ...(expectedType ? { type: expectedType } : {}),
+              ...(requireWebhookId && id ? { $or: [{ uniqueId: id }, { webhookId: id }] } : {}),
             })
               .sort({ updatedAt: -1, createdAt: -1, _id: -1 })
-              .limit(5)
+              .limit(requireWebhookId && id ? 5 : 20)
           );
         });
       }
@@ -421,7 +575,11 @@ const receiveSignal = catchAsync(async (req, res) => {
     };
 
     if (!id) {
-      return resolveCandidateResult(await collectFallbackCandidates());
+      return resolveCandidateResult(
+        await collectCandidates({
+          requireWebhookId: false,
+        })
+      );
     }
 
     // 1) If webhook sends our MongoDB _id
@@ -434,15 +592,22 @@ const receiveSignal = catchAsync(async (req, res) => {
     }
 
     // 2) Match by the caller-provided ID first.
-    const activeMatchResult = resolveCandidateResult(await collectCandidates());
-    if (activeMatchResult.signal || activeMatchResult.ambiguous) {
-      return activeMatchResult;
+    if (id) {
+      const activeMatchResult = resolveCandidateResult(await collectCandidates());
+      if (activeMatchResult.signal || activeMatchResult.ambiguous) {
+        return activeMatchResult;
+      }
     }
 
-    // 3) Fallback match by symbol/segment/timeframe/type if webhook id cannot be trusted.
-    const fallbackActiveMatch = resolveCandidateResult(await collectFallbackCandidates());
-    if (fallbackActiveMatch.signal || fallbackActiveMatch.ambiguous || !req.body.exit_time) {
-      return fallbackActiveMatch;
+    // 3) Fallback to scoped symbol/segment/timeframe matching when upstream webhook IDs
+    // are reused or missing. This is common in the current production feed.
+    const activeFallbackResult = resolveCandidateResult(
+      await collectCandidates({
+        requireWebhookId: false,
+      })
+    );
+    if (activeFallbackResult.signal || activeFallbackResult.ambiguous || !req.body.exit_time) {
+      return activeFallbackResult;
     }
 
     // 4) If already closed (idempotent EXIT), match on exit_time too.
@@ -454,20 +619,27 @@ const receiveSignal = catchAsync(async (req, res) => {
       if (!exitTime) {
         return { signal: null, ambiguous: false };
       }
-      const closedCandidates = (await collectCandidates({ includeClosed: true })).filter((candidate) => {
-        const candidateExitTime = candidate?.exitTime ? new Date(candidate.exitTime).getTime() : NaN;
-        return Number.isFinite(candidateExitTime) && candidateExitTime === exitTime.getTime();
-      });
-      const idempotentMatch = resolveCandidateResult(closedCandidates);
-      if (idempotentMatch.signal || idempotentMatch.ambiguous) {
-        return idempotentMatch;
+      const filterClosedCandidatesByExitTime = (candidates = []) =>
+        candidates.filter((candidate) => {
+          const candidateExitTime = candidate?.exitTime ? new Date(candidate.exitTime).getTime() : NaN;
+          return Number.isFinite(candidateExitTime) && candidateExitTime === exitTime.getTime();
+        });
+
+      if (id) {
+        const closedCandidates = filterClosedCandidatesByExitTime(await collectCandidates({ includeClosed: true }));
+        const closedMatchResult = resolveCandidateResult(closedCandidates);
+        if (closedMatchResult.signal || closedMatchResult.ambiguous) {
+          return closedMatchResult;
+        }
       }
 
-      const fallbackClosedCandidates = (await collectFallbackCandidates({ includeClosed: true })).filter((candidate) => {
-        const candidateExitTime = candidate?.exitTime ? new Date(candidate.exitTime).getTime() : NaN;
-        return Number.isFinite(candidateExitTime) && candidateExitTime === exitTime.getTime();
-      });
-      return resolveCandidateResult(fallbackClosedCandidates);
+      const closedFallbackCandidates = filterClosedCandidatesByExitTime(
+        await collectCandidates({
+          includeClosed: true,
+          requireWebhookId: false,
+        })
+      );
+      return resolveCandidateResult(closedFallbackCandidates);
     }
 
     return { signal: null, ambiguous: false };
@@ -614,18 +786,23 @@ const receiveSignal = catchAsync(async (req, res) => {
       });
     }
 
-    const desiredStatus = deriveExitStatus({
+    const normalizedExitUpdate = normalizeExitWebhookPayload({
       signal: existing,
       exitReason: req.body.exit_reason,
       exitPrice: req.body.exit_price,
       totalPoints: req.body.total_points,
+      exitTime: parsedExitTime || req.body.exit_time,
+      receivedAt: new Date(startedAt),
+      timeframeFromPayload: rawTimeframe,
     });
-    const incomingExitTime = parsedExitTime;
-    const incomingExitPrice = toFiniteNumber(req.body.exit_price);
-    const resolvedTotalPoints = deriveExitPoints({
+    const incomingExitTime = normalizedExitUpdate.exitTime;
+    const incomingExitPrice = normalizedExitUpdate.exitPrice;
+    const resolvedTotalPoints = normalizedExitUpdate.totalPoints;
+    const desiredStatus = deriveExitStatus({
       signal: existing,
+      exitReason: req.body.exit_reason,
       exitPrice: incomingExitPrice,
-      totalPoints: req.body.total_points,
+      totalPoints: resolvedTotalPoints,
     });
     const isNumberClose = (a, b, eps = 1e-6) => {
       if (typeof a !== 'number' || typeof b !== 'number') return false;
@@ -658,6 +835,16 @@ const receiveSignal = catchAsync(async (req, res) => {
         `existingExit=${new Date(existing.exitTime).toISOString()} incomingExit=${incomingExitTime ? incomingExitTime.toISOString() : 'NA'}`
       );
       return sendWebhookResponse(httpStatus.OK, { status: 'already_closed', signal: existing });
+    }
+
+    if (normalizedExitUpdate.sanitized) {
+      logger.warn(
+        `[WEBHOOK] Normalized suspicious EXIT payload for ${existing.symbol} ` +
+          `timeframe=${existing.timeframe || 'unknown'} webhookId=${webhookId || 'NA'} ` +
+          `fields=${normalizedExitUpdate.sanitizedFields.join(',') || 'none'} ` +
+          `rawExitPrice=${req.body.exit_price} normalizedExitPrice=${incomingExitPrice} ` +
+          `rawExitTime=${req.body.exit_time || 'NA'} normalizedExitTime=${incomingExitTime?.toISOString?.() || 'NA'}`
+      );
     }
 
     const updateBody = {
@@ -848,4 +1035,10 @@ export default {
   receiveSignal,
 };
 
-export { deriveExitStatus, getAllowedSignalAgeMs, isValidInfoTargetProgress };
+export {
+  deriveExitStatus,
+  getAllowedSignalAgeMs,
+  isStopLossExitPriceConsistent,
+  isValidInfoTargetProgress,
+  normalizeExitWebhookPayload,
+};

@@ -1,4 +1,5 @@
 import { isCryptoLikeSymbol, mapPreferredSegmentsToAudienceGroups } from './signalRouting.js';
+import { MARKET_SYMBOL_ALIAS_DEFINITIONS } from './marketSymbolAliases.js';
 
 const MAX_SELECTED_SYMBOLS_PER_SEGMENT = 10;
 const DEFAULT_SIGNAL_SELECTION_BY_GROUP = {
@@ -19,6 +20,16 @@ const INDEX_SYMBOL_ALIAS_GROUPS = [
 
 const INDEX_SYMBOL_ALIAS_MAP = new Map(
   INDEX_SYMBOL_ALIAS_GROUPS.flatMap((group) => group.map((symbol) => [symbol, group]))
+);
+const MARKET_SYMBOL_ALIAS_GROUPS = MARKET_SYMBOL_ALIAS_DEFINITIONS
+  .map((definition) => Array.from(new Set([
+    String(definition?.alias || '').trim().toUpperCase(),
+    String(definition?.canonical || '').trim().toUpperCase(),
+  ].filter(Boolean))))
+  .filter((group) => group.length > 1);
+
+const MARKET_SYMBOL_ALIAS_MAP = new Map(
+  MARKET_SYMBOL_ALIAS_GROUPS.flatMap((group) => group.map((symbol) => [symbol, group]))
 );
 
 const COMMODITY_SYMBOL_ALIAS_GROUPS = [
@@ -63,8 +74,11 @@ const getSelectedSymbolAliases = (symbol = '') => {
   const aliases = new Set([normalized]);
   const indexAliasGroup = INDEX_SYMBOL_ALIAS_MAP.get(normalized);
   const commodityAliasGroup = COMMODITY_SYMBOL_ALIAS_MAP.get(normalized);
+  const marketAliasGroup = MARKET_SYMBOL_ALIAS_MAP.get(normalized);
   if (indexAliasGroup) {
     indexAliasGroup.forEach((alias) => aliases.add(alias));
+  } else if (marketAliasGroup) {
+    marketAliasGroup.forEach((alias) => aliases.add(alias));
   } else if (commodityAliasGroup) {
     commodityAliasGroup.forEach((alias) => aliases.add(alias));
     getCommodityContinuousAliases(normalized).forEach((alias) => aliases.add(alias));

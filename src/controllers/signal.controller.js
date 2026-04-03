@@ -19,8 +19,9 @@ import {
 } from '../utils/userSignalSelection.js';
 import { isClosedSignalStatus, resolveDisplayTimestamp } from '../utils/notificationFormatter.js';
 import { pickBestMasterSymbol } from '../utils/masterSymbolResolver.js';
+import { getMarketSymbolAliasDefinitionBySymbol } from '../utils/marketSymbolAliases.js';
 import { resolveSymbolSegmentGroup } from '../utils/marketSegmentResolver.js';
-import { buildTimeframeQuery, normalizeSignalTimeframe } from '../utils/timeframe.js';
+import { buildTimeframeQuery, floorTimestampToTimeframe, normalizeSignalTimeframe } from '../utils/timeframe.js';
 import {
   addIndiaDays,
   getEndOfIndiaDay as resolveEndOfIndiaDay,
@@ -124,6 +125,18 @@ const getLatestDate = (...values) => {
   });
 
   return latest;
+};
+
+const getDisplayExitTimestamp = (signal = {}) => {
+  const exitReason = String(signal?.exitReason || '').trim().toUpperCase();
+  if (!/^AUTO_(STOPLOSS_REACHED|TARGET_REACHED)/.test(exitReason)) {
+    return signal?.exitTime || null;
+  }
+
+  return floorTimestampToTimeframe(signal?.exitTime, signal?.timeframe, {
+    symbol: signal?.symbol,
+    segment: signal?.segment,
+  }) || signal?.exitTime || null;
 };
 
 const resolvePreferredSignalSymbol = async (symbol = '') => {
@@ -393,43 +406,60 @@ const buildSelectedScriptsResponse = async (symbols = [], options = {}) => {
 };
 
 const formatSignalResponse = (signal, resolvedMasterSymbol = null) => {
-  const canonicalSymbol = String(resolvedMasterSymbol?.symbol || signal.symbol || '').trim().toUpperCase();
-  const symbolName = String(resolvedMasterSymbol?.name || signal.symbol || '').trim();
   const originalSymbol = String(signal?.symbol || '').trim().toUpperCase();
+  const canonicalSymbol = String(resolvedMasterSymbol?.symbol || signal.symbol || '').trim().toUpperCase();
+  const aliasDefinition =
+    getMarketSymbolAliasDefinitionBySymbol(originalSymbol) ||
+    getMarketSymbolAliasDefinitionBySymbol(canonicalSymbol);
+  const displaySymbol = String(aliasDefinition?.alias || canonicalSymbol || originalSymbol).trim().toUpperCase();
+  const symbolName = String(aliasDefinition?.name || resolvedMasterSymbol?.name || signal.symbol || '').trim();
   const normalizedTimeframe = normalizeSignalTimeframe(signal.timeframe) || signal.timeframe;
+  const segment = resolvedMasterSymbol
+    ? resolveSignalDisplaySegment({
+        ...signal,
+        symbol: canonicalSymbol || displaySymbol,
+        segment: resolvedMasterSymbol.segment,
+        exchange: resolvedMasterSymbol.exchange,
+      })
+    : resolveSignalDisplaySegment(signal);
+  const timestampContext = {
+    symbol: canonicalSymbol || displaySymbol || originalSymbol,
+    segment,
+    referenceTime: signal.updatedAt || signal.createdAt || signal.signalTime || signal.exitTime || new Date(),
+  };
   const isClosedSignal = isClosedSignalStatus(signal.status);
   const displaySignalTime = resolveDisplayTimestamp({
     primary: signal.signalTime,
     fallback: signal.createdAt,
     timeframe: normalizedTimeframe,
     preferPrimaryWhenAvailable: isClosedSignal,
+    primaryOptions: timestampContext,
+    fallbackOptions: timestampContext,
   });
-  const resolvedExitTime = isClosedSignal ? signal.exitTime || null : null;
+  const resolvedExitTime = isClosedSignal ? getDisplayExitTimestamp(signal) : null;
   const displayExitTime = isClosedSignal
     ? resolveDisplayTimestamp({
         primary: resolvedExitTime,
         fallback: signal.updatedAt || signal.createdAt,
         timeframe: normalizedTimeframe,
         floor: displaySignalTime,
+        primaryOptions: timestampContext,
+        fallbackOptions: timestampContext,
+        floorOptions: timestampContext,
+        maxPrimaryLagMs: 6 * 60 * 60 * 1000,
       })
     : null;
-  const segment = resolvedMasterSymbol
-    ? resolveSignalDisplaySegment({
-        ...signal,
-        symbol: canonicalSymbol,
-        segment: resolvedMasterSymbol.segment,
-        exchange: resolvedMasterSymbol.exchange,
-      })
-    : resolveSignalDisplaySegment(signal);
 
   return {
     id: signal._id,
     uniqueId: signal.uniqueId,
     webhookId: signal.webhookId,
-    symbol: canonicalSymbol,
+    symbol: displaySymbol,
     symbolName,
     originalSymbol,
-    sourceSymbol: String(resolvedMasterSymbol?.sourceSymbol || canonicalSymbol || '').trim().toUpperCase(),
+    sourceSymbol: String(
+      resolvedMasterSymbol?.sourceSymbol || aliasDefinition?.canonical || canonicalSymbol || displaySymbol || ''
+    ).trim().toUpperCase(),
     type: signal.type,
     entry: signal.entryPrice,
     stoploss: signal.stopLoss,

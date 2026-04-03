@@ -8,6 +8,81 @@ const normalizeMinuteAmount = (amount, raw) => {
   return `${amount}m`;
 };
 
+const DEFAULT_SIGNAL_TIMEZONE = 'Asia/Kolkata';
+const DEFAULT_COMEX_SIGNAL_TIMEZONE = 'America/New_York';
+const GLOBAL_COMMODITY_SEGMENTS = new Set(['COMEX', 'NYMEX']);
+const GLOBAL_COMMODITY_SYMBOL_PATTERN =
+  /(?:^|:)(XAUUSD|XAGUSD|WTI|USOIL|UKOIL|BRENTUSD|CL1!|BRN1!|NG1!|GC1!|GCI|XPTUSD|COPPERUSD|NATGASUSD)$/i;
+const timezoneOffsetFormatterCache = new Map();
+
+const normalizeUpper = (value) => String(value ?? '').trim().toUpperCase();
+
+const isGlobalCommodityContext = ({ symbol = '', segment = '' } = {}) => {
+  const normalizedSegment = normalizeUpper(segment);
+  if (GLOBAL_COMMODITY_SEGMENTS.has(normalizedSegment)) return true;
+
+  const normalizedSymbol = normalizeUpper(symbol);
+  if (!normalizedSymbol) return false;
+
+  return GLOBAL_COMMODITY_SYMBOL_PATTERN.test(normalizedSymbol);
+};
+
+const resolveTimeframeTimezone = (options = {}) => {
+  const explicitTimezone = String(options?.timezone || '').trim();
+  if (explicitTimezone) return explicitTimezone;
+
+  if (isGlobalCommodityContext(options)) {
+    return String(process.env.WEBHOOK_COMEX_TIMEZONE || DEFAULT_COMEX_SIGNAL_TIMEZONE).trim() ||
+      DEFAULT_COMEX_SIGNAL_TIMEZONE;
+  }
+
+  return String(process.env.WEBHOOK_SIGNAL_TIMEZONE || DEFAULT_SIGNAL_TIMEZONE).trim() || DEFAULT_SIGNAL_TIMEZONE;
+};
+
+const getTimezoneOffsetFormatter = (timezone) => {
+  if (!timezoneOffsetFormatterCache.has(timezone)) {
+    timezoneOffsetFormatterCache.set(
+      timezone,
+      new Intl.DateTimeFormat('en-US', {
+        timeZone: timezone,
+        timeZoneName: 'longOffset',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false,
+      })
+    );
+  }
+
+  return timezoneOffsetFormatterCache.get(timezone);
+};
+
+const getTimezoneOffsetMinutes = (timezone, date) => {
+  try {
+    const formatter = getTimezoneOffsetFormatter(timezone);
+    const timeZoneName =
+      formatter.formatToParts(date).find((part) => part.type === 'timeZoneName')?.value || '';
+    const normalized = timeZoneName.replace(/^UTC/i, 'GMT');
+
+    if (normalized === 'GMT') return 0;
+
+    const match = normalized.match(/^GMT([+-])(\d{1,2})(?::(\d{2}))?$/i);
+    if (!match) return null;
+
+    const sign = match[1] === '-' ? -1 : 1;
+    const hours = Number.parseInt(match[2], 10);
+    const minutes = Number.parseInt(match[3] || '0', 10);
+
+    if (!Number.isFinite(hours) || !Number.isFinite(minutes)) return null;
+    return sign * (hours * 60 + minutes);
+  } catch {
+    return null;
+  }
+};
+
 const normalizeSignalTimeframe = (value) => {
   if (value === null || value === undefined) return '';
 
@@ -92,6 +167,27 @@ const getTimeframeDurationMs = (value) => {
   if (normalized === '1M') return 30 * 24 * 60 * 60 * 1000;
 
   return 0;
+};
+
+const floorTimestampToTimeframe = (value, timeframe, options = {}) => {
+  if (value === undefined || value === null || value === '') return null;
+
+  const parsed = value instanceof Date ? new Date(value.getTime()) : new Date(value);
+  if (Number.isNaN(parsed.getTime())) return null;
+
+  const timeframeMs = getTimeframeDurationMs(timeframe);
+  if (!Number.isFinite(timeframeMs) || timeframeMs <= 0 || timeframeMs > 24 * 60 * 60 * 1000) {
+    return parsed;
+  }
+
+  const timezone = resolveTimeframeTimezone(options);
+  const offsetMinutes = getTimezoneOffsetMinutes(timezone, parsed);
+  if (!Number.isFinite(offsetMinutes)) {
+    return new Date(Math.floor(parsed.getTime() / timeframeMs) * timeframeMs);
+  }
+
+  const offsetMs = offsetMinutes * 60 * 1000;
+  return new Date(Math.floor((parsed.getTime() + offsetMs) / timeframeMs) * timeframeMs - offsetMs);
 };
 
 const addAlias = (target, value) => {
@@ -209,6 +305,7 @@ const buildTimeframeQuery = (fieldName, value) => {
 export {
   buildTimeframeAliases,
   buildTimeframeQuery,
+  floorTimestampToTimeframe,
   getWebhookTimeframeValue,
   getTimeframeDurationMs,
   normalizeSignalTimeframe,

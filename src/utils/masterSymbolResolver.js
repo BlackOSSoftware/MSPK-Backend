@@ -2,6 +2,7 @@ import mongoose from 'mongoose';
 import MasterSymbol from '../models/MasterSymbol.js';
 import { expandSelectedSymbols } from './userSignalSelection.js';
 import { hasExplicitContractMonth } from './currentMonthContracts.js';
+import { looksLikeMasterSymbolId } from './masterSymbolId.js';
 
 const escapeRegex = (value = '') => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -52,6 +53,7 @@ const scoreMasterSymbolCandidate = (rawInput, candidate = {}, { symbolIdRequeste
   const normalizedRaw = normalizeLookupValue(raw);
   if (!normalizedRaw) return Number.NEGATIVE_INFINITY;
 
+  const symbolIdLookupRequested = symbolIdRequested || looksLikeMasterSymbolId(normalizedRaw);
   const aliases = buildAliasSet(normalizedRaw);
   const symbol = normalizeLookupValue(candidate?.symbol);
   const sourceSymbol = normalizeLookupValue(candidate?.sourceSymbol);
@@ -65,7 +67,7 @@ const scoreMasterSymbolCandidate = (rawInput, candidate = {}, { symbolIdRequeste
 
   let score = 0;
 
-  if (symbolIdRequested && symbolId && symbolId === normalizedRaw) score += 10000;
+  if (symbolIdLookupRequested && symbolId && symbolId === normalizedRaw) score += 10000;
   if (mongoose.Types.ObjectId.isValid(raw) && candidateId === raw) score += 9500;
 
   if (symbol && symbol === normalizedRaw) score += 5000;
@@ -111,6 +113,7 @@ const findMasterSymbolCandidates = async (rawInput, { symbolIdRequested = false 
   const normalizedRaw = normalizeLookupValue(raw);
   if (!normalizedRaw) return [];
 
+  const symbolIdLookupRequested = symbolIdRequested || looksLikeMasterSymbolId(normalizedRaw);
   const aliases = Array.from(buildAliasSet(normalizedRaw));
   const filters = [
     { symbol: { $in: aliases } },
@@ -118,7 +121,7 @@ const findMasterSymbolCandidates = async (rawInput, { symbolIdRequested = false 
     { name: new RegExp(`^${escapeRegex(raw)}$`, 'i') },
   ];
 
-  if (symbolIdRequested) {
+  if (symbolIdLookupRequested) {
     filters.unshift({ symbolId: new RegExp(`^${escapeRegex(raw)}$`, 'i') });
   }
 

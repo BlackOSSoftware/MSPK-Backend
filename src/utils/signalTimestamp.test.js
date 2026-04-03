@@ -25,7 +25,7 @@ test('resolveDisplayTimestamp keeps the real entry time instead of createdAt', (
   });
 
   assert.ok(resolved instanceof Date);
-  assert.equal(resolved.toISOString(), '2026-03-19T12:30:00.000Z');
+  assert.equal(resolved.toISOString(), '2026-03-19T12:35:00.000Z');
 });
 
 test('resolveDisplayTimestamp falls back when webhook time is unrealistically ahead', () => {
@@ -97,6 +97,7 @@ test('buildSignalTemplateData keeps exit time blank for active signals', () => {
 
 test('buildSignalTemplateData keeps raw delayed entry and exit times', () => {
   const data = buildSignalTemplateData({
+    subType: 'SIGNAL_STOPLOSS',
     status: 'Stoploss Hit',
     symbol: 'BTCUSDT',
     timeframe: '1h',
@@ -108,6 +109,79 @@ test('buildSignalTemplateData keeps raw delayed entry and exit times', () => {
 
   assert.equal(data.signalTime, '21 Mar 2026, 5:00 pm');
   assert.equal(data.exitTime, '21 Mar 2026, 8:25 pm');
+});
+
+test('buildSignalTemplateData parses timezone-less COMEX exit times using the commodity market context', () => {
+  const data = buildSignalTemplateData({
+    subType: 'SIGNAL_TARGET',
+    status: 'Target Hit',
+    symbol: 'XAUUSD',
+    segment: 'COMEX',
+    timeframe: '15m',
+    type: 'SELL',
+    signalTime: '2026-03-25T22:30:00+05:30',
+    exitTime: '2026-03-26T01:45:00',
+    createdAt: '2026-03-25T22:35:00+05:30',
+    updatedAt: '2026-03-26T11:20:00+05:30',
+    entryPrice: 4500.68,
+    exitPrice: 4477.04,
+    targets: {
+      target1: 4492.8,
+      target2: 4484.92,
+      target3: 4477.04,
+    },
+  });
+
+  assert.equal(data.exitTime, '26 Mar 2026, 11:15 am');
+  assert.equal(data.eventTime, '26 Mar 2026, 11:15 am');
+});
+
+test('buildSignalTemplateData falls back to update time when a stored exit timestamp is implausibly stale', () => {
+  const data = buildSignalTemplateData({
+    subType: 'SIGNAL_TARGET',
+    status: 'Target Hit',
+    symbol: 'XAUUSD',
+    segment: 'COMEX',
+    timeframe: '15m',
+    type: 'SELL',
+    signalTime: '2026-03-25T22:30:00+05:30',
+    exitTime: '2026-03-25T20:15:00.000Z',
+    createdAt: '2026-03-25T22:35:00+05:30',
+    updatedAt: '2026-03-26T11:20:00+05:30',
+    entryPrice: 4500.68,
+    exitPrice: 4477.04,
+    targets: {
+      target1: 4492.8,
+      target2: 4484.92,
+      target3: 4477.04,
+    },
+  });
+
+  assert.equal(data.exitTime, '26 Mar 2026, 11:20 am');
+  assert.equal(data.eventTime, '26 Mar 2026, 11:20 am');
+});
+
+test('buildSignalTemplateData snaps auto-settled exit times to the timeframe boundary', () => {
+  const data = buildSignalTemplateData({
+    subType: 'SIGNAL_STOPLOSS',
+    status: 'Stoploss Hit',
+    symbol: 'BTCUSD',
+    segment: 'CRYPTO',
+    timeframe: '5m',
+    type: 'SELL',
+    signalTime: '2026-04-02T21:00:00.000Z',
+    exitTime: '2026-04-03T03:17:54.527Z',
+    createdAt: '2026-04-03T02:35:05.062Z',
+    updatedAt: '2026-04-03T03:17:54.551Z',
+    exitReason: 'AUTO_STOPLOSS_REACHED',
+    entryPrice: 66428,
+    stopLoss: 66662.1634498086,
+    exitPrice: 66662.1634498086,
+    totalPoints: -234.16,
+  });
+
+  assert.equal(data.exitTime, '3 Apr 2026, 8:45 am');
+  assert.equal(data.eventTime, '3 Apr 2026, 8:45 am');
 });
 
 test('buildSignalTemplateData shows candle-close entry time when signal arrives one timeframe later', () => {

@@ -57,3 +57,37 @@ test('buildAutoSignalSettlement closes at stop loss for adverse market moves', (
   assert.equal(settlement?.exitPrice, 4591.41);
   assert.equal(settlement?.notificationMeta?.subType, 'SIGNAL_STOPLOSS');
 });
+
+test('buildAutoSignalSettlement snaps auto-close time to the timeframe boundary', () => {
+  const settlement = buildAutoSignalSettlement(
+    {
+      ...sellSignal,
+      timeframe: '5m',
+    },
+    4591.41,
+    {
+      occurredAt: '2026-03-20T17:47:54.527Z',
+    }
+  );
+
+  assert.ok(settlement?.exitTime instanceof Date);
+  assert.equal(settlement?.exitTime.toISOString(), '2026-03-20T17:45:00.000Z');
+});
+
+test('buildAutoSignalSettlement keeps 1h auto-close times aligned to the local hour boundary', () => {
+  const settlement = buildAutoSignalSettlement(
+    {
+      ...sellSignal,
+      symbol: 'BTCUSD',
+      segment: 'CRYPTO',
+      timeframe: '1h',
+    },
+    4591.41,
+    {
+      occurredAt: '2026-04-03T03:17:54.527Z',
+    }
+  );
+
+  assert.ok(settlement?.exitTime instanceof Date);
+  assert.equal(settlement?.exitTime.toISOString(), '2026-04-03T02:30:00.000Z');
+});

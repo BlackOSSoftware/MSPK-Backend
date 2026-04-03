@@ -14,7 +14,10 @@ import { decrypt, encrypt } from '../utils/encryption.js';
 import cacheManager from './cacheManager.js';
 import { decorateSymbolSegment } from '../utils/marketSegmentResolver.js';
 import { dedupeSymbols } from '../utils/marketSymbolDedupe.js';
-import { MARKET_SYMBOL_ALIAS_DEFINITIONS } from '../utils/marketSymbolAliases.js';
+import {
+    getMarketSymbolAliasDefinition,
+    MARKET_SYMBOL_ALIAS_DEFINITIONS,
+} from '../utils/marketSymbolAliases.js';
 import {
     hasExplicitContractMonth,
     isCurrentMonthContractDoc,
@@ -525,6 +528,9 @@ class MarketDataService extends EventEmitter {
         const normalized = this._normalizeMarketSymbol(symbol);
         const directAlias = KITE_HISTORY_ALIASES.get(normalized);
         if (directAlias) return directAlias;
+
+        const marketAlias = getMarketSymbolAliasDefinition(normalized);
+        if (marketAlias?.canonical) return marketAlias.canonical;
 
         const commodityAlias = this._resolveCommodityContinuousAlias(normalized);
         return commodityAlias || normalized;
@@ -1070,7 +1076,12 @@ class MarketDataService extends EventEmitter {
             const staleDocs = candidates.filter((doc) => {
                 // Only treat docs as explicit contracts if their *canonical* symbol/name encodes a month,
                 // not if their `sourceSymbol` happens to point at a specific expiry (e.g. MCX continuous roots).
-                const contractLike = { symbol: doc.symbol, name: doc.name };
+                const contractLike = {
+                    symbol: doc.symbol,
+                    name: doc.name,
+                    exchange: doc.exchange,
+                    segment: doc.segment,
+                };
                 return (
                     hasExplicitContractMonth(contractLike, referenceDate) &&
                     !isCurrentMonthContractDoc(contractLike, referenceDate)
@@ -2490,6 +2501,9 @@ class MarketDataService extends EventEmitter {
                 for (const alias of explicitAliases) {
                     const exact = this._getMarketDataAvailableSymbol(alias);
                     if (exact) return exact;
+
+                    const futuresAlias = this._resolveMarketDataFuturesAlias(alias);
+                    if (futuresAlias) return futuresAlias;
                 }
             }
 
@@ -2507,8 +2521,11 @@ class MarketDataService extends EventEmitter {
         };
 
         addCandidate(primaryCandidates, rawSymbol);
+        addCandidate(primaryCandidates, this._resolveHistoryAlias(rawSymbol));
         addCandidate(primaryCandidates, symbolDoc?.symbol);
+        addCandidate(primaryCandidates, this._resolveHistoryAlias(symbolDoc?.symbol));
         addCandidate(fallbackCandidates, symbolDoc?.sourceSymbol);
+        addCandidate(fallbackCandidates, this._resolveHistoryAlias(symbolDoc?.sourceSymbol));
 
         const normalizedName = this._normalizeMarketSymbol(symbolDoc?.name);
         const normalizedExchange = this._normalizeMarketSymbol(symbolDoc?.exchange);
@@ -2643,7 +2660,7 @@ class MarketDataService extends EventEmitter {
                     .lean();
 
                 const dbMapped = dbSymbols
-                    .filter((item) => isCurrentMonthContractDoc({ symbol: item.symbol, name: item.name }))
+                    .filter((item) => isCurrentMonthContractDoc(item))
                     .map((item) => ({
                     symbol: item.symbol,
                     name: item.name,

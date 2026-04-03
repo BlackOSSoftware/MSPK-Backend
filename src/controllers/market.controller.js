@@ -2077,7 +2077,7 @@ const getSymbols = catchAsync(async (req, res) => {
         const filtered = docs
             .map(enrichSymbol)
             .filter((doc) => matchesSegmentGroup(doc, requestedSegment))
-            .filter((doc) => (requestedSegment === 'FNO' ? isCurrentMonthContractDoc(doc) : true));
+            .filter((doc) => isCurrentMonthContractDoc(doc));
 
         return dedupeSymbols(filtered).sort((left, right) => {
             const activeDiff = Number(Boolean(right.isActive)) - Number(Boolean(left.isActive));

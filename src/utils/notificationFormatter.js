@@ -1,9 +1,10 @@
-import { getTimeframeDurationMs, normalizeSignalTimeframe } from './timeframe.js';
+import { floorTimestampToTimeframe, getTimeframeDurationMs, normalizeSignalTimeframe } from './timeframe.js';
 import { parseSignalTimestamp } from './signalTimestamp.js';
 
 const numberFormatter = new Intl.NumberFormat('en-IN', {
   maximumFractionDigits: 2,
 });
+const EXIT_TIMESTAMP_FALLBACK_LAG_MS = 6 * 60 * 60 * 1000;
 
 export const CLOSED_SIGNAL_STATUSES = ['Closed', 'Target Hit', 'Partial Profit Book', 'Stoploss Hit'];
 export const isClosedSignalStatus = (status) =>
@@ -65,8 +66,40 @@ const humanizeTimeframe = (value) => {
   return raw;
 };
 
-const parseTimestamp = (value) => {
-  return parseSignalTimestamp(value);
+const parseTimestamp = (value, options = {}) => {
+  return parseSignalTimestamp(value, options);
+};
+
+const buildSignalTimestampContext = (signal = {}, referenceTime = null) => {
+  const directReference = parseSignalTimestamp(referenceTime);
+  const fallbackReference =
+    parseSignalTimestamp(signal?.updatedAt) ||
+    parseSignalTimestamp(signal?.createdAt) ||
+    parseSignalTimestamp(signal?.signalTime) ||
+    parseSignalTimestamp(signal?.exitTime) ||
+    null;
+
+  return {
+    symbol: signal?.symbol,
+    segment: signal?.segment,
+    ...(directReference || fallbackReference
+      ? { referenceTime: directReference || fallbackReference }
+      : {}),
+  };
+};
+
+const shouldAlignAutoExitTime = (signal = {}) =>
+  /^AUTO_(STOPLOSS_REACHED|TARGET_REACHED)/.test(String(signal?.exitReason || '').trim().toUpperCase());
+
+const getDisplayExitTimestamp = (signal = {}) => {
+  if (!shouldAlignAutoExitTime(signal)) {
+    return signal?.exitTime || null;
+  }
+
+  return floorTimestampToTimeframe(signal?.exitTime, signal?.timeframe, {
+    symbol: signal?.symbol,
+    segment: signal?.segment,
+  }) || signal?.exitTime || null;
 };
 
 export const resolveDisplayTimestamp = ({
@@ -75,10 +108,14 @@ export const resolveDisplayTimestamp = ({
   timeframe,
   floor,
   preferPrimaryWhenAvailable = false,
+  primaryOptions = {},
+  fallbackOptions = primaryOptions,
+  floorOptions = primaryOptions,
+  maxPrimaryLagMs,
 }) => {
-  const primaryDate = parseTimestamp(primary);
-  const fallbackDate = parseTimestamp(fallback);
-  const floorDate = parseTimestamp(floor);
+  const primaryDate = parseTimestamp(primary, primaryOptions);
+  const fallbackDate = parseTimestamp(fallback, fallbackOptions);
+  const floorDate = parseTimestamp(floor, floorOptions);
   const timeframeMs = getTimeframeDurationMs(timeframe);
 
   const resolveFallback = () => {
@@ -133,6 +170,15 @@ export const resolveDisplayTimestamp = ({
     return fallbackDate;
   }
 
+  if (
+    typeof maxPrimaryLagMs === 'number' &&
+    Number.isFinite(maxPrimaryLagMs) &&
+    maxPrimaryLagMs >= 0 &&
+    fallbackDate.getTime() - primaryDate.getTime() > maxPrimaryLagMs
+  ) {
+    return fallbackDate;
+  }
+
   // Prefer the original webhook event time when it is plausible. Delayed webhook
   // delivery is common in production, and falling back to createdAt/updatedAt
   // makes users think the signal happened much later than it actually did.
@@ -145,9 +191,9 @@ export const resolveDisplayTimestamp = ({
   return primaryDate;
 };
 
-const formatSignalTimestamp = (value) => {
+const formatSignalTimestamp = (value, options = {}) => {
   if (!value) return '';
-  const date = parseTimestamp(value);
+  const date = parseTimestamp(value, options);
   if (!date) return String(value);
   return date.toLocaleString('en-IN', {
     dateStyle: 'medium',
@@ -175,9 +221,15 @@ const stripRedundantUpdateTime = (value, templateKey) => {
 export const getSignalTemplateKey = (signal) =>
   String(signal?.subType || 'SIGNAL_NEW').trim().toUpperCase();
 
-const resolveNotificationEntryTimestamp = ({ templateKey, signalTime, createdAt, timeframe }) => {
-  const createdDate = parseTimestamp(createdAt);
-  const signalDate = parseTimestamp(signalTime);
+const resolveNotificationEntryTimestamp = ({
+  templateKey,
+  signalTime,
+  createdAt,
+  timeframe,
+  timestampContext = {},
+}) => {
+  const createdDate = parseTimestamp(createdAt, timestampContext);
+  const signalDate = parseTimestamp(signalTime, timestampContext);
   const isClosedTemplate = ['SIGNAL_TARGET', 'SIGNAL_STOPLOSS', 'SIGNAL_PARTIAL_PROFIT'].includes(templateKey);
 
   if (isClosedTemplate && signalDate) {
@@ -196,6 +248,8 @@ const resolveNotificationEntryTimestamp = ({ templateKey, signalTime, createdAt,
     primary: signalTime,
     fallback: createdAt,
     timeframe,
+    primaryOptions: timestampContext,
+    fallbackOptions: timestampContext,
   });
 };
 
@@ -208,27 +262,43 @@ export const buildSignalTemplateData = (signal = {}) => {
     .trim()
     .toUpperCase();
   const isClosedSignal = isClosedSignalStatus(signal.status);
+  const entryTimestampContext = buildSignalTimestampContext(
+    signal,
+    signal.createdAt || signal.updatedAt || signal.signalTime
+  );
+  const exitTimestampContext = buildSignalTimestampContext(
+    signal,
+    signal.updatedAt || signal.createdAt || signal.exitTime || signal.signalTime
+  );
   const resolvedSignalTime = resolveNotificationEntryTimestamp({
     templateKey,
     signalTime: signal.signalTime,
     createdAt: signal.createdAt,
     timeframe: normalizedTimeframe,
+    timestampContext: entryTimestampContext,
   });
   const resolvedExitTime = isClosedSignal
     ? resolveDisplayTimestamp({
-        primary: signal.exitTime,
+        primary: getDisplayExitTimestamp(signal),
         fallback: signal.updatedAt || signal.createdAt,
         timeframe: normalizedTimeframe,
         floor: resolvedSignalTime,
+        primaryOptions: exitTimestampContext,
+        fallbackOptions: exitTimestampContext,
+        floorOptions: entryTimestampContext,
+        maxPrimaryLagMs: EXIT_TIMESTAMP_FALLBACK_LAG_MS,
       })
     : null;
-  const signalTime = formatSignalTimestamp(resolvedSignalTime);
-  const exitTime = formatSignalTimestamp(resolvedExitTime);
+  const signalTime = formatSignalTimestamp(resolvedSignalTime, entryTimestampContext);
+  const exitTime = formatSignalTimestamp(resolvedExitTime, exitTimestampContext);
   const eventTimestampSource =
     templateKey === 'SIGNAL_INFO' || templateKey === 'SIGNAL_UPDATE' || templateKey === 'SIGNAL_PARTIAL_PROFIT'
       ? signal.updatedAt || signal.lastInfoTime || signal.infoTime || signal.createdAt || resolvedSignalTime
       : resolvedExitTime || resolvedSignalTime || signal.updatedAt || signal.createdAt;
-  const eventTime = formatSignalTimestamp(eventTimestampSource);
+  const eventTime = formatSignalTimestamp(
+    eventTimestampSource,
+    isClosedSignal ? exitTimestampContext : entryTimestampContext
+  );
   const timeframeDisplay = normalizedTimeframe
     ? timeframeLabel && timeframeLabel !== normalizedTimeframe
       ? `${normalizedTimeframe} (${timeframeLabel})`

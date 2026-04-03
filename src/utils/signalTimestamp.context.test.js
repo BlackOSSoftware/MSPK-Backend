@@ -24,3 +24,13 @@ test('parseSignalTimestamp chooses New York time for timezone-less XAUUSD webhoo
   assert.ok(parsed instanceof Date);
   assert.equal(parsed.toISOString(), '2026-03-24T11:05:00.000Z');
 });
+
+test('parseSignalTimestamp treats GCI as a global gold future context', () => {
+  const parsed = parseSignalTimestamp('2026-03-24T07:05:00', {
+    symbol: 'GCI',
+    referenceTime: new Date('2026-03-24T11:10:03.000Z'),
+  });
+
+  assert.ok(parsed instanceof Date);
+  assert.equal(parsed.toISOString(), '2026-03-24T11:05:00.000Z');
+});
