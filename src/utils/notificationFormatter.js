@@ -108,6 +108,7 @@ export const resolveDisplayTimestamp = ({
   timeframe,
   floor,
   preferPrimaryWhenAvailable = false,
+  allowTimeframeCloseFallback = true,
   primaryOptions = {},
   fallbackOptions = primaryOptions,
   floorOptions = primaryOptions,
@@ -163,6 +164,7 @@ export const resolveDisplayTimestamp = ({
   // When the persisted record time lands almost exactly one timeframe after the
   // webhook time, show the actual alert time users saw in Telegram/WhatsApp.
   if (
+    allowTimeframeCloseFallback &&
     timeframeMs > 0 &&
     primaryToFallbackLagMs > 0 &&
     Math.abs(primaryToFallbackLagMs - timeframeMs) <= candleCloseGraceMs
@@ -283,6 +285,7 @@ export const buildSignalTemplateData = (signal = {}) => {
         fallback: signal.updatedAt || signal.createdAt,
         timeframe: normalizedTimeframe,
         floor: resolvedSignalTime,
+        allowTimeframeCloseFallback: false,
         primaryOptions: exitTimestampContext,
         fallbackOptions: exitTimestampContext,
         floorOptions: entryTimestampContext,

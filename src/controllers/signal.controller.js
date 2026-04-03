@@ -443,6 +443,7 @@ const formatSignalResponse = (signal, resolvedMasterSymbol = null) => {
         fallback: signal.updatedAt || signal.createdAt,
         timeframe: normalizedTimeframe,
         floor: displaySignalTime,
+        allowTimeframeCloseFallback: false,
         primaryOptions: timestampContext,
         fallbackOptions: timestampContext,
         floorOptions: timestampContext,

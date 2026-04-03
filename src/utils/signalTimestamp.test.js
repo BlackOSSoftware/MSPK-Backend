@@ -74,6 +74,19 @@ test('resolveDisplayTimestamp prevents exit time from rendering before entry tim
   assert.equal(resolved.toISOString(), '2026-03-19T12:50:00.000Z');
 });
 
+test('resolveDisplayTimestamp keeps closed-signal exit time when updatedAt lands near the next candle close', () => {
+  const resolved = resolveDisplayTimestamp({
+    primary: '2026-04-03T12:55:00+05:30',
+    fallback: '2026-04-03T12:59:24.898+05:30',
+    timeframe: '5m',
+    allowTimeframeCloseFallback: false,
+    maxPrimaryLagMs: 6 * 60 * 60 * 1000,
+  });
+
+  assert.ok(resolved instanceof Date);
+  assert.equal(resolved.toISOString(), '2026-04-03T07:25:00.000Z');
+});
+
 test('isClosedSignalStatus only treats settled statuses as closed', () => {
   assert.equal(isClosedSignalStatus('Active'), false);
   assert.equal(isClosedSignalStatus('Open'), false);
@@ -182,6 +195,33 @@ test('buildSignalTemplateData snaps auto-settled exit times to the timeframe bou
 
   assert.equal(data.exitTime, '3 Apr 2026, 8:45 am');
   assert.equal(data.eventTime, '3 Apr 2026, 8:45 am');
+});
+
+test('buildSignalTemplateData keeps stored closed exit time instead of nearby updatedAt for webhook targets', () => {
+  const data = buildSignalTemplateData({
+    subType: 'SIGNAL_TARGET',
+    status: 'Target Hit',
+    symbol: 'BTCUSD',
+    segment: 'CRYPTO',
+    timeframe: '5m',
+    type: 'BUY',
+    signalTime: '2026-04-03T07:00:02.000Z',
+    exitTime: '2026-04-03T07:25:00.000Z',
+    createdAt: '2026-04-03T07:00:09.345Z',
+    updatedAt: '2026-04-03T07:29:24.898Z',
+    exitReason: 'AUTO_TARGET_REACHED_TP3',
+    entryPrice: 66758.5,
+    exitPrice: 66923.5,
+    totalPoints: 165,
+    targets: {
+      target1: 66830.5,
+      target2: 66877,
+      target3: 66923.5,
+    },
+  });
+
+  assert.equal(data.exitTime, '3 Apr 2026, 12:55 pm');
+  assert.equal(data.eventTime, '3 Apr 2026, 12:55 pm');
 });
 
 test('buildSignalTemplateData shows candle-close entry time when signal arrives one timeframe later', () => {
