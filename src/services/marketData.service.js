@@ -15,6 +15,10 @@ import cacheManager from './cacheManager.js';
 import { decorateSymbolSegment } from '../utils/marketSegmentResolver.js';
 import { dedupeSymbols } from '../utils/marketSymbolDedupe.js';
 import {
+    detectFutureClockOffsetSeconds,
+    normalizeFutureShiftedEpochSeconds,
+} from '../utils/marketDataTimestamp.js';
+import {
     getMarketSymbolAliasDefinition,
     MARKET_SYMBOL_ALIAS_DEFINITIONS,
 } from '../utils/marketSymbolAliases.js';
@@ -278,6 +282,8 @@ class MarketDataService extends EventEmitter {
 
         this.marketDataTickCount = 0;
         this.marketDataLatency = 0;
+        this._marketDataClockOffsetSec = 0;
+        this._lastMarketDataClockOffsetWarnAtMs = 0;
 
         this.kiteAuthBrokenUntil = 0;
         this.statsInterval = null;
@@ -1689,6 +1695,9 @@ class MarketDataService extends EventEmitter {
         }
 
         const targetSymbols = Array.from(targetSymbolsSet);
+        const normalizedTickTimestamp = source === 'kite'
+            ? (tick.timestamp || new Date())
+            : this._normalizeLiveMarketDataTimestamp(tick.timestamp || new Date());
 
         for (const targetSymbol of targetSymbols) {
             this.currentPrices[targetSymbol] = lastPrice;
@@ -1801,7 +1810,7 @@ class MarketDataService extends EventEmitter {
                 total_volume: volume,
                 bid: quote.bid || 0,
                 ask: quote.ask || 0,
-                timestamp: tick.timestamp || new Date(),
+                timestamp: normalizedTickTimestamp,
                 provider: source === 'kite' ? 'kite' : 'market_data',
             };
 
@@ -2566,8 +2575,54 @@ class MarketDataService extends EventEmitter {
         return Math.min(bounded, 2000);
     }
 
-    _normalizeMarketDataHistory(rows = []) {
-        return rows
+    _getMarketDataClockShiftOptions() {
+        return {
+            referenceSec: Math.floor(Date.now() / 1000),
+            maxFutureSec: 10 * 60,
+            minOffsetSec: 60 * 60,
+            roundingSec: 15 * 60,
+        };
+    }
+
+    _rememberMarketDataClockOffset(offsetSec, context = 'market data') {
+        if (!Number.isFinite(offsetSec) || offsetSec <= 0) return;
+
+        this._marketDataClockOffsetSec = Math.floor(offsetSec);
+
+        const nowMs = Date.now();
+        if (nowMs - this._lastMarketDataClockOffsetWarnAtMs >= 5 * 60 * 1000) {
+            logger.warn(
+                `MARKET_DATA: Adjusting ${context} timestamps by ${Math.round(this._marketDataClockOffsetSec / 60)} minutes`
+            );
+            this._lastMarketDataClockOffsetWarnAtMs = nowMs;
+        }
+    }
+
+    _normalizeLiveMarketDataTimestamp(value) {
+        const detectedOffsetSec = this._marketDataClockOffsetSec > 0
+            ? this._marketDataClockOffsetSec
+            : detectFutureClockOffsetSeconds(value, {
+                ...this._getMarketDataClockShiftOptions(),
+                minOffsetSec: 2 * 60 * 60,
+            });
+
+        if (detectedOffsetSec > 0) {
+            this._rememberMarketDataClockOffset(detectedOffsetSec, 'live');
+        }
+
+        const normalizedSec = normalizeFutureShiftedEpochSeconds(value, {
+            offsetSec: detectedOffsetSec,
+        });
+
+        if (!Number.isFinite(normalizedSec) || normalizedSec <= 0) {
+            return new Date();
+        }
+
+        return new Date(normalizedSec * 1000);
+    }
+
+    _normalizeMarketDataHistory(rows = [], resolution = null) {
+        const normalizedRows = rows
             .map((item) => {
                 if (!item || typeof item !== 'object') return null;
                 const timeRaw = item.time ?? item.timestamp ?? item.t;
@@ -2593,6 +2648,29 @@ class MarketDataService extends EventEmitter {
             })
             .filter(Boolean)
             .sort((a, b) => a.time - b.time);
+
+        if (normalizedRows.length === 0) {
+            return normalizedRows;
+        }
+
+        const latestTime = normalizedRows[normalizedRows.length - 1]?.time;
+        const offsetSec = detectFutureClockOffsetSeconds(
+            latestTime,
+            this._getMarketDataClockShiftOptions()
+        );
+
+        if (!(offsetSec > 0)) {
+            return normalizedRows;
+        }
+
+        this._rememberMarketDataClockOffset(offsetSec, `history ${resolution || 'intraday'}`);
+
+        return normalizedRows
+            .map((row) => ({
+                ...row,
+                time: normalizeFutureShiftedEpochSeconds(row.time, { offsetSec }),
+            }))
+            .filter((row) => Number.isFinite(row.time) && row.time > 0);
     }
 
     async _fetchMarketDataHistory(symbol, resolution, fromTs, toTs, countOverride = null) {
@@ -2628,7 +2706,7 @@ class MarketDataService extends EventEmitter {
                 : Array.isArray(data?.candles)
                     ? data.candles
                     : [];
-            return this._normalizeMarketDataHistory(rows);
+            return this._normalizeMarketDataHistory(rows, resolution);
         } catch (error) {
             logger.warn(`MARKET_DATA: History API failed for ${symbol}: ${error.message}`);
             return [];
