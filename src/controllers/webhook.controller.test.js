@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  assessExitSettlementCandidate,
   deriveExitStatus,
   getAllowedSignalAgeMs,
   isStopLossExitPriceConsistent,
@@ -208,4 +209,138 @@ test('normalizeExitWebhookPayload uses receipt time when exit payload omits time
   assert.equal(normalized.totalPoints, 649.5);
   assert.equal(normalized.exitTime.toISOString(), '2026-03-31T18:30:00.000Z');
   assert.deepEqual(normalized.sanitizedFields, ['exitTime']);
+});
+
+test('assessExitSettlementCandidate ignores immediate EXIT near ENTRY without TP/SL confirmation', () => {
+  const signal = {
+    type: 'BUY',
+    entryPrice: 100,
+    stopLoss: 95,
+    targets: {
+      target1: 102,
+      target2: 104,
+      target3: 106,
+    },
+    signalTime: '2026-04-06T10:00:00.000Z',
+  };
+
+  const result = assessExitSettlementCandidate({
+    signal,
+    exitReason: 'EXIT_BUY',
+    exitPrice: 100.1,
+    totalPoints: 0.1,
+    parsedExitTime: new Date('2026-04-06T10:00:20.000Z'),
+    receivedAt: new Date('2026-04-06T10:00:20.000Z'),
+    timeframeFromPayload: '5m',
+  });
+
+  assert.equal(result.accepted, false);
+  assert.equal(result.rejectionCode, 'ignored_immediate_exit_without_execution');
+});
+
+test('assessExitSettlementCandidate ignores out-of-sequence EXIT before ENTRY', () => {
+  const signal = {
+    type: 'SELL',
+    entryPrice: 500,
+    stopLoss: 510,
+    targets: {
+      target1: 495,
+      target2: 490,
+      target3: 485,
+    },
+    signalTime: '2026-04-06T10:00:00.000Z',
+  };
+
+  const result = assessExitSettlementCandidate({
+    signal,
+    exitReason: 'TARGET_HIT',
+    exitPrice: 495,
+    totalPoints: 5,
+    parsedExitTime: new Date('2026-04-06T09:59:59.000Z'),
+    receivedAt: new Date('2026-04-06T10:05:00.000Z'),
+    timeframeFromPayload: '5m',
+  });
+
+  assert.equal(result.accepted, false);
+  assert.equal(result.rejectionCode, 'ignored_out_of_sequence_exit');
+});
+
+test('assessExitSettlementCandidate accepts TP exits only when target is actually reached', () => {
+  const signal = {
+    type: 'BUY',
+    entryPrice: 100,
+    stopLoss: 95,
+    targets: {
+      target1: 102,
+      target2: 104,
+      target3: 106,
+    },
+    signalTime: '2026-04-06T10:00:00.000Z',
+  };
+
+  const accepted = assessExitSettlementCandidate({
+    signal,
+    exitReason: 'TARGET_HIT',
+    exitPrice: 104.2,
+    totalPoints: 4.2,
+    parsedExitTime: new Date('2026-04-06T10:20:00.000Z'),
+    receivedAt: new Date('2026-04-06T10:20:00.000Z'),
+    timeframeFromPayload: '5m',
+  });
+
+  assert.equal(accepted.accepted, true);
+  assert.equal(accepted.status, 'Partial Profit Book');
+
+  const rejected = assessExitSettlementCandidate({
+    signal,
+    exitReason: 'TARGET_HIT',
+    exitPrice: 101,
+    totalPoints: 1,
+    parsedExitTime: new Date('2026-04-06T10:20:00.000Z'),
+    receivedAt: new Date('2026-04-06T10:20:00.000Z'),
+    timeframeFromPayload: '5m',
+  });
+
+  assert.equal(rejected.accepted, false);
+  assert.equal(rejected.rejectionCode, 'ignored_exit_without_tp_sl_confirmation');
+});
+
+test('assessExitSettlementCandidate accepts STOP_LOSS only when stop loss is actually hit', () => {
+  const signal = {
+    type: 'BUY',
+    entryPrice: 100,
+    stopLoss: 95,
+    targets: {
+      target1: 102,
+      target2: 104,
+      target3: 106,
+    },
+    signalTime: '2026-04-06T10:00:00.000Z',
+  };
+
+  const accepted = assessExitSettlementCandidate({
+    signal,
+    exitReason: 'STOP_LOSS',
+    exitPrice: 94.9,
+    totalPoints: -5.1,
+    parsedExitTime: new Date('2026-04-06T10:15:00.000Z'),
+    receivedAt: new Date('2026-04-06T10:15:00.000Z'),
+    timeframeFromPayload: '5m',
+  });
+
+  assert.equal(accepted.accepted, true);
+  assert.equal(accepted.status, 'Stoploss Hit');
+
+  const rejected = assessExitSettlementCandidate({
+    signal,
+    exitReason: 'STOP_LOSS',
+    exitPrice: 99.5,
+    totalPoints: -0.5,
+    parsedExitTime: new Date('2026-04-06T10:15:00.000Z'),
+    receivedAt: new Date('2026-04-06T10:15:00.000Z'),
+    timeframeFromPayload: '5m',
+  });
+
+  assert.equal(rejected.accepted, false);
+  assert.equal(rejected.rejectionCode, 'ignored_exit_without_tp_sl_confirmation');
 });

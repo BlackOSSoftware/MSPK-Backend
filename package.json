@@ -12,6 +12,7 @@
     "repair:signal-market-state": "node src/scripts/reconcileActiveSignalsToMarket.js",
     "repair:signal-source": "node src/scripts/backfillSignalSource.js --apply",
     "repair:suspicious-stoploss": "node src/scripts/repairSuspiciousStoplossExits.js",
+    "repair:premature-exits": "node src/scripts/repairPrematureSignalExits.js --apply",
     "purge:signals": "node src/scripts/purgeSignals.js",
     "purge:users-signals": "node src/scripts/purgeUsersAndSignals.js",
     "create:admin": "node src/scripts/createAdminUser.js",

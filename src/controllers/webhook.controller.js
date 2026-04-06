@@ -66,6 +66,7 @@ const MAX_STALE_ENTRY_SIGNAL_AGE_MS = 48 * 60 * 60 * 1000;
 const ABSOLUTE_MAX_ENTRY_SIGNAL_AGE_MS = 14 * 24 * 60 * 60 * 1000;
 const PROCESSED_ENTRY_SIGNAL_TTL_SECONDS = 30 * 24 * 60 * 60;
 const DELAYED_FEED_MIN_STALE_ENTRY_SIGNAL_AGE_MS = 12 * 60 * 60 * 1000;
+const IMMEDIATE_EXIT_GUARD_MS = 2 * 60 * 1000;
 
 const getSignalClosedStatuses = () => ['Closed', 'Target Hit', 'Partial Profit Book', 'Stoploss Hit'];
 
@@ -188,6 +189,105 @@ const deriveExitStatus = ({ signal, exitReason, exitPrice, totalPoints }) => {
   }
 
   return 'Closed';
+};
+
+const assessExitSettlementCandidate = ({
+  signal,
+  exitReason,
+  exitPrice,
+  totalPoints,
+  parsedExitTime,
+  receivedAt = new Date(),
+  timeframeFromPayload = '',
+} = {}) => {
+  const normalizedExitUpdate = normalizeExitWebhookPayload({
+    signal,
+    exitReason,
+    exitPrice,
+    totalPoints,
+    exitTime: parsedExitTime || null,
+    receivedAt,
+    timeframeFromPayload,
+  });
+
+  const resolvedExitPrice = normalizedExitUpdate.exitPrice;
+  const signalReferenceTime = getSignalReferenceTime(signal);
+  const rawExitTime =
+    parsedExitTime instanceof Date && !Number.isNaN(parsedExitTime.getTime()) ? parsedExitTime : null;
+  const normalizedExitReason = String(exitReason || '').trim().toUpperCase();
+  const rawExitPrice = toFiniteNumber(exitPrice);
+  const isStopReason = /(STOP|SL)/.test(normalizedExitReason);
+  const highestTargetLevel = signalService.getSignalHighestAchievedTargetLevel(signal, resolvedExitPrice);
+  const finalTargetLevel = signalService.getFinalSignalTarget(signal)?.level || null;
+  const reachedFinalTarget =
+    Boolean(highestTargetLevel) && Boolean(finalTargetLevel) && highestTargetLevel === finalTargetLevel;
+  const stopLossReached = signalService.hasSignalReachedStopLoss(signal, resolvedExitPrice);
+  const rawStopLossReached =
+    typeof rawExitPrice === 'number' ? signalService.hasSignalReachedStopLoss(signal, rawExitPrice) : false;
+  const isOutOfSequence =
+    rawExitTime instanceof Date &&
+    signalReferenceTime instanceof Date &&
+    rawExitTime.getTime() < signalReferenceTime.getTime();
+  const isImmediateNearEntryWithoutExecution =
+    rawExitTime instanceof Date &&
+    signalReferenceTime instanceof Date &&
+    rawExitTime.getTime() - signalReferenceTime.getTime() <= IMMEDIATE_EXIT_GUARD_MS &&
+    !highestTargetLevel &&
+    !stopLossReached;
+
+  if (isOutOfSequence) {
+    return {
+      accepted: false,
+      rejectionCode: 'ignored_out_of_sequence_exit',
+      rejectionMessage: 'EXIT arrived before ENTRY timestamp.',
+      normalizedExitUpdate,
+      highestTargetLevel,
+      stopLossReached,
+    };
+  }
+
+  if (isImmediateNearEntryWithoutExecution) {
+    return {
+      accepted: false,
+      rejectionCode: 'ignored_immediate_exit_without_execution',
+      rejectionMessage: 'EXIT arrived too close to ENTRY without TP/SL confirmation.',
+      normalizedExitUpdate,
+      highestTargetLevel,
+      stopLossReached,
+    };
+  }
+
+  if (isStopReason && (rawStopLossReached || (typeof rawExitPrice !== 'number' && stopLossReached))) {
+    return {
+      accepted: true,
+      normalizedExitUpdate,
+      status: 'Stoploss Hit',
+      resolvedExitReason: String(exitReason || 'STOP_LOSS').trim() || 'STOP_LOSS',
+      highestTargetLevel,
+      stopLossReached,
+    };
+  }
+
+  if (highestTargetLevel) {
+    const status = reachedFinalTarget ? 'Target Hit' : 'Partial Profit Book';
+    return {
+      accepted: true,
+      normalizedExitUpdate,
+      status,
+      resolvedExitReason: reachedFinalTarget ? String(exitReason || 'TARGET_HIT').trim() || 'TARGET_HIT' : 'Partial Profit Book',
+      highestTargetLevel,
+      stopLossReached,
+    };
+  }
+
+  return {
+    accepted: false,
+    rejectionCode: 'ignored_exit_without_tp_sl_confirmation',
+    rejectionMessage: 'EXIT price does not confirm TP or Stop Loss execution.',
+    normalizedExitUpdate,
+    highestTargetLevel,
+    stopLossReached,
+  };
 };
 
 const getSignalReferenceTime = (signal) => {
@@ -517,7 +617,10 @@ const receiveSignal = catchAsync(async (req, res) => {
     });
   }
 
-  const findSignalByWebhookId = async (webhookId, { eventTime = null, expectedType = null } = {}) => {
+  const findSignalByWebhookId = async (
+    webhookId,
+    { eventTime = null, expectedType = null, allowScopedFallback = true } = {}
+  ) => {
     const id = String(webhookId || '').trim();
     const baseFilter = symbol ? { symbol, segment } : { segment };
     const timeframeFilter = buildTimeframeQuery('timeframe', normalizedTimeframe);
@@ -601,13 +704,17 @@ const receiveSignal = catchAsync(async (req, res) => {
 
     // 3) Fallback to scoped symbol/segment/timeframe matching when upstream webhook IDs
     // are reused or missing. This is common in the current production feed.
-    const activeFallbackResult = resolveCandidateResult(
-      await collectCandidates({
-        requireWebhookId: false,
-      })
-    );
-    if (activeFallbackResult.signal || activeFallbackResult.ambiguous || !req.body.exit_time) {
-      return activeFallbackResult;
+    if (allowScopedFallback) {
+      const activeFallbackResult = resolveCandidateResult(
+        await collectCandidates({
+          requireWebhookId: false,
+        })
+      );
+      if (activeFallbackResult.signal || activeFallbackResult.ambiguous || !req.body.exit_time) {
+        return activeFallbackResult;
+      }
+    } else if (!req.body.exit_time) {
+      return { signal: null, ambiguous: false };
     }
 
     // 4) If already closed (idempotent EXIT), match on exit_time too.
@@ -757,11 +864,21 @@ const receiveSignal = catchAsync(async (req, res) => {
   }
 
   if (event === 'EXIT') {
+    if (!webhookId) {
+      logger.warn(`[WEBHOOK] EXIT ignored due to missing uniq_id symbol=${symbol} timeframe=${normalizedTimeframe || 'NA'}`);
+      return sendWebhookResponse(httpStatus.OK, {
+        status: 'ignored_missing_uniq_id',
+        symbol,
+        timeframe: normalizedTimeframe || null,
+      });
+    }
+
     const parsedExitTime = parseWebhookDate(req.body.exit_time, webhookTimestampContext);
     const expectedType = resolveExitedSignalType(req.body.trade_type || req.body.tradeType);
     const { signal: existing, ambiguous } = await findSignalByWebhookId(webhookId, {
       eventTime: parsedExitTime || req.body.exit_time,
       expectedType,
+      allowScopedFallback: false,
     });
     if (ambiguous) {
       logger.warn(
@@ -786,30 +903,40 @@ const receiveSignal = catchAsync(async (req, res) => {
       });
     }
 
-    const normalizedExitUpdate = normalizeExitWebhookPayload({
+    const exitAssessment = assessExitSettlementCandidate({
       signal: existing,
       exitReason: req.body.exit_reason,
       exitPrice: req.body.exit_price,
       totalPoints: req.body.total_points,
-      exitTime: parsedExitTime || req.body.exit_time,
+      parsedExitTime,
       receivedAt: new Date(startedAt),
       timeframeFromPayload: rawTimeframe,
     });
+    const normalizedExitUpdate = exitAssessment.normalizedExitUpdate;
+
+    if (!exitAssessment.accepted) {
+      logger.warn(
+        `[WEBHOOK] EXIT ignored signal=${existing.id} symbol=${existing.symbol} reason=${exitAssessment.rejectionCode} ` +
+          `webhookId=${webhookId || 'NA'} exitPrice=${normalizedExitUpdate.exitPrice ?? 'NA'} ` +
+          `exitTime=${normalizedExitUpdate.exitTime?.toISOString?.() || 'NA'}`
+      );
+      return sendWebhookResponse(httpStatus.OK, {
+        status: exitAssessment.rejectionCode,
+        message: exitAssessment.rejectionMessage,
+        signal: existing,
+      });
+    }
+
     const incomingExitTime = normalizedExitUpdate.exitTime;
     const incomingExitPrice = normalizedExitUpdate.exitPrice;
     const resolvedTotalPoints = normalizedExitUpdate.totalPoints;
-    const desiredStatus = deriveExitStatus({
-      signal: existing,
-      exitReason: req.body.exit_reason,
-      exitPrice: incomingExitPrice,
-      totalPoints: resolvedTotalPoints,
-    });
+    const desiredStatus = exitAssessment.status;
     const isNumberClose = (a, b, eps = 1e-6) => {
       if (typeof a !== 'number' || typeof b !== 'number') return false;
       return Math.abs(a - b) <= eps;
     };
 
-    const resolvedExitReason = desiredStatus === 'Partial Profit Book' ? 'Partial Profit Book' : req.body.exit_reason;
+    const resolvedExitReason = exitAssessment.resolvedExitReason;
 
     const alreadyApplied =
       existing.exitTime &&
@@ -1036,6 +1163,7 @@ export default {
 };
 
 export {
+  assessExitSettlementCandidate,
   deriveExitStatus,
   getAllowedSignalAgeMs,
   isStopLossExitPriceConsistent,
