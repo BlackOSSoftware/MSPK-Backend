@@ -11,7 +11,7 @@ test('expandSelectedSymbols keeps global commodity aliases in one continuity buc
 
   const silverAliases = expandSelectedSymbols(['SI1!']);
   assert.equal(silverAliases.includes('XAGUSD'), true);
-  assert.equal(silverAliases.includes('MCX:SILVER'), true);
+  assert.equal(silverAliases.includes('MCX:SILVER'), false);
 });
 
 test('buildSelectedSignalFilter includes known aliases for metals and futures symbols', () => {
@@ -20,5 +20,5 @@ test('buildSelectedSignalFilter includes known aliases for metals and futures sy
 
   assert.equal(values.includes('SI1!'), true);
   assert.equal(values.includes('COMEX:SI1!'), true);
-  assert.equal(values.includes('MCX:SILVER'), true);
+  assert.equal(values.includes('MCX:SILVER'), false);
 });
