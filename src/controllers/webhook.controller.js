@@ -915,7 +915,7 @@ const receiveSignal = catchAsync(async (req, res) => {
     const { signal: existing, ambiguous } = await findSignalByWebhookId(webhookId, {
       eventTime: parsedExitTime || req.body.exit_time,
       expectedType,
-      allowScopedFallback: false,
+      allowScopedFallback: true,
     });
     if (ambiguous) {
       logger.warn(
