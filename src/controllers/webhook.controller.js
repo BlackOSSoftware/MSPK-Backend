@@ -643,8 +643,8 @@ const receiveSignal = catchAsync(async (req, res) => {
     const id = String(webhookId || '').trim();
     const baseFilter = symbol ? { symbol, segment } : { segment };
     const timeframeFilter = buildTimeframeQuery('timeframe', normalizedTimeframe);
-    const buildScopedFilters = (filter) =>
-      timeframeFilter ? [{ ...filter, ...timeframeFilter }] : [filter];
+    const buildScopedFilters = (filter, includeTimeframe = true) =>
+      includeTimeframe && timeframeFilter ? [{ ...filter, ...timeframeFilter }] : [filter];
     const resolveCandidateResult = (signals = []) => {
       const result = selectWebhookSignalCandidate({
         signals,
@@ -661,8 +661,12 @@ const receiveSignal = catchAsync(async (req, res) => {
 
       return result;
     };
-    const collectCandidates = async ({ includeClosed = false, requireWebhookId = true } = {}) => {
-      const scopedFilters = buildScopedFilters(baseFilter);
+    const collectCandidates = async ({
+      includeClosed = false,
+      requireWebhookId = true,
+      ignoreTimeframe = false,
+    } = {}) => {
+      const scopedFilters = buildScopedFilters(baseFilter, !ignoreTimeframe);
       const statusFilter = includeClosed ? {} : { status: { $nin: getSignalClosedStatuses() } };
       const queries = scopedFilters.map((scopedFilter) =>
         Signal.find({
@@ -677,7 +681,7 @@ const receiveSignal = catchAsync(async (req, res) => {
       );
 
       if (symbol) {
-        buildScopedFilters({ symbol }).forEach((scopedFilter) => {
+        buildScopedFilters({ symbol }, !ignoreTimeframe).forEach((scopedFilter) => {
           queries.push(
             Signal.find({
               ...TRADINGVIEW_SIGNAL_SOURCE_FILTER,
@@ -718,6 +722,20 @@ const receiveSignal = catchAsync(async (req, res) => {
       const activeMatchResult = resolveCandidateResult(await collectCandidates());
       if (activeMatchResult.signal || activeMatchResult.ambiguous) {
         return activeMatchResult;
+      }
+
+      // Some feeds emit EXIT timeframe labels that differ from the ENTRY timeframe
+      // (for example, 1s/5m EXIT over 15m ENTRY). Retry by webhook identity without
+      // timeframe scoping so settled exits still land on the active signal.
+      if (timeframeFilter) {
+        const identityRetryResult = resolveCandidateResult(
+          await collectCandidates({
+            ignoreTimeframe: true,
+          })
+        );
+        if (identityRetryResult.signal || identityRetryResult.ambiguous) {
+          return identityRetryResult;
+        }
       }
     }
 
