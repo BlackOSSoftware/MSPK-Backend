@@ -67,6 +67,7 @@ const ABSOLUTE_MAX_ENTRY_SIGNAL_AGE_MS = 14 * 24 * 60 * 60 * 1000;
 const PROCESSED_ENTRY_SIGNAL_TTL_SECONDS = 30 * 24 * 60 * 60;
 const DELAYED_FEED_MIN_STALE_ENTRY_SIGNAL_AGE_MS = 12 * 60 * 60 * 1000;
 const IMMEDIATE_EXIT_GUARD_MS = 2 * 60 * 1000;
+const SIMULTANEOUS_EXIT_GUARD_MS = 45 * 1000;
 
 const getSignalClosedStatuses = () => ['Closed', 'Target Hit', 'Partial Profit Book', 'Stoploss Hit'];
 
@@ -228,6 +229,13 @@ const assessExitSettlementCandidate = ({
     rawExitTime instanceof Date &&
     signalReferenceTime instanceof Date &&
     rawExitTime.getTime() < signalReferenceTime.getTime();
+  const isRealtimeSimultaneousExit =
+    rawExitTime instanceof Date &&
+    signalReferenceTime instanceof Date &&
+    rawExitTime.getTime() - signalReferenceTime.getTime() <= SIMULTANEOUS_EXIT_GUARD_MS &&
+    receivedAt instanceof Date &&
+    !Number.isNaN(receivedAt.getTime()) &&
+    receivedAt.getTime() - signalReferenceTime.getTime() <= IMMEDIATE_EXIT_GUARD_MS;
   const isImmediateNearEntryWithoutExecution =
     rawExitTime instanceof Date &&
     signalReferenceTime instanceof Date &&
@@ -251,6 +259,17 @@ const assessExitSettlementCandidate = ({
       accepted: false,
       rejectionCode: 'ignored_immediate_exit_without_execution',
       rejectionMessage: 'EXIT arrived too close to ENTRY without TP/SL confirmation.',
+      normalizedExitUpdate,
+      highestTargetLevel,
+      stopLossReached,
+    };
+  }
+
+  if (isRealtimeSimultaneousExit) {
+    return {
+      accepted: false,
+      rejectionCode: 'ignored_simultaneous_exit_with_entry',
+      rejectionMessage: 'EXIT timestamp overlaps ENTRY timestamp; waiting for confirmed TP/SL progression.',
       normalizedExitUpdate,
       highestTargetLevel,
       stopLossReached,

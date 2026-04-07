@@ -238,6 +238,33 @@ test('assessExitSettlementCandidate ignores immediate EXIT near ENTRY without TP
   assert.equal(result.rejectionCode, 'ignored_immediate_exit_without_execution');
 });
 
+test('assessExitSettlementCandidate ignores simultaneous realtime EXIT even when STOP_LOSS is reported', () => {
+  const signal = {
+    type: 'BUY',
+    entryPrice: 100,
+    stopLoss: 95,
+    targets: {
+      target1: 102,
+      target2: 104,
+      target3: 106,
+    },
+    signalTime: '2026-04-06T10:00:00.000Z',
+  };
+
+  const result = assessExitSettlementCandidate({
+    signal,
+    exitReason: 'STOP_LOSS',
+    exitPrice: 94.9,
+    totalPoints: -5.1,
+    parsedExitTime: new Date('2026-04-06T10:00:20.000Z'),
+    receivedAt: new Date('2026-04-06T10:00:22.000Z'),
+    timeframeFromPayload: '5m',
+  });
+
+  assert.equal(result.accepted, false);
+  assert.equal(result.rejectionCode, 'ignored_simultaneous_exit_with_entry');
+});
+
 test('assessExitSettlementCandidate ignores out-of-sequence EXIT before ENTRY', () => {
   const signal = {
     type: 'SELL',
