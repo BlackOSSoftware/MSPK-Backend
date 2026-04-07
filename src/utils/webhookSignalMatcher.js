@@ -81,9 +81,10 @@ export const selectWebhookSignalCandidate = ({
   }
 
   if (parsedEventTime instanceof Date && !Number.isNaN(parsedEventTime.getTime())) {
+    const eventTimeMs = parsedEventTime.getTime();
     const eligibleCandidates = candidates.filter((candidate) => {
       const startedAt = getWebhookSignalStartTimeMs(candidate);
-      return Number.isFinite(startedAt) && startedAt <= parsedEventTime.getTime();
+      return Number.isFinite(startedAt) && startedAt <= eventTimeMs;
     });
 
     if (eligibleCandidates.length === 1) {
@@ -105,10 +106,18 @@ export const selectWebhookSignalCandidate = ({
         }
       }
 
-      const latestStartedAt = Math.max(
-        ...eligibleCandidates.map((candidate) => getWebhookSignalStartTimeMs(candidate))
+      // During reversal bars, EXIT and new ENTRY can share the same timestamp.
+      // Prefer signals that existed strictly before the event timestamp so EXIT
+      // settles the prior leg instead of the freshly opened leg.
+      const strictlyEarlierCandidates = eligibleCandidates.filter(
+        (candidate) => getWebhookSignalStartTimeMs(candidate) < eventTimeMs
       );
-      const closestCandidates = eligibleCandidates.filter(
+      const candidatePool =
+        strictlyEarlierCandidates.length > 0 ? strictlyEarlierCandidates : eligibleCandidates;
+      const latestStartedAt = Math.max(
+        ...candidatePool.map((candidate) => getWebhookSignalStartTimeMs(candidate))
+      );
+      const closestCandidates = candidatePool.filter(
         (candidate) => getWebhookSignalStartTimeMs(candidate) === latestStartedAt
       );
 

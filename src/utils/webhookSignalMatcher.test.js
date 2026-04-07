@@ -119,3 +119,31 @@ test('selectWebhookSignalCandidate respects textual timeframe aliases from webho
   assert.equal(result.ambiguous, false);
   assert.equal(result.signal?._id, 'five-minute-buy');
 });
+
+test('selectWebhookSignalCandidate prefers an already-open leg when EXIT time equals new reversal entry time', () => {
+  const result = selectWebhookSignalCandidate({
+    signals: [
+      {
+        _id: 'older-buy',
+        type: 'BUY',
+        timeframe: '5m',
+        signalTime: '2026-03-20T10:25:00.000Z',
+        createdAt: '2026-03-20T10:25:02.000Z',
+        updatedAt: '2026-03-20T10:30:00.000Z',
+      },
+      {
+        _id: 'new-sell',
+        type: 'SELL',
+        timeframe: '5m',
+        signalTime: '2026-03-20T10:35:00.000Z',
+        createdAt: '2026-03-20T10:35:02.000Z',
+        updatedAt: '2026-03-20T10:35:03.000Z',
+      },
+    ],
+    eventTime: '2026-03-20T10:35:00.000Z',
+    timeframe: '5m',
+  });
+
+  assert.equal(result.ambiguous, false);
+  assert.equal(result.signal?._id, 'older-buy');
+});
