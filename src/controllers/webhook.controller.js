@@ -912,6 +912,47 @@ const receiveSignal = catchAsync(async (req, res) => {
 
     const parsedExitTime = parseWebhookDate(req.body.exit_time, webhookTimestampContext);
     const expectedType = resolveExitedSignalType(req.body.trade_type || req.body.tradeType);
+
+    // Upstream feed can emit ENTRY and EXIT at the same timestamp for the same symbol/timeframe
+    // while reusing webhook IDs across many scripts. Treat such coincident EXIT packets as
+    // transition noise so a fresh signal does not get churned immediately.
+    if (parsedExitTime instanceof Date && !Number.isNaN(parsedExitTime.getTime())) {
+      const coincidentWindowMs = 1500;
+      const nearExitStart = new Date(parsedExitTime.getTime() - coincidentWindowMs);
+      const nearExitEnd = new Date(parsedExitTime.getTime() + coincidentWindowMs);
+      const coincidentEntryFilter = {
+        ...TRADINGVIEW_SIGNAL_SOURCE_FILTER,
+        symbol,
+        ...(segment ? { segment } : {}),
+        status: { $in: ['Active', 'Open', 'Paused'] },
+        signalTime: { $gte: nearExitStart, $lte: nearExitEnd },
+      };
+      if (normalizedTimeframe) {
+        const timeframeScopedFilter = buildTimeframeQuery('timeframe', normalizedTimeframe);
+        if (timeframeScopedFilter) Object.assign(coincidentEntryFilter, timeframeScopedFilter);
+      }
+
+      const coincidentEntry = await Signal.findOne(coincidentEntryFilter).sort({ signalTime: -1, createdAt: -1, _id: -1 });
+      const coincidentEntryTime = parseSignalTimestamp(coincidentEntry?.signalTime);
+      if (
+        coincidentEntry &&
+        coincidentEntryTime instanceof Date &&
+        !Number.isNaN(coincidentEntryTime.getTime()) &&
+        receivedAt.getTime() - coincidentEntryTime.getTime() <= IMMEDIATE_EXIT_GUARD_MS
+      ) {
+        logger.warn(
+          `[WEBHOOK] EXIT ignored as coincident entry-exit noise symbol=${symbol} webhookId=${webhookId || 'NA'} ` +
+          `timeframe=${normalizedTimeframe || 'NA'} entrySignal=${coincidentEntry.id} exitTime=${parsedExitTime.toISOString()}`
+        );
+        return sendWebhookResponse(httpStatus.OK, {
+          status: 'ignored_coincident_entry_exit',
+          symbol,
+          timeframe: normalizedTimeframe || null,
+          signal: coincidentEntry,
+        });
+      }
+    }
+
     const { signal: existing, ambiguous } = await findSignalByWebhookId(webhookId, {
       eventTime: parsedExitTime || req.body.exit_time,
       expectedType,
