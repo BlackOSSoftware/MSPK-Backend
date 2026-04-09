@@ -158,6 +158,38 @@ test('isStopLossExitPriceConsistent rejects contaminated stoploss prices that ar
   );
 });
 
+test('isStopLossExitPriceConsistent rejects extreme stoploss outliers and non-positive prices', () => {
+  const signal = {
+    type: 'BUY',
+    entryPrice: 9118.5,
+    stopLoss: 9065.62,
+  };
+
+  assert.equal(
+    isStopLossExitPriceConsistent({
+      signal,
+      exitPrice: 0,
+    }),
+    false
+  );
+
+  assert.equal(
+    isStopLossExitPriceConsistent({
+      signal,
+      exitPrice: 8950,
+    }),
+    false
+  );
+
+  assert.equal(
+    isStopLossExitPriceConsistent({
+      signal,
+      exitPrice: 9064.9,
+    }),
+    true
+  );
+});
+
 test('normalizeExitWebhookPayload replaces suspicious stoploss payload fields with safe persisted values', () => {
   const signal = {
     symbol: 'BTCUSD',
@@ -370,4 +402,31 @@ test('assessExitSettlementCandidate accepts STOP_LOSS only when stop loss is act
 
   assert.equal(rejected.accepted, false);
   assert.equal(rejected.rejectionCode, 'ignored_exit_without_tp_sl_confirmation');
+});
+
+test('assessExitSettlementCandidate rejects stoploss exits with contaminated extreme price', () => {
+  const signal = {
+    type: 'BUY',
+    entryPrice: 9118.5,
+    stopLoss: 9065.62,
+    targets: {
+      target1: 9169.76,
+      target2: 9221.02,
+      target3: 9272.28,
+    },
+    signalTime: '2026-04-09T07:55:00.000Z',
+  };
+
+  const result = assessExitSettlementCandidate({
+    signal,
+    exitReason: 'STOP_LOSS',
+    exitPrice: 0,
+    totalPoints: -52.88,
+    parsedExitTime: new Date('2026-04-09T08:00:00.000Z'),
+    receivedAt: new Date('2026-04-09T08:00:00.000Z'),
+    timeframeFromPayload: '5m',
+  });
+
+  assert.equal(result.accepted, false);
+  assert.equal(result.rejectionCode, 'ignored_exit_without_tp_sl_confirmation');
 });

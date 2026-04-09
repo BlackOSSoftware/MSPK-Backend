@@ -225,6 +225,8 @@ const assessExitSettlementCandidate = ({
   const stopLossReached = signalService.hasSignalReachedStopLoss(signal, resolvedExitPrice);
   const rawStopLossReached =
     typeof rawExitPrice === 'number' ? signalService.hasSignalReachedStopLoss(signal, rawExitPrice) : false;
+  const rawStopLossPriceConsistent =
+    typeof rawExitPrice === 'number' ? isStopLossExitPriceConsistent({ signal, exitPrice: rawExitPrice }) : false;
   const isOutOfSequence =
     rawExitTime instanceof Date &&
     signalReferenceTime instanceof Date &&
@@ -276,7 +278,10 @@ const assessExitSettlementCandidate = ({
     };
   }
 
-  if (isStopReason && (rawStopLossReached || (typeof rawExitPrice !== 'number' && stopLossReached))) {
+  if (
+    isStopReason &&
+    ((rawStopLossReached && rawStopLossPriceConsistent) || (typeof rawExitPrice !== 'number' && stopLossReached))
+  ) {
     return {
       accepted: true,
       normalizedExitUpdate,
@@ -328,22 +333,35 @@ const getStopLossConsistencyTolerance = (signal) => {
   return Math.max(roundSignalValue(proportionalTolerance), roundSignalValue(priceTolerance), 0.05);
 };
 
+const getStopLossOutlierTolerance = (signal) => {
+  const entryPrice = toFiniteNumber(signal?.entryPrice);
+  const stopLoss = toFiniteNumber(signal?.stopLoss);
+  const stopGap =
+    typeof entryPrice === 'number' && typeof stopLoss === 'number' ? Math.abs(stopLoss - entryPrice) : 0;
+  const gapTolerance = stopGap > 0 ? stopGap * 1.1 : 0;
+  const proportionalTolerance = typeof stopLoss === 'number' ? Math.abs(stopLoss) * 0.005 : 0;
+  return Math.max(roundSignalValue(gapTolerance), roundSignalValue(proportionalTolerance), 1);
+};
+
 const isStopLossExitPriceConsistent = ({ signal, exitPrice }) => {
   const resolvedExitPrice = toFiniteNumber(exitPrice);
   const stopLoss = toFiniteNumber(signal?.stopLoss);
   if (typeof resolvedExitPrice !== 'number' || typeof stopLoss !== 'number') {
     return true;
   }
+  if (resolvedExitPrice <= 0) return false;
 
   const tolerance = getStopLossConsistencyTolerance(signal);
+  const outlierTolerance = getStopLossOutlierTolerance(signal);
   const signalType = String(signal?.type || 'BUY').trim().toUpperCase();
+  const distanceFromStop = Math.abs(resolvedExitPrice - stopLoss);
 
   if (signalType === 'SELL') {
-    return resolvedExitPrice >= stopLoss - tolerance;
+    return resolvedExitPrice >= stopLoss - tolerance && distanceFromStop <= outlierTolerance;
   }
 
   if (signalType === 'BUY') {
-    return resolvedExitPrice <= stopLoss + tolerance;
+    return resolvedExitPrice <= stopLoss + tolerance && distanceFromStop <= outlierTolerance;
   }
 
   return true;

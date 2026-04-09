@@ -27,6 +27,8 @@ const TARGET_LEVEL_RANK = TARGET_LEVEL_SEQUENCE.reduce((accumulator, level, inde
   accumulator[level] = index + 1;
   return accumulator;
 }, {});
+const AUTO_SETTLEMENT_SIGNAL_MIN_AGE_MS = 45 * 1000;
+const AUTO_SETTLEMENT_PRICE_STALENESS_MS = 2 * 60 * 1000;
 
 const runDetached = (label, task) => {
   setImmediate(async () => {
@@ -155,6 +157,18 @@ const buildAutoSignalSettlement = (signal, marketPrice, options = {}) => {
   if (typeof resolvedPrice !== 'number' || resolvedPrice <= 0) return null;
 
   const occurredAt = normalizeSignalTimestampInput(options.occurredAt) || new Date();
+  const signalStartAt = getLifecycleSignalStartDate(signal);
+  const minSignalAgeMs = Number.isFinite(options.minSignalAgeMs)
+    ? Math.max(0, Number(options.minSignalAgeMs))
+    : 0;
+  if (
+    minSignalAgeMs > 0 &&
+    signalStartAt instanceof Date &&
+    occurredAt.getTime() - signalStartAt.getTime() < minSignalAgeMs
+  ) {
+    return null;
+  }
+
   const resolvedOccurredAt = resolveAutoSettlementTime(signal, occurredAt, options);
   const finalTarget = getFinalSignalTarget(signal);
   const highestTargetLevel = getSignalHighestAchievedTargetLevel(signal, resolvedPrice);
@@ -1186,13 +1200,36 @@ const reconcileActiveSignalsWithMarketData = async (options = {}) => {
   }
 
   const updatedSignals = [];
+  const nowMs = Date.now();
 
   for (const signal of signals) {
-    const livePrice = toFiniteNumber(marketDataService.getBestLivePrice(signal.symbol, null, 0));
+    const quote = marketDataService.getBestQuote(signal.symbol, null);
+    const quoteTimestamp =
+      normalizeSignalTimestampInput(quote?.updatedAt) ||
+      normalizeSignalTimestampInput(quote?.timestamp) ||
+      normalizeSignalTimestampInput(quote?.lastPriceUpdatedAt) ||
+      null;
+    const signalStartAt = getLifecycleSignalStartDate(signal);
+
+    if (quoteTimestamp instanceof Date) {
+      if (signalStartAt instanceof Date && quoteTimestamp.getTime() < signalStartAt.getTime()) {
+        continue;
+      }
+
+      if (nowMs - quoteTimestamp.getTime() > AUTO_SETTLEMENT_PRICE_STALENESS_MS) {
+        continue;
+      }
+    }
+
+    const livePrice = toFiniteNumber(
+      quote?.last_price ?? quote?.price ?? marketDataService.getBestLivePrice(signal.symbol, null, 0)
+    );
     if (typeof livePrice !== 'number' || livePrice <= 0) continue;
 
     const updated = await reconcileSignalWithMarketPrice(signal, livePrice, {
       occurredAt: new Date(),
+      alignToTimeframe: false,
+      minSignalAgeMs: AUTO_SETTLEMENT_SIGNAL_MIN_AGE_MS,
       skipSideEffects,
       updateMessage: `Auto-reconciled from live market price ${roundSignalValue(livePrice)}.`,
     });

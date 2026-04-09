@@ -1521,6 +1521,7 @@ class MarketDataService extends EventEmitter {
                     bid: item.depth?.buy?.[0]?.price || this.currentQuotes[internalSymbol]?.bid || 0,
                     ask: item.depth?.sell?.[0]?.price || this.currentQuotes[internalSymbol]?.ask || 0,
                     volume: toNumber(item.volume, this.currentQuotes[internalSymbol]?.volume || 0),
+                    updatedAt: new Date(),
                 };
 
                 this._persistSymbolPrice(internalSymbol);
@@ -1724,6 +1725,8 @@ class MarketDataService extends EventEmitter {
 
             const quote = this.currentQuotes[targetSymbol];
             quote.last_price = lastPrice;
+            quote.updatedAt = normalizedTickTimestamp;
+            quote.timestamp = normalizedTickTimestamp;
 
             if (tick.ohlc) {
                 const prevOpen = toNumber(quote.ohlc.open, lastPrice);

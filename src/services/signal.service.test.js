@@ -91,3 +91,20 @@ test('buildAutoSignalSettlement keeps 1h auto-close times aligned to the local h
   assert.ok(settlement?.exitTime instanceof Date);
   assert.equal(settlement?.exitTime.toISOString(), '2026-04-03T02:30:00.000Z');
 });
+
+test('buildAutoSignalSettlement skips immediate settlement when minimum signal age is enforced', () => {
+  const settlement = buildAutoSignalSettlement(
+    {
+      ...sellSignal,
+      signalTime: '2026-03-20T17:40:00.000Z',
+    },
+    4591.41,
+    {
+      occurredAt: '2026-03-20T17:40:20.000Z',
+      alignToTimeframe: false,
+      minSignalAgeMs: 45 * 1000,
+    }
+  );
+
+  assert.equal(settlement, null);
+});
